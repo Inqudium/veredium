@@ -190,6 +190,7 @@ app:
       enabled: true                  # shipped ON, report only (code defaults: off / fail)
       fail-on-violation: false
       endpoints: {}
+    # user-agent: my-service/2.3     # the host's own token instead of veredium/<version>
   mesh: ...                          # the shared tree, see veredium-core/docs/mesh-timeout.md
 adapter-logging: ...                 # unchanged, read by legatium-restclient-logging
 logging:

@@ -271,9 +271,13 @@ class ResilientRestClientFactory(
                 .requestFactory(HttpComponentsClientHttpRequestFactory(httpClient))
                 // Host routes the sidecar to the upstream (from the triplet); set() (not add) so re-applying
                 // never accumulates values. Apache honours an explicit Host header - its own interceptor only
-                // adds one when none is present. Extra static headers are applied on top.
+                // adds one when none is present, and the same goes for User-Agent: the library's token
+                // (`veredium/<version>`) or the host's own (app.restclient.user-agent) replaces Apache's default
+                // so a peer's access log names what calls it. Extra static headers are applied on top, so an
+                // endpoint can override either.
                 .defaultHeaders { headers ->
                     headers.set(HttpHeaders.HOST, endpoint.host)
+                    headers.set(HttpHeaders.USER_AGENT, properties.effectiveUserAgent)
                     endpoint.headers.forEach { (name, value) -> headers.set(name, value) }
                 }.defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
                 // The backend name as a request attribute, set ONCE per client so every request carries it.

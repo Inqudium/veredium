@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.restclient
 
+import eu.inqudium.veredium.core.Veredium
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatCode
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -126,6 +127,33 @@ class RestClientPropertiesTest {
                     evictInBackground = Duration.ZERO,
                 )
             }.doesNotThrowAnyException()
+        }
+    }
+
+    @Nested
+    inner class UserAgent {
+        @Test
+        fun `should send the library's token by default`() {
+            // What/why: a host that says nothing names this library to its peers - `veredium/<version>`, the bare
+            //   name here where no manifest is on the classpath - never the transport's own default.
+            // Given / When / Then
+            assertThat(RestClientProperties().userAgent).isNull()
+            assertThat(RestClientProperties().effectiveUserAgent).isEqualTo(Veredium.userAgent())
+        }
+
+        @Test
+        fun `should let the host name itself instead`() {
+            // Given / When / Then: the configured value, trimmed, replaces the library's token verbatim
+            assertThat(RestClientProperties(userAgent = " my-service/2.3 ").effectiveUserAgent).isEqualTo("my-service/2.3")
+        }
+
+        @Test
+        fun `should reject a blank token at bind time, naming the key`() {
+            // Why it matters: a blank or CR/LF-carrying value is refused by the transport per request, with a
+            // message that points nowhere near the configuration.
+            assertThatThrownBy { RestClientProperties(userAgent = "  ") }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContaining("app.restclient.user-agent")
         }
     }
 }

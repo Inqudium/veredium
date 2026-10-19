@@ -44,6 +44,7 @@ app:
       enabled: true                  # shipped ON, report only (code defaults: off / fail)
       fail-on-violation: false
       endpoints: {}
+    # user-agent: my-service/2.3     # the host's own token instead of veredium/<version> (see §1.5)
 ```
 
 > **Shipped versus code default.** Two keys above ship a value that contradicts their code default, and
@@ -185,6 +186,17 @@ app:
 ```
 
 ---
+
+### 1.5 `user-agent` (`String?`, default `null` = the library's token)
+
+The `User-Agent` every client of the factory sends. Unset, it is the library's own token, `veredium/<version>`
+(`Veredium.userAgent()`, the version read from the jar manifest; the bare `veredium` outside a jar) - so a
+peer's access log names what called it rather than Reactor Netty's default. A host that is read per caller in
+those logs names itself instead: `user-agent: my-service/2.3` replaces the token verbatim, trimmed. An
+endpoint's static `headers` under `app.mesh` still win over either. Blank, or carrying a control character,
+is rejected at bind time naming the key (`Veredium.resolveUserAgent`), because the transport would otherwise
+refuse the header per request with a message that points nowhere near the configuration. The blocking client
+binds the same key under `app.restclient.user-agent`.
 
 ## 2. `app.mesh` — the per-endpoint tree (`MeshProperties`)
 

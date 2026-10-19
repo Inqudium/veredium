@@ -170,9 +170,13 @@ class ResilientWebClientFactory(
                 .baseUrl(endpoint.baseUrl)
                 .clientConnector(ReactorClientHttpConnector(httpClient))
                 // Host routes the sidecar to the upstream (from the triplet); set() (not add) so re-applying
-                // never accumulates values. Extra static headers are applied on top.
+                // never accumulates values. User-Agent is the library's token (`veredium/<version>`) or the
+                // host's own (app.webclient.user-agent), which Reactor Netty honours over its default, so a
+                // peer's access log names what calls it. Extra static headers are applied on top, so an
+                // endpoint can override either.
                 .defaultHeaders { headers ->
                     headers.set(HttpHeaders.HOST, endpoint.host)
+                    headers.set(HttpHeaders.USER_AGENT, properties.effectiveUserAgent)
                     endpoint.headers.forEach { (name, value) -> headers.set(name, value) }
                 }.defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
                 // The backend name as a request attribute, set ONCE per client so every request carries it.

@@ -23,4 +23,28 @@ public object Veredium {
     public fun userAgent(): String = userAgent(version)
 
     internal fun userAgent(version: String?): String = if (version.isNullOrBlank()) NAME else "$NAME/$version"
+
+    /**
+     * The `User-Agent` a client sends: [configured] when the host set one, else [userAgent]. A host overrides
+     * the library's token to name ITSELF to its peers - `my-service/2.3`, say - where an access log is read per
+     * caller rather than per library; the clients bind it under `app.restclient.user-agent` /
+     * `app.webclient.user-agent`.
+     *
+     * Validated at bind time, naming [key]: a blank value or one with a control character (CR, LF, a tab) is
+     * not a header value and would otherwise reach the transport, which rejects it per request with a message
+     * that names neither the key nor the file. Surrounding whitespace is trimmed.
+     *
+     * @throws IllegalArgumentException when [configured] is blank or carries a control character.
+     */
+    public fun resolveUserAgent(
+        configured: String?,
+        key: String,
+    ): String {
+        if (configured == null) return userAgent()
+        val token = configured.trim()
+        require(token.isNotEmpty() && token.none { it < ' ' || it == '\u007f' }) {
+            "$key must be a non-blank header value without control characters, but was '$configured'"
+        }
+        return token
+    }
 }

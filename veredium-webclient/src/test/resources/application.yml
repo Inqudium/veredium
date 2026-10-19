@@ -76,6 +76,9 @@ app:
     # WebClientResponseException reporting 200. That is a CLIENT-side refusal - the backend answered correctly -
     # so it does not count towards the circuit breaker; WebClientVerdicts discounts it.
     max-in-memory-size: 256KB
+    # The User-Agent every client sends. Unset = the library's token veredium/<version>; a host read per caller
+    # in its peers' access logs names itself instead (an endpoint's static headers under app.mesh still win).
+    # user-agent: my-service/2.3
     observability:
       # Whether Boot's ObservationRegistry stays on the cloned builder (client spans, the http.client.requests
       # timer, the outgoing traceparent) or is replaced by NOOP for these clients. The code default is OFF

@@ -6,6 +6,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.AppenderBase
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.aResponse
+import com.github.tomakehurst.wiremock.client.WireMock.equalTo
 import com.github.tomakehurst.wiremock.client.WireMock.equalToJson
 import com.github.tomakehurst.wiremock.client.WireMock.get
 import com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor
@@ -15,6 +16,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
+import eu.inqudium.veredium.core.Veredium
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import io.github.resilience4j.bulkhead.BulkheadConfig
@@ -170,6 +172,53 @@ class ResilientWebClientIntegrationTest {
             factories.forEach { it.shutdown() }
             factories.clear()
         }
+    }
+
+    @Test
+    fun `should send the Host header derived from the triplet and the library's User-Agent`() {
+        // What is tested: the headers the factory puts on every request of a client that an adapter never
+        //   sees - the Host header that routes the sidecar to the upstream, and the User-Agent token that
+        //   names this library to the peer.
+        // How success is judged: WireMock receives a request whose Host header is the triplet's host, whose
+        //   User-Agent is Veredium's token rather than Reactor Netty's default (the bare `veredium` here, since
+        //   the classes directory carries no manifest version), and which carries the Accept the clients
+        //   always send.
+        // Why it matters: Reactor Netty sets its own User-Agent when none is present; whether an explicit one
+        //   survives that is a property of the transport, and a peer's access log is the one place a library
+        //   can say who called.
+        //
+        // Given
+        wireMock.stubFor(get(urlEqualTo("/hosted")).willReturn(okJson("""{"message":"hi"}""")))
+        val client = newClient("hosted")
+
+        // When
+        client.get(Greeting::class.java) { it.uri("/hosted") }.block()
+
+        // Then
+        wireMock.verify(
+            getRequestedFor(urlEqualTo("/hosted"))
+                .withHeader("Host", equalTo("localhost"))
+                .withHeader("User-Agent", equalTo(Veredium.userAgent()))
+                .withHeader("Accept", equalTo(MediaType.APPLICATION_JSON_VALUE)),
+        )
+    }
+
+    @Test
+    fun `should send the host's own User-Agent when one is configured`() {
+        // What is tested: app.webclient.user-agent - a host naming itself to its peers instead of this library.
+        // How success is judged: WireMock receives the configured token verbatim, not the library's.
+        // Why it matters: the override exists for access logs read per caller; a value that quietly lost to the
+        //   library's token would make the configuration a no-op.
+        //
+        // Given
+        wireMock.stubFor(get(urlEqualTo("/named")).willReturn(okJson("""{"message":"hi"}""")))
+        val client = newClient("named", userAgent = "my-service/2.3")
+
+        // When
+        client.get(Greeting::class.java) { it.uri("/named") }.block()
+
+        // Then
+        wireMock.verify(getRequestedFor(urlEqualTo("/named")).withHeader("User-Agent", equalTo("my-service/2.3")))
     }
 
     @Test
@@ -921,6 +970,7 @@ class ResilientWebClientIntegrationTest {
         bulkhead: BulkheadConfig = BulkheadConfig.ofDefaults(),
         maxInMemorySize: DataSize = WebClientProperties().maxInMemorySize,
         meterRegistry: MeterRegistry? = null,
+        userAgent: String? = null,
         // Deliberately no Spring context here: a bare builder stands in for Boot's bean. A test that needs to
         // observe what the factory puts on its clients passes a builder carrying a filter of its own.
         webClientBuilder: WebClient.Builder = WebClient.builder(),
@@ -944,7 +994,7 @@ class ResilientWebClientIntegrationTest {
                     ),
             )
         return ResilientWebClientFactory(
-            WebClientProperties(maxInMemorySize = maxInMemorySize),
+            WebClientProperties(maxInMemorySize = maxInMemorySize, userAgent = userAgent),
             meshProperties,
             resilience,
             objectMapper,
@@ -992,7 +1042,8 @@ class ResilientWebClientIntegrationTest {
         bulkhead: BulkheadConfig = BulkheadConfig.ofDefaults(),
         maxInMemorySize: DataSize = WebClientProperties().maxInMemorySize,
         meterRegistry: MeterRegistry? = null,
-    ): ResilientWebClient = newFactory(backendName, timeLimiter, circuitBreaker, bulkhead, maxInMemorySize, meterRegistry).create(backendName)
+        userAgent: String? = null,
+    ): ResilientWebClient = newFactory(backendName, timeLimiter, circuitBreaker, bulkhead, maxInMemorySize, meterRegistry, userAgent).create(backendName)
 
     /**
      * A client whose factory received a builder carrying [registry] - the stand-in for what Boot's

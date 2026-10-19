@@ -384,6 +384,10 @@
                         <archive>
                             <manifest>
                                 <addDefaultEntries>false</addDefaultEntries>
+                                <!-- Implementation-Title/-Version/-Vendor from the POM only - reproducible, unlike the
+                                     default entries above - so Veredium.version reads the release from the jar and the
+                                     User-Agent token both clients send becomes `veredium/<version>`. -->
+                                <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
                             </manifest>
                         </archive>
                     </configuration>

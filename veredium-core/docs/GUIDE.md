@@ -28,6 +28,9 @@ on. It holds everything that is identical by construction between the blocking c
   the host's factory, its messages pinned to English;
 - the **HTTP observation report** (`eu.inqudium.veredium.core.observation`): the two startup
   lines that say what a stack's observation toggle achieves in the host at hand;
+- the library's **identity** (`Veredium`): its name, its manifest version and the `User-Agent`
+  token `veredium/<version>` both clients send on every request unless the host configures its
+  own (`Veredium.resolveUserAgent` validates it);
 - `BaseAdapter`: the two budgets an adapter over either client publishes to its callers,
   `timeLimiterTimeout` and `responseTimeout`, one contract for both stacks;
 - the **per-call log and validation** (`eu.inqudium.veredium.core.client`): `ClientCallLog`, the

@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the new `WebClientObservationReport`) - both written once instead of as a class in the blocking
   client and inline in the reactive factory. `ResilientWebClientFactory` loses its `environment` and
   `observationRegistry` constructor parameters; the report reads them instead.
+- Both clients send `Veredium.userAgent()` - `veredium/<version>` - as the `User-Agent` of every request,
+  replacing the transport's default; `app.restclient.user-agent` / `app.webclient.user-agent` lets a host
+  name itself instead (validated at bind time), and an endpoint's static `headers` can override either. The jar manifest
+  carries the POM-derived implementation entries so the token names the release (reproducible: no build
+  JDK or user enters the manifest).
 - `ClientCallLog` and `ResponseBodyMetrics` in `eu.inqudium.veredium.core.client`: the transport lines a client
   writes, the verdict-driven severity of its error line, the size sample, the Bean Validation of the decoded
   response and the UTF-8 size counter - identical private code in both clients until now, held once per

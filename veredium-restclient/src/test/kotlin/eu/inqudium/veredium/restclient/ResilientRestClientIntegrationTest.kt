@@ -17,6 +17,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.Options
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
+import eu.inqudium.veredium.core.Veredium
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
@@ -162,11 +163,14 @@ class ResilientRestClientIntegrationTest {
     }
 
     @Test
-    fun `should send the Host header derived from the triplet`() {
-        // What is tested: the header the factory puts on every request of a client that an adapter never
-        //   sees - the Host header that routes the sidecar to the upstream.
+    fun `should send the Host header derived from the triplet and the library's User-Agent`() {
+        // What is tested: the headers the factory puts on every request of a client that an adapter never
+        //   sees - the Host header that routes the sidecar to the upstream, and the User-Agent token that
+        //   names this library to the peer.
         // How success is judged: WireMock, listening on localhost, receives a request whose Host header names the
-        //   triplet's host, not localhost, and which carries the configured static header.
+        //   triplet's host, not localhost, whose User-Agent is Veredium's token rather than Apache's default
+        //   (the bare `veredium` here, since the classes directory carries no manifest version), and which
+        //   carries the Accept the clients always send.
         // Why this case is important: Apache HttpClient derives a Host header from the request URI on its own;
         //   whether an explicit one survives that is a property of the transport, not of this module's code, and
         //   the sidecar routes on nothing else. A transport change that dropped it would break every backend
@@ -192,8 +196,27 @@ class ResilientRestClientIntegrationTest {
         wireMock.verify(
             getRequestedFor(urlEqualTo("/hosted"))
                 .withHeader("Host", equalTo("api.example.com"))
+                .withHeader("User-Agent", equalTo(Veredium.userAgent()))
                 .withHeader("Accept", equalTo(MediaType.APPLICATION_JSON_VALUE)),
         )
+    }
+
+    @Test
+    fun `should send the host's own User-Agent when one is configured`() {
+        // What is tested: app.restclient.user-agent - a host naming itself to its peers instead of this library.
+        // How success is judged: WireMock receives the configured token verbatim, not the library's.
+        // Why it matters: the override exists for access logs read per caller; a value that quietly lost to the
+        //   library's token would make the configuration a no-op.
+        //
+        // Given
+        wireMock.stubFor(get(urlEqualTo("/named")).willReturn(okJson("""{"message":"hi"}""")))
+        val client = newClient("named", userAgent = "my-service/2.3")
+
+        // When
+        client.get(Greeting::class.java) { it.uri("/named") }
+
+        // Then
+        wireMock.verify(getRequestedFor(urlEqualTo("/named")).withHeader("User-Agent", equalTo("my-service/2.3")))
     }
 
     @Test
@@ -1225,6 +1248,7 @@ class ResilientRestClientIntegrationTest {
         meterRegistry: MeterRegistry? = null,
         meshProperties: MeshProperties = meshFor(backendName),
         validation: ResponseValidationProperties = ResponseValidationProperties(),
+        userAgent: String? = null,
         validatorFactory: ValidatorFactory? = null,
         // Deliberately no Spring context here: a bare builder stands in for Boot's bean. A test that needs to
         // observe what the factory puts on its clients passes a builder carrying an interceptor of its own.
@@ -1238,7 +1262,7 @@ class ResilientRestClientIntegrationTest {
                 BulkheadRegistry.of(bulkhead),
             ).also { decorators += it }
         return ResilientRestClientFactory(
-            RestClientProperties(maxInMemorySize = maxInMemorySize, validation = validation),
+            RestClientProperties(maxInMemorySize = maxInMemorySize, validation = validation, userAgent = userAgent),
             meshProperties,
             resilience,
             objectMapper,
@@ -1322,6 +1346,7 @@ class ResilientRestClientIntegrationTest {
         bulkhead: BulkheadConfig = BulkheadConfig.ofDefaults(),
         maxInMemorySize: DataSize = RestClientProperties().maxInMemorySize,
         meterRegistry: MeterRegistry? = null,
+        userAgent: String? = null,
     ): ResilientRestClient =
         newFactory(
             backendName,
@@ -1330,6 +1355,7 @@ class ResilientRestClientIntegrationTest {
             bulkhead = bulkhead,
             maxInMemorySize = maxInMemorySize,
             meterRegistry = meterRegistry,
+            userAgent = userAgent,
         ).create(backendName)
 
     /**

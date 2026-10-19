@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.core
 
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.NullAndEmptySource
@@ -55,5 +56,37 @@ class VerediumTest {
         // Given/When/Then
         assertThat(Veredium.version).isNull()
         assertThat(Veredium.userAgent()).isEqualTo("veredium")
+    }
+
+    @Test
+    fun `should resolve the library's token when the host configured none`() {
+        // What is tested: the default of the clients' user-agent property - null means the library names itself.
+        // Success criteria: the resolved token is exactly what userAgent() returns.
+        // Why it matters: a host that says nothing must not end up with an empty header or the transport's own.
+        // Given/When/Then
+        assertThat(Veredium.resolveUserAgent(null, "app.x.user-agent")).isEqualTo(Veredium.userAgent())
+    }
+
+    @Test
+    fun `should resolve a configured token verbatim, trimmed`() {
+        // What is tested: a host naming itself instead of the library.
+        // Success criteria: the configured value is returned with surrounding whitespace removed, nothing added.
+        // Why it matters: the token goes on the wire as the host wrote it - a library prefix nobody asked for
+        //   would defeat the purpose of overriding it.
+        // Given/When/Then
+        assertThat(Veredium.resolveUserAgent("  my-service/2.3 ", "app.x.user-agent")).isEqualTo("my-service/2.3")
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["", "   ", "my-service\r\nX-Injected: 1", "tab\tbed", "del\u007f"])
+    fun `should reject a blank or control-character token, naming the key`(configured: String) {
+        // What is tested: the bind-time check on a value the transport would otherwise refuse per request.
+        // Success criteria: an IllegalArgumentException whose message names the property key.
+        // Why it matters: a blank header or a CR/LF in it fails every call with a transport error that points
+        //   nowhere near the configuration; the key in the message is what the reader has to edit.
+        // Given/When/Then
+        assertThatThrownBy { Veredium.resolveUserAgent(configured, "app.x.user-agent") }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("app.x.user-agent")
     }
 }

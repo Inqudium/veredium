@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.restclient
 
+import eu.inqudium.veredium.core.Veredium
 import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.util.unit.DataSize
@@ -57,7 +58,19 @@ data class RestClientProperties(
      * with per-endpoint (backend-alias) overrides - the shared [ResponseValidationProperties] of `veredium-core`.
      */
     val validation: ResponseValidationProperties = ResponseValidationProperties(),
+    /**
+     * The `User-Agent` every client sends, when the host wants to name itself rather than this library.
+     * `null` (the default) sends the library's token `veredium/<version>` ([Veredium.userAgent]); a value
+     * replaces it verbatim, trimmed. An endpoint's static `headers` under `app.mesh` still win over either.
+     * Validated at bind time ([Veredium.resolveUserAgent]): blank or with a control character is rejected,
+     * naming the key, because Apache HttpClient would otherwise refuse the header per request with a message that
+     * points nowhere near the configuration.
+     */
+    val userAgent: String? = null,
 ) {
+    /** The token the factory puts on every request: [userAgent], or the library's own. */
+    val effectiveUserAgent: String = Veredium.resolveUserAgent(userAgent, "app.restclient.user-agent")
+
     init {
         // Both ends of this range are load-bearing.
         //
