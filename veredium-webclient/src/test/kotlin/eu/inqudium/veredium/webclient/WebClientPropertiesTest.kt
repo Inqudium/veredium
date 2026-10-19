@@ -29,7 +29,7 @@ class WebClientPropertiesTest {
             // How success is judged: binding throws, naming `app.webclient.max-in-memory-size`.
             // Why this case is important: this is the value whose misconfiguration is hardest to trace. Zero
             //   binds happily, and then every response exceeds the buffer and fails with a
-            //   DataBufferLimitException - the one exception ClientSideFailureIgnoreRegistrar keeps OFF the
+            //   DataBufferLimitException - the one exception WebClientVerdicts.clientSideFailure keeps OFF the
             //   circuit breaker on purpose. So every backend fails, no breaker opens, and the monitoring
             //   picture says "the backends are down". The guard is what keeps the diagnosis pointing at the
             //   configuration instead.

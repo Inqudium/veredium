@@ -94,10 +94,11 @@ import java.util.concurrent.Future
  * The breaker sits OUTSIDE the bulkhead, so a `BulkheadFullException` - this pipeline's own load shedding,
  * not a backend fault - reaches the breaker's error hook like any other error and would be counted as a
  * backend failure. Nothing in Resilience4j's defaults prevents that; it takes an explicit ignore predicate,
- * which the per-alias `CircuitBreakerConfigCustomizer` of `resilience/MeshResilienceCustomizers.kt` installs
- * while Resilience4j builds the instance from `resilience4j.circuitbreaker.instances.<alias>` - for every MESH
- * ALIAS, and only those. Without that customizer the invariant does not hold, and `MeshResilienceStartupGuard`
- * fails the start when it did not land. (The TimeLimiter unwraps the worker's `ExecutionException`, so the
+ * which the per-alias `CircuitBreakerConfigCustomizer` of veredium-core (`MeshResilienceCustomizers.kt`, fed
+ * with this stack's [RestClientVerdicts]) installs while Resilience4j builds the instance from
+ * `resilience4j.circuitbreaker.instances.<alias>` - for every MESH ALIAS, and only those. Without that
+ * customizer the invariant does not hold, and the core's `MeshResilienceStartupGuard` fails the start when it
+ * did not land. (The TimeLimiter unwraps the worker's `ExecutionException`, so the
  * breaker sees the rejection as itself, not as a wrapper - pinned by `BlockingResilienceDecoratorTest`.)
  *
  * ## Three verdicts, not two
@@ -107,8 +108,8 @@ import java.util.concurrent.Future
  *
  * | The call | Verdict | Source |
  * |---|---|---|
- * | never reached the backend, or the caller stopped waiting (`BulkheadFullException`, the buffer limit, `InterruptedException`) | **ignored** - evidence in neither direction | [ClientSideFailurePolicy] |
- * | reached it and got a benign 4xx | **success** - the backend answered, promptly and correctly | [HttpExchangeErrorPolicy] |
+ * | never reached the backend, or the caller stopped waiting (`BulkheadFullException`, the buffer limit, `InterruptedException`) | **ignored** - evidence in neither direction | [RestClientVerdicts.clientSideFailure] |
+ * | reached it and got a benign 4xx | **success** - the backend answered, promptly and correctly | [RestClientVerdicts.httpExchangeError] |
  * | anything else - transport faults, 5xx, 408/429, the TimeLimiter abort | **failure** | the config defaults |
  *
  * The middle row is the one that is easy to get wrong in the safe-looking direction. Ignoring a benign 4xx

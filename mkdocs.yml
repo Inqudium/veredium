@@ -42,7 +42,9 @@ nav:
   # Docs workflow; not checked in - run the script before building
   # locally, or the --strict build fails (which is the guard against a
   # hand-maintained, drifting copy).
-  - Core guide: guides/veredium-core/GUIDE.md
+  - Core (veredium-core):
+      - Guide: guides/veredium-core/GUIDE.md
+      - Mesh timeout ladder: guides/veredium-core/mesh-timeout.md
   - Blocking client (veredium-restclient):
       - Guide: guides/veredium-restclient/GUIDE.md
       - Timeouts, bulkheads and threads: guides/veredium-restclient/timeouts-bulkheads-threads.md
@@ -51,7 +53,6 @@ nav:
       - Decisions: guides/veredium-restclient/decisions.md
   - Reactive client (veredium-webclient):
       - Guide: guides/veredium-webclient/GUIDE.md
-      - Mesh timeout ladder: guides/veredium-webclient/mesh-timeout.md
       - Configuration guide: guides/veredium-webclient/webclient-config-guide.md
       - Metrics: guides/veredium-webclient/metrics.md
       - Logging guide: guides/veredium-webclient/logging-guide.md

@@ -17,8 +17,8 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.legatium.common.BodyLogMode
 import eu.inqudium.legatium.common.ClientLoggingProperties
 import eu.inqudium.legatium.restclient.logging.ClientLoggingAutoConfiguration
+import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.restclient.LegatiumExchangeLoggingIntegrationTest.Companion.SHIPPED_PREFIXES
-import eu.inqudium.veredium.restclient.mesh.MeshProperties
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig

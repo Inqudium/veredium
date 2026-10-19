@@ -1,7 +1,7 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
-import eu.inqudium.veredium.webclient.mesh.ResolvedTimeouts
+import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.github.resilience4j.reactor.timelimiter.TimeLimiterOperator
 import io.micrometer.core.instrument.DistributionSummary
 import jakarta.validation.ConstraintViolationException
@@ -53,10 +53,11 @@ interface BaseAdapter {
     val timeLimiterTimeout: Duration
 
     /**
-     * The WebClient/Netty response-receive timeout - the transport-level bound on waiting for the HTTP
-     * response, sitting just below [timeLimiterTimeout] as a backstop.
+     * The Reactor Netty response-receive timeout - the transport-level bound on waiting for the HTTP
+     * response, sitting just below [timeLimiterTimeout] as a backstop. The ladder's `responseTimeout` rung
+     * (`veredium-core`), the same number the blocking twin applies as Apache's response timeout.
      */
-    val webClientResponseTimeout: Duration
+    val responseTimeout: Duration
 }
 
 /**
@@ -127,7 +128,7 @@ class ResilientWebClient(
     private val nanoTime: () -> Long = System::nanoTime,
 ) {
     val pathTemplate: String get() = endpoint.pathTemplate
-    val webClientResponseTimeout: Duration get() = endpoint.webClientResponseTimeout
+    val responseTimeout: Duration get() = endpoint.responseTimeout
     val timeLimiterTimeout: Duration get() = resilience.requestBudget(backendName)
     private val logger: Logger = LoggerFactory.getLogger(ResilientWebClient::class.java)
 
@@ -210,11 +211,11 @@ class ResilientWebClient(
                 if (logger.isDebugEnabled) {
                     log(
                         Level.DEBUG,
-                        "Executing request to backend '{}' with responseType={} webClientResponseTimeout: {}ms," +
+                        "Executing request to backend '{}' with responseType={} responseTimeout: {}ms," +
                             " timeLimiterTimeout: {}ms and requestBody={}",
                         backendName,
                         responseType.simpleName,
-                        webClientResponseTimeout.toMillis(),
+                        responseTimeout.toMillis(),
                         timeLimiterTimeout.toMillis(),
                         requestBody?.take(100) ?: "null",
                     )
@@ -268,7 +269,7 @@ class ResilientWebClient(
      * On a violation the behaviour depends on [failOnViolation]:
      * - `true` (enforce): throws [ConstraintViolationException] carrying every violation, so the caller sees
      *   which field of which type broke the contract instead of a bare "invalid". The failure is NOT an
-     *   `HttpExchangeErrorPolicy.isExpectedClientError`, so it keeps full severity: a backend answering outside its
+     *   `WebClientVerdicts.httpExchangeError.isExpectedClientError`, so it keeps full severity: a backend answering outside its
      *   own published schema is an anomaly worth a WARN with its cause, not a business-as-usual outcome.
      * - `false` (report-only): logs the same detail at WARN and returns [value] unchanged, so a backend can be
      *   observed against real traffic before its violations are made fatal.
@@ -305,7 +306,7 @@ class ResilientWebClient(
         elapsedMillis: () -> Long,
     ) {
         // Severity follows the SAME classification as the circuit breaker's ignore predicate
-        // (HttpExchangeErrorPolicy.isExpectedClientError), so the two never disagree: a documented 4xx - which the
+        // (WebClientVerdicts.httpExchangeError.isExpectedClientError), so the two never disagree: a documented 4xx - which the
         // adapter contract declares as a normal outcome and the caller handles - is logged at DEBUG WITHOUT a
         // stack trace, everything else at WARN with one. Logging every non-2xx at ERROR made routine "not found"
         // answers indistinguishable from real outages. (legatium's exchange event classifies on its own terms: a
@@ -317,17 +318,17 @@ class ResilientWebClient(
         // unconditionally - so every benign 4xx carried a reactive stack trace again, the second half of exactly
         // the noise this classification removes. Pinned by
         // `ResilientWebClientIntegrationTest.should log a benign 4xx at DEBUG and without a stack trace`.
-        val expected = HttpExchangeErrorPolicy.isExpectedClientError(error)
+        val expected = WebClientVerdicts.httpExchangeError.isExpectedClientError(error)
         val level = if (expected) Level.DEBUG else Level.WARN
         log(
             level = level,
             msg =
-                "Error during request to backend '{}' with responseType={} webClientResponseTimeout: {}ms," +
+                "Error during request to backend '{}' with responseType={} responseTimeout: {}ms," +
                     " timeLimiterTimeout: {}ms duration so far: {}ms{}",
             cause = error.takeUnless { expected },
             backendName,
             responseType.simpleName,
-            webClientResponseTimeout.toMillis(),
+            responseTimeout.toMillis(),
             timeLimiterTimeout.toMillis(),
             elapsedMillis(),
             if (expected) " - expected client error: $error" else "",
@@ -352,7 +353,7 @@ class ResilientWebClient(
      * fired for the same call, but it names neither number.
      */
     private fun logIfBufferLimitExceeded(error: Throwable) {
-        if (!ClientSideFailurePolicy.isBufferLimitFailure(error)) return
+        if (!WebClientVerdicts.clientSideFailure.isBufferLimitFailure(error)) return
         val contentLength = (error as? WebClientResponseException)?.headers?.contentLength ?: -1L
         logger.warn(
             "Response body exceeded the codec buffer on backend '{}': limit={} bytes, Content-Length={}" +
@@ -390,11 +391,11 @@ class ResilientWebClient(
             level = Level.DEBUG,
             msg =
                 "Cancelled request to backend '{}' with responseType={} " +
-                    "webClientResponseTimeout: {}ms," +
+                    "responseTimeout: {}ms," +
                     " timeLimiterTimeout: {}ms duration so far: {}ms",
             backendName,
             responseType.simpleName,
-            webClientResponseTimeout.toMillis(),
+            responseTimeout.toMillis(),
             timeLimiterTimeout.toMillis(),
             elapsedMillis,
         )

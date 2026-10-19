@@ -1,8 +1,8 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
-import eu.inqudium.veredium.restclient.mesh.MeshProperties
-import eu.inqudium.veredium.restclient.mesh.ResolvedTimeouts
+import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.observation.ObservationRegistry
@@ -274,9 +274,11 @@ class ResilientRestClientFactory(
                 .requestFactory(HttpComponentsClientHttpRequestFactory(httpClient))
                 // Host routes the sidecar to the upstream (from the triplet); set() (not add) so re-applying
                 // never accumulates values. Apache honours an explicit Host header - its own interceptor only
-                // adds one when none is present.
-                .defaultHeaders { headers -> headers.set(HttpHeaders.HOST, endpoint.host) }
-                .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
+                // adds one when none is present. Extra static headers are applied on top.
+                .defaultHeaders { headers ->
+                    headers.set(HttpHeaders.HOST, endpoint.host)
+                    endpoint.headers.forEach { (name, value) -> headers.set(name, value) }
+                }.defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
                 // The backend name as a request attribute, set ONCE per client so every request carries it.
                 // An attribute, not a header: it names the client for legatium's exchange event (adapter_name
                 // and the `name` tag of its body meters) and never goes on the wire. The key is the library's

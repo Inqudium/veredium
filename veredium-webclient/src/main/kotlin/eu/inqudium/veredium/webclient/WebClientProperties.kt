@@ -63,7 +63,7 @@ data class WebClientProperties(
         // Both ends of this range are load-bearing.
         //
         // At the bottom: a zero or negative limit binds silently and then fails EVERY call with a
-        // DataBufferLimitException - which ClientSideFailureIgnoreRegistrar deliberately keeps off the circuit
+        // DataBufferLimitException - which WebClientVerdicts.clientSideFailure deliberately keeps off the circuit
         // breaker, so no breaker opens and the picture in monitoring is "all four backends are down" while the
         // cause is one line of YAML. The protection works against the diagnosis here, which is exactly why the
         // value must never get there.

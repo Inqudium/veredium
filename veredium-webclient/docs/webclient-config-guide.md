@@ -22,7 +22,7 @@ points anywhere but at the configuration.
 
 > **Where the per-endpoint config lives.** There is no `app.webclient.targets` tree. A backend's base URL, Host
 > header, path template and timeout ladder all come from its **one** `app.mesh.endpoints[]` entry (see
-> [mesh-timeout.md](mesh-timeout.md) for the derivation rationale). `app.webclient` keeps only the truly global
+> [mesh-timeout.md](../../veredium-core/docs/mesh-timeout.md) for the derivation rationale). `app.webclient` keeps only the truly global
 > knobs, plus response validation — which is per-backend but does not derive from the ladder.
 
 ---
@@ -588,7 +588,7 @@ resilience4j:                                  # §3 (instance keys = derived al
 
 ## See also
 
-- [mesh-timeout.md](mesh-timeout.md) — the mesh derivation and its R4j registration in depth.
+- [mesh-timeout.md](../../veredium-core/docs/mesh-timeout.md) — the mesh derivation and its R4j registration in depth.
 - [logging-guide.md](logging-guide.md) — the design of the former exchange diary, superseded by legatium (§0 there).
 - `legatium/docs/GUIDE.md` and `legatium-webclient-logging/docs/GUIDE.md` (outside this repository) — the library that writes the exchange event.
 - [metrics.md](metrics.md) — the emitted metrics and their cardinality.

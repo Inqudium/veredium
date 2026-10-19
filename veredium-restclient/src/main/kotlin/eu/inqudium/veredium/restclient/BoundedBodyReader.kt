@@ -8,7 +8,7 @@ import java.io.InputStream
  * reactive codec's `DataBufferLimitException`.
  *
  * The backend answered, and with a success status: this is a CLIENT-side refusal, which is why the circuit
- * breaker is told to discount it ([ClientSideFailurePolicy]) and why the one line that reports it names the
+ * breaker is told to discount it ([RestClientVerdicts.clientSideFailure]) and why the one line that reports it names the
  * configured limit ([ResilientRestClient]). [contentLength] is the `Content-Length` the response declared, or
  * `-1` when it declared none (chunked encoding) - a LOWER bound on the body, since the header is the wire size
  * and the body may have been compressed.
@@ -38,7 +38,7 @@ class ResponseBodyLimitExceededException(
  *  - [readTruncated] for an ERROR body, which is carried on the exception for diagnosis only: a body past the
  *    limit is cut, never rejected. A 5xx must stay a 5xx for the breaker whatever size its error page has, and
  *    truncating is what keeps the "oversized error body" case from ever carrying a client-side failure as its
- *    cause (see [ClientSideFailurePolicy.isClientSideFailure]).
+ *    cause (see [RestClientVerdicts.clientSideFailure]).
  *
  * The remainder of an over-limit body is NOT read here. Closing the response afterwards hands the stream back
  * to Apache HttpClient, which drains or discards the connection as its own rules dictate - that is the

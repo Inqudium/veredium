@@ -1,8 +1,8 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
-import eu.inqudium.veredium.webclient.mesh.MeshProperties
-import eu.inqudium.veredium.webclient.mesh.ResolvedTimeouts
+import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.observation.ObservationRegistry
@@ -236,7 +236,7 @@ class ResilientWebClientFactory(
      * would say so.
      */
     private val poolDisposeTimeout: Duration =
-        (meshByBackend.values.maxOfOrNull { it.webClientResponseTimeout } ?: Duration.ZERO)
+        (meshByBackend.values.maxOfOrNull { it.responseTimeout } ?: Duration.ZERO)
             .plusMillis(meshTransport.connectTimeoutMs + meshTransport.pendingAcquireTimeoutMs)
             .plusSeconds(1)
 
@@ -357,7 +357,7 @@ class ResilientWebClientFactory(
             .option(
                 ChannelOption.CONNECT_TIMEOUT_MILLIS,
                 meshTransport.connectTimeoutMs.toInt(),
-            ).responseTimeout(endpoint.webClientResponseTimeout)
+            ).responseTimeout(endpoint.responseTimeout)
             .compress(true)
             .keepAlive(true)
             // Pool metrics come from the shared ConnectionProvider; these add per-request transport

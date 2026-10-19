@@ -54,15 +54,15 @@ group, the fictional periodic table of **Inqudium**.
 
 | Module | Role | Root package |
 |---|---|---|
-| [`veredium-core`](veredium-core/README.md) | the client implementation | `eu.inqudium.veredium.core` |
+| [`veredium-core`](veredium-core/README.md) | the stack-neutral core both clients share: mesh timeout ladder, breaker verdicts, Resilience4j wiring | `eu.inqudium.veredium.core` |
 | [`veredium-restclient`](veredium-restclient/README.md) | the blocking client: Spring `RestClient` over Apache HttpClient 5, mesh timeout ladder, Resilience4j | `eu.inqudium.veredium.restclient` |
 | [`veredium-webclient`](veredium-webclient/README.md) | the reactive client: Spring `WebClient` over Reactor Netty, mesh timeout ladder, Resilience4j | `eu.inqudium.veredium.webclient` |
 
 ## Documentation
 
-- **[Core guide](veredium-core/docs/GUIDE.md)** — the long-form guide of the module.
+- **[Core guide](veredium-core/docs/GUIDE.md)** — `veredium-core`: what both clients share, and [the mesh timeout ladder](veredium-core/docs/mesh-timeout.md).
 - **[Blocking client guide](veredium-restclient/docs/GUIDE.md)** — `veredium-restclient`: the hand-off, the ladder, the bulkheads, metrics, what differs from the reactive sibling.
-- **[Reactive client guide](veredium-webclient/docs/GUIDE.md)** — `veredium-webclient`: the mesh timeout ladder, configuration, metrics, logging.
+- **[Reactive client guide](veredium-webclient/docs/GUIDE.md)** — `veredium-webclient`: configuration, metrics, logging.
 - **[Test evidence](https://inqudium.github.io/veredium/tests/test-evidence/)** — the generated
   inventory of the test suite: every test sentence plus its rationale.
 - **[Coverage report](https://inqudium.github.io/veredium/coverage/)** — the JaCoCo reports of

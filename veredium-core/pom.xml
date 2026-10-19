@@ -11,7 +11,14 @@
 
     <artifactId>veredium-core</artifactId>
     <name>veredium-core</name>
-    <description>Veredium core: the web client implementation</description>
+    <!--
+        The stack-neutral core both client modules build on: the mesh timeout ladder (app.mesh), the breaker verdicts
+        (benign 4xx, client-side failure) and the Resilience4j wiring that installs them (per-alias customizers, the
+        fail-fast startup guard). Nothing in here knows an HTTP stack - no RestClient, no WebClient, no transport -
+        which is what lets veredium-restclient and veredium-webclient share it instead of carrying a copy each
+        (docs/adr/ADR-0001-one-stack-neutral-core-module.md).
+    -->
+    <description>Veredium core: the mesh timeout ladder, the breaker verdicts and the Resilience4j wiring shared by both client stacks</description>
     <!-- Explicit, so the published POM carries the homepage itself. -->
     <url>https://github.com/Inqudium/veredium</url>
 
@@ -19,6 +26,23 @@
         <dependency>
             <groupId>org.jetbrains.kotlin</groupId>
             <artifactId>kotlin-stdlib</artifactId>
+        </dependency>
+        <!-- The Boot context: @ConfigurationProperties binding, @Configuration, the BeanRegistrar, ApplicationReadyEvent. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <!-- The Spring Boot 4 auto-configuration of the three Resilience4j registries the customizers and the guard
+             attach to: the *ConfigCustomizer extension point and the bound resilience4j.* property beans. -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot4</artifactId>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
         </dependency>
 
         <!-- JUnit 5, AssertJ and the Boot test support, like the sibling projects. -->

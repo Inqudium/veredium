@@ -34,7 +34,7 @@ of this module is the reference configuration the contract tests pin - a library
 
 ## Guides
 
-- [The mesh timeout ladder](mesh-timeout.md)
+- [The mesh timeout ladder](../../veredium-core/docs/mesh-timeout.md) (veredium-core)
 - [Configuration guide](webclient-config-guide.md)
 - [Metrics](metrics.md)
 - [Logging guide](logging-guide.md)

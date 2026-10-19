@@ -1,7 +1,7 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
-import eu.inqudium.veredium.restclient.mesh.ResolvedTimeouts
+import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.micrometer.core.instrument.DistributionSummary
 import jakarta.validation.ConstraintViolationException
 import jakarta.validation.Validator
@@ -317,7 +317,7 @@ class ResilientRestClient(
      * On a violation the behaviour depends on [failOnViolation]:
      * - `true` (enforce): throws [ConstraintViolationException] carrying every violation, so the caller sees
      *   which field of which type broke the contract instead of a bare "invalid". The failure is NOT an
-     *   `HttpExchangeErrorPolicy.isExpectedClientError`, so it keeps full severity: a backend answering outside its
+     *   `RestClientVerdicts.httpExchangeError.isExpectedClientError`, so it keeps full severity: a backend answering outside its
      *   own published schema is an anomaly worth a WARN with its cause, not a business-as-usual outcome.
      * - `false` (report-only): logs the same detail at WARN and returns [value] unchanged, so a backend can be
      *   observed against real traffic before its violations are made fatal.
@@ -353,7 +353,7 @@ class ResilientRestClient(
         elapsedMillis: () -> Long,
     ) {
         // Severity follows the SAME classification as the circuit breaker's record predicate
-        // (HttpExchangeErrorPolicy.isExpectedClientError), so the two never disagree: a documented 4xx - which the
+        // (RestClientVerdicts.httpExchangeError.isExpectedClientError), so the two never disagree: a documented 4xx - which the
         // adapter contract declares as a normal outcome and the caller handles - is logged at DEBUG WITHOUT a
         // stack trace, everything else at WARN with one. Logging every non-2xx at ERROR made routine "not found"
         // answers indistinguishable from real outages. (legatium's exchange event classifies on its own terms: a
@@ -362,7 +362,7 @@ class ResilientRestClient(
         // The cause is attached ONLY to the unexpected branch: a benign 4xx must not carry a stack trace that
         // explains nothing the status and URL do not. Pinned by
         // `ResilientRestClientIntegrationTest.should log a benign 4xx at DEBUG and without a stack trace`.
-        val expected = HttpExchangeErrorPolicy.isExpectedClientError(error)
+        val expected = RestClientVerdicts.httpExchangeError.isExpectedClientError(error)
         val level = if (expected) Level.DEBUG else Level.WARN
         log(
             level = level,
@@ -397,7 +397,7 @@ class ResilientRestClient(
      * fired for the same call, but it names neither number.
      */
     private fun logIfBufferLimitExceeded(error: Throwable) {
-        if (!ClientSideFailurePolicy.isBufferLimitFailure(error)) return
+        if (!RestClientVerdicts.clientSideFailure.isBufferLimitFailure(error)) return
         val contentLength =
             generateSequence(error) { it.cause.takeIf { cause -> cause !== it } }
                 .filterIsInstance<ResponseBodyLimitExceededException>()

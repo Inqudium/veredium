@@ -429,4 +429,4 @@ What each bound produces, for the caller, the breaker, the exchange event and th
   budget interrupts its waiting thread and gets the cancellation semantics of §5.3.
 
 **Related:** [metrics guide](metrics.md) · [what differs from the reactive twin](restclient-vs-webclient.md) ·
-[mesh ladder derivation (web-client)](../../veredium-webclient/docs/mesh-timeout.md).
+[mesh ladder derivation (veredium-core)](../../veredium-core/docs/mesh-timeout.md).

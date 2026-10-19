@@ -9,7 +9,9 @@ records what the envoy's call came to; Veredium is the ride itself.
 
 | Module | Role | Root package |
 |---|---|---|
-| `veredium-core` | the client implementation | `eu.inqudium.veredium.core` |
+| `veredium-core` | the stack-neutral core both clients share: mesh timeout ladder, breaker verdicts, Resilience4j wiring | `eu.inqudium.veredium.core` |
+| `veredium-restclient` | the blocking client: Spring `RestClient` over Apache HttpClient 5 | `eu.inqudium.veredium.restclient` |
+| `veredium-webclient` | the reactive client: Spring `WebClient` over Reactor Netty | `eu.inqudium.veredium.webclient` |
 
 ## Quick start
 

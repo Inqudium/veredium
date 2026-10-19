@@ -31,9 +31,9 @@ REPO = Path(__file__).resolve().parents[2]
 DOCS = REPO / "docs"
 OUT_BASE = DOCS / "guides"
 MODULE_DOCS = {
-    "veredium-core": ["GUIDE.md"],
+    "veredium-core": ["GUIDE.md", "mesh-timeout.md"],
     "veredium-restclient": ["GUIDE.md", "timeouts-bulkheads-threads.md", "metrics.md", "restclient-vs-webclient.md", "decisions.md"],
-    "veredium-webclient": ["GUIDE.md", "mesh-timeout.md", "webclient-config-guide.md", "metrics.md", "logging-guide.md"],
+    "veredium-webclient": ["GUIDE.md", "webclient-config-guide.md", "metrics.md", "logging-guide.md"],
 }
 # A guide shared by several modules would live in the docs_dir itself (docs/GUIDE.md), render on
 # GitHub with relative links to the module guides and READMEs, be excluded from the build

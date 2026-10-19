@@ -15,8 +15,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
-import eu.inqudium.veredium.webclient.mesh.MeshProperties
-import eu.inqudium.veredium.webclient.resilience.ResilienceAmendmentApplier
+import eu.inqudium.veredium.core.mesh.MeshProperties
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException
@@ -453,12 +452,9 @@ class ResilientWebClientIntegrationTest {
                 // Deliberately no Spring context here: a bare builder stands in for Boot's bean.
                 webClientBuilder = WebClient.builder(),
             ).also { factories += it }.create(backendName)
-        // The rule lives in this contributor, so it has to have been applied - as it is at startup.
-        ResilienceAmendmentApplier.applyOnce(
-            circuitBreakerRegistry,
-            TimeLimiterRegistry.ofDefaults(),
-            ClientSideFailureIgnoreRegistrar(meshProperties),
-        )
+        // The verdict is installed by the mesh customizer while Resilience4j builds the instance - applied here
+        // the way the Boot configuration applies it at startup.
+        CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, meshProperties)
 
         // When: five calls all trip the buffer limit
         repeat(5) {
@@ -677,7 +673,7 @@ class ResilientWebClientIntegrationTest {
         //   attaching one here produced two per business case - for an exception whose reactive stack explains
         //   nothing that the status and URL do not. The three consumers derive from ONE predicate precisely so
         //   this line and the diary cannot disagree; the diary end is pinned in
-        //   ExpectedClientErrorSuccessRegistrarTest.SharedClassification.
+        //   WebClientVerdictsTest.
 
         // When: the backend answers "not found"
         val line = errorLineFor(status = 404, backendName = "benign-4xx")

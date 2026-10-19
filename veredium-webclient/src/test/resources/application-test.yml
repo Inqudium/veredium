@@ -78,7 +78,7 @@ app:
     #
     # A response that exceeds it fails the call with a DataBufferLimitException, wrapped by Spring into a
     # WebClientResponseException reporting 200. That is a CLIENT-side refusal - the backend answered correctly -
-    # so it does not count towards the circuit breaker; ClientSideFailureIgnoreRegistrar discounts it.
+    # so it does not count towards the circuit breaker; WebClientVerdicts discounts it.
     max-in-memory-size: 256KB
     # Whether a deserialised response is checked against its DTO's Bean Validation constraints. Default OFF,
     # because the constraints are generated from the published OpenAPI specs and those are stricter than
@@ -154,20 +154,39 @@ app:
         individual-request-timeout-ms: 400
 
 resilience4j:
+  # TimeLimiter, Bulkhead and CircuitBreaker are declared for EVERY backend below. All three primitives sit in
+  # the call path unconditionally (ReactiveResilienceDecorator applies all three, regardless of the app.mesh
+  # toggles), so leaving one undeclared does not mean "off" - it means that backend silently runs on
+  # Resilience4j's own defaults, at values nobody had chosen and nothing documented. The instance keys are the
+  # mesh-derived aliases and must stay in sync with the adapters' ALIAS constants (pinned by
+  # ResilienceConfigContractTest).
+  #
+  # The TimeLimiter entries have a second job: Resilience4j's Boot configuration materialises exactly the
+  # `instances.<name>` listed here, and the mesh customizer (veredium-core, MeshResilienceCustomizers) sets the
+  # derived budget on every endpoint whose time-limiter toggle is on (the default) WHILE that instance is built.
+  # An alias an endpoint uses but this block does not declare still gets an instance (Resilience4j creates one
+  # for the customizer) - on the registry default, not on lap-backend, silently; MeshResilienceStartupGuard
+  # therefore fails the start and names the missing key. This file once declared a single instance here;
+  # MeshResilienceShippedConfigTest boots the auto-configuration against it.
   timelimiter:
-    instances:
-      # Pinned to 3s under the derived alias; mesh removes + recreates it with the derived timeout, so the
-      # value below is only the R4j default until mesh registers. See docs/mesh-timeout.md.
-      api-example-com-GET-v5-access-profiles-by-involved-party:
+    configs:
+      lap-backend:
+        # A fallback only: the mesh customizer sets every enabled instance to the derived timeout (see
+        # veredium-core/docs/mesh-timeout.md), so 3s is only the fallback for an endpoint whose time-limiter
+        # toggle is switched off. cancel-running-future is the Resilience4j default, written out so the budget
+        # expiry visibly cancels the subscription rather than letting the call run on.
         timeout-duration: 3s
         cancel-running-future: true
+    instances:
+      apis-example-com-POST-v8-agreements-products-lookup:
+        base-config: lap-backend
+      api-example-com-GET-v5-access-profiles-by-involved-party:
+        base-config: lap-backend
+      apis-example-com-POST-v5-involved-parties-lookup:
+        base-config: lap-backend
+      apis-example-com-GET-v6-involved-parties:
+        base-config: lap-backend
 
-  # Bulkhead and CircuitBreaker are declared for EVERY backend below. Both primitives sit in the call path
-  # unconditionally (ReactiveResilienceDecorator applies all three, regardless of the app.mesh toggles), so
-  # leaving them undeclared did not mean "off" - it meant every backend silently ran on Resilience4j's own
-  # defaults, at values nobody had chosen and nothing documented. The instance keys are the mesh-derived
-  # aliases and must stay in sync with the adapters' ALIAS constants (pinned by ResilienceConfigContractTest).
-  #
   # The values below are the Resilience4j defaults, written out DELIBERATELY: making them visible and
   # reviewable is the point, and pinning them here means a library upgrade cannot change this application's
   # behaviour behind its back. Tune them against real traffic - the notes say what each one costs.
@@ -198,10 +217,9 @@ resilience4j:
   circuitbreaker:
     configs:
       lap-backend:
-        # NOTE: a bulkhead rejection is NOT counted as a backend failure - see
-        # ClientSideFailureIgnoreRegistrar, which adds BulkheadFullException to the ignore list of every
-        # instance below at startup. That invariant lives in code on purpose, so it cannot be lost by an edit
-        # to this block.
+        # NOTE: a bulkhead rejection is NOT counted as a backend failure - see WebClientVerdicts, whose
+        # client-side-failure verdict the mesh customizer installs on every instance below while Resilience4j
+        # builds it. That invariant lives in code on purpose, so it cannot be lost by an edit to this block.
         failure-rate-threshold: 50
         sliding-window-type: COUNT_BASED
         # CAVEAT worth knowing before relying on this breaker: COUNT_BASED with a minimum of 100 means it

@@ -32,7 +32,7 @@ data class RestClientProperties(
      * The bound is therefore enforced by [ResilientRestClient] itself, which reads the body through a bounded
      * buffer and fails the call with a [ResponseBodyLimitExceededException] once the limit is passed - the
      * counterpart of the reactive codec's `DataBufferLimitException`, and discounted by the circuit breaker for
-     * the same reason (see `ClientSideFailurePolicy`).
+     * the same reason (see `RestClientVerdicts.clientSideFailure`).
      *
      * **Why 256 KB and not less.** This is the WebClient twin's ceiling, kept so that the two modules size their
      * buffers identically against the same backends: on 2026-08-07 one access-profile response exceeded the 8 KB
@@ -67,7 +67,7 @@ data class RestClientProperties(
         // Both ends of this range are load-bearing.
         //
         // At the bottom: a zero or negative limit binds silently and then fails EVERY call with a
-        // ResponseBodyLimitExceededException - which ClientSideFailurePolicy deliberately keeps off the
+        // ResponseBodyLimitExceededException - which RestClientVerdicts.clientSideFailure deliberately keeps off the
         // circuit breaker, so no breaker opens and the picture in monitoring is "all four backends are down"
         // while the cause is one line of YAML. The protection works against the diagnosis here, which is exactly
         // why the value must never get there.

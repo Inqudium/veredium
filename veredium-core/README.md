@@ -1,6 +1,8 @@
 # veredium-core
 
-The core module of [Veredium](../README.md): the web client implementation.
+The core module of [Veredium](../README.md): the stack-neutral part both client modules share - the mesh
+timeout ladder (`app.mesh`), the breaker verdicts and the Resilience4j customizer wiring. A host gets it
+transitively with `veredium-restclient` or `veredium-webclient`.
 
 ## Usage
 

@@ -17,8 +17,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.Options
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
-import eu.inqudium.veredium.restclient.mesh.MeshProperties
-import eu.inqudium.veredium.restclient.resilience.CustomizedRegistries
+import eu.inqudium.veredium.core.mesh.MeshProperties
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException
@@ -529,7 +528,7 @@ class ResilientRestClientIntegrationTest {
         // Then
         assertThat(failure).isInstanceOf(HttpServerErrorException.InternalServerError::class.java)
         assertThat((failure as RestClientResponseException).responseBodyAsByteArray).hasSize(200)
-        assertThat(ClientSideFailurePolicy.isClientSideFailure(failure)).isFalse()
+        assertThat(RestClientVerdicts.clientSideFailure.isClientSideFailure(failure)).isFalse()
     }
 
     @Test

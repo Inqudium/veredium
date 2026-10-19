@@ -1,0 +1,130 @@
+# The test fixture of veredium-core: the two blocks the shared wiring reads - app.mesh (the ladder) and
+# resilience4j.* (the registries the customizers and the startup guard attach to) - in the shape a host ships
+# them. Test-owned: MeshApplicationYmlBindingTest pins the endpoint set and MeshResilienceContextTest boots
+# Resilience4j's auto-configuration on it. The client modules carry the same blocks in their own fixtures,
+# next to their stack-specific configuration.
+app:
+  mesh:
+    # app.mesh.defaults is omitted: every endpoint sets its own measured anchor, and the policy knobs
+    # (max-retries, margins {global-margin-ms, ...}, transport) default in Kotlin. Add a defaults block only to tune.
+    endpoints:
+      - triplet: "/endpoint/apis.example.com/POST/v8/agreements/products/lookup"
+        individual-request-timeout-ms: 400
+      - triplet: "/endpoint/api.example.com/GET/v5/access-profiles/by-involved-party/{id}"
+        individual-request-timeout-ms: 300
+      - triplet: "/endpoint/apis.example.com/POST/v5/involved-parties/lookup"
+        individual-request-timeout-ms: 500
+      - triplet: "/endpoint/apis.example.com/GET/v6/involved-parties/{uuid}"
+        individual-request-timeout-ms: 400
+
+resilience4j:
+  # TimeLimiter, Bulkhead and CircuitBreaker are declared for EVERY backend below. All three primitives sit in
+  # the call path unconditionally (each stack's decorator applies all three, regardless of the app.mesh
+  # toggles), so leaving one undeclared does not mean "off" - it means that backend silently runs on
+  # Resilience4j's own defaults, at values nobody had chosen and nothing documented. The instance keys are the
+  # mesh-derived aliases: the startup guard fails the context when one is missing.
+  #
+  # The TimeLimiter entries have a second job: Resilience4j's Boot configuration materialises exactly the
+  # `instances.<name>` listed here, and the mesh customizer (MeshResilienceCustomizers) sets the derived budget
+  # on every endpoint whose time-limiter toggle is on (the default) WHILE that instance is built. An alias an
+  # endpoint uses but this block does not declare still gets an instance (Resilience4j creates one for the
+  # customizer) - on the registry default, not on lap-backend, silently; MeshResilienceStartupGuard therefore
+  # fails the start and names the missing key. MeshResilienceShippedConfigTest boots the auto-configuration
+  # against this file.
+  timelimiter:
+    configs:
+      lap-backend:
+        # A fallback only: the mesh customizer sets every enabled instance to
+        # the derived timeout (see docs/mesh-timeout.md), so 3s is only the fallback for an
+        # endpoint whose time-limiter toggle is switched off. cancel-running-future is the Resilience4j default,
+        # written out because the blocking stack's decorator relies on it: the budget expiry must interrupt the
+        # worker, or the call would run on after its caller was released.
+        timeout-duration: 3s
+        cancel-running-future: true
+    instances:
+      apis-example-com-POST-v8-agreements-products-lookup:
+        base-config: lap-backend
+      api-example-com-GET-v5-access-profiles-by-involved-party:
+        base-config: lap-backend
+      apis-example-com-POST-v5-involved-parties-lookup:
+        base-config: lap-backend
+      apis-example-com-GET-v6-involved-parties:
+        base-config: lap-backend
+
+  # The values below are the Resilience4j defaults, written out DELIBERATELY: making them visible and
+  # reviewable is the point, and pinning them here means a library upgrade cannot change this application's
+  # behaviour behind its back. Tune them against real traffic - the notes say what each one costs.
+  bulkhead:
+    configs:
+      lap-backend:
+        # Bound by the SHARED connection pool, not chosen per backend: every endpoint talks to the same local
+        # sidecar through one Apache HttpClient pool of app.mesh.defaults.transport.max-connections (100). With
+        # four backends, 4 x 25 = 100 - the bulkheads shed load exactly as the pool runs out, rather than
+        # letting callers pile up on pendingAcquire. Raising this without raising max-connections moves the
+        # queueing into the pool, where pending-acquire-timeout-ms (200) fails them anyway, only later and
+        # with a less obvious error. A host should keep sum(max-concurrent-calls) <=
+        # max-connections.
+        max-concurrent-calls: 25
+        # Fail fast rather than queue: the same choice the mesh transport already makes for the pool. A
+        # waiting caller burns its TimeLimiter budget (1.1-1.6s per the derived ladder) doing nothing.
+        max-wait-duration: 0
+        #
+        # ROLE: these bulkheads are a POOL PARTITION and a BACKSTOP - not a load-steering mechanism. They exist
+        # so one hot alias cannot starve the other three out of the shared 100-connection pool, and so
+        # exhaustion surfaces as an immediate, named BulkheadFullException rather than as pending-acquire
+        # queueing. Callers are expected to bound their own concurrency BEFORE reaching here, dimensioned
+        # against this very number (one logical operation may occupy one slot in each of two aliases at the
+        # same instant).
+        #
+        # A BulkheadFullException on a known path is therefore a SIGNAL, not the design working: it says that
+        # the caller's own bound is mis-sized, or that a second caller in the same JVM is consuming more of the
+        # alias than assumed. Raising this value is the wrong first response; sum(max-concurrent-calls) <=
+        # max-connections is the invariant, and raising it here without raising the pool just moves the
+        # queueing. The decision this inherits is recorded in veredium-restclient/docs/decisions.md (D1).
+    instances:
+      apis-example-com-POST-v8-agreements-products-lookup:
+        base-config: lap-backend
+      api-example-com-GET-v5-access-profiles-by-involved-party:
+        base-config: lap-backend
+      apis-example-com-POST-v5-involved-parties-lookup:
+        base-config: lap-backend
+      apis-example-com-GET-v6-involved-parties:
+        base-config: lap-backend
+
+  circuitbreaker:
+    configs:
+      lap-backend:
+        # NOTE: a bulkhead rejection is NOT counted as a backend failure - see ClientSideFailurePolicy, which
+        # the mesh customizer installs on every instance below while Resilience4j builds it. That invariant
+        # lives in code on purpose, so it cannot be lost by an edit to this block.
+        #
+        # SCOPE: every MESH ALIAS, and only those. One customizer exists per meshProperties.resolveAll() alias,
+        # so they reach exactly the instances listed under `instances:` below. Breakers a host constructs
+        # elsewhere do NOT inherit this invariant and must carry their own ignore list; see veredium-restclient/docs/decisions.md
+        # (D1).
+        failure-rate-threshold: 50
+        sliding-window-type: COUNT_BASED
+        # CAVEAT worth knowing before relying on this breaker: COUNT_BASED with a minimum of 100 means it
+        # cannot open until 100 calls have been recorded in the window. On a low-traffic backend that point
+        # may be reached rarely or never, so the breaker is closer to dormant than to protective. Kept at the
+        # default because choosing a smaller window is a traffic-dependent decision and needs real numbers;
+        # a TIME_BASED window is the usual answer once they exist.
+        sliding-window-size: 100
+        minimum-number-of-calls: 100
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 10
+        # The slow-call detector is INERT here, and deliberately so: the TimeLimiter already cancels every
+        # call at the mesh-derived budget (~1.1-1.6s), so nothing survives long enough to reach a 60s slow-call
+        # threshold. Mesh can derive a meaningful threshold instead - that is what app.mesh's per-endpoint
+        # circuit-breaker.enabled toggle switches on (default off); it then also pins the rate to 100%.
+        slow-call-rate-threshold: 100
+        slow-call-duration-threshold: 60s
+    instances:
+      apis-example-com-POST-v8-agreements-products-lookup:
+        base-config: lap-backend
+      api-example-com-GET-v5-access-profiles-by-involved-party:
+        base-config: lap-backend
+      apis-example-com-POST-v5-involved-parties-lookup:
+        base-config: lap-backend
+      apis-example-com-GET-v6-involved-parties:
+        base-config: lap-backend
