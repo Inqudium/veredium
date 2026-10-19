@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the new `WebClientObservationReport`) - both written once instead of as a class in the blocking
   client and inline in the reactive factory. `ResilientWebClientFactory` loses its `environment` and
   `observationRegistry` constructor parameters; the report reads them instead.
+- `ClientCallLog` and `ResponseBodyMetrics` in `eu.inqudium.veredium.core.client`: the transport lines a client
+  writes, the verdict-driven severity of its error line, the size sample, the Bean Validation of the decoded
+  response and the UTF-8 size counter - identical private code in both clients until now, held once per
+  client as one object. The log lines and their fields are unchanged.
 - `BaseAdapter` moves to `eu.inqudium.veredium.core`: the two budgets an adapter publishes are the same two
   numbers on both stacks, so a host composes them from one type. The reactive copy's KDoc had the order of
   the two timeouts inverted; the shared one states the ladder's.

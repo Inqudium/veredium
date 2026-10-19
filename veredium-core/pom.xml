@@ -45,6 +45,11 @@
             <groupId>jakarta.validation</groupId>
             <artifactId>jakarta.validation-api</artifactId>
         </dependency>
+        <!-- DistributionSummary, the response-size sample ClientCallLog records per call. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
         <!-- The caller's current observation, which BlockingResilienceDecorator reopens on its worker thread. -->
         <dependency>
             <groupId>io.micrometer</groupId>

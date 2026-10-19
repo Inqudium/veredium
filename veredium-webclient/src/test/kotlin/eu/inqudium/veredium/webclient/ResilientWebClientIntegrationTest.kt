@@ -15,6 +15,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
+import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadRegistry
@@ -365,13 +366,13 @@ class ResilientWebClientIntegrationTest {
         val summary =
             registry
                 .find(WebClientMetrics.RESPONSE_BODY_SIZE)
-                .tag(WebClientMetrics.ADAPTER_TAG, "sized")
+                .tag(ResponseBodyMetrics.ADAPTER_TAG, "sized")
                 .summary()
         assertThat(summary).isNotNull()
         assertThat(summary!!.count()).isEqualTo(1)
         assertThat(summary.max()).isEqualTo(body.toByteArray(Charsets.UTF_8).size.toDouble())
         assertThat(summary.max()).isGreaterThan(body.length.toDouble())
-        assertThat(summary.id.baseUnit).isEqualTo(WebClientMetrics.RESPONSE_BODY_BASE_UNIT)
+        assertThat(summary.id.baseUnit).isEqualTo(ResponseBodyMetrics.BASE_UNIT)
     }
 
     @Test

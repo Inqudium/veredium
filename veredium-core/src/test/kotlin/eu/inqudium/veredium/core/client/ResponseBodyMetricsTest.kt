@@ -1,4 +1,4 @@
-package eu.inqudium.veredium.restclient
+package eu.inqudium.veredium.core.client
 
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Nested
@@ -7,11 +7,10 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
 
 /**
- * Tests for [RestClientMetrics]. The reactive twin's URI->template mapper has no counterpart here (the class KDoc
- * says why), so what remains to pin is the one computation the module makes on the hot path: the UTF-8 size of a
- * body, which is what `app.restclient.max-in-memory-size` gets sized from.
+ * Tests for [ResponseBodyMetrics]: the one computation both clients make on the hot path, the UTF-8 size of a
+ * body, which is what their `max-in-memory-size` gets sized from.
  */
-class RestClientMetricsTest {
+class ResponseBodyMetricsTest {
     @Nested
     inner class Utf8SizeMatchesTheJdkEncoder {
         @ParameterizedTest
@@ -32,13 +31,13 @@ class RestClientMetricsTest {
             // How success is judged: equality against the JDK encoder itself, not against numbers written out
             //   by hand - a hand-written expectation would only pin my arithmetic, which is the thing under
             //   test.
-            // Why this case is important: this number is what `app.restclient.max-in-memory-size` gets sized
-            //   from, and the bounded reader measures the same body in the same unit. A counter that drifts
+            // Why this case is important: this number is what the stack's `max-in-memory-size` gets sized
+            //   from, and the bounded reader respectively the codec measures the same body in the same unit. A counter that drifts
             //   from the encoder would make the meter disagree with the limit it exists to inform - the values
             //   span every UTF-8 width (1, 2, 3 bytes) and both surrogate halves for that reason.
             //
             // Given / When / Then
-            assertThat(RestClientMetrics.utf8Size(text)).isEqualTo(text.toByteArray(Charsets.UTF_8).size)
+            assertThat(ResponseBodyMetrics.utf8Size(text)).isEqualTo(text.toByteArray(Charsets.UTF_8).size)
         }
 
         @Test
@@ -56,8 +55,8 @@ class RestClientMetricsTest {
             val loneLow = "\ude42 after"
 
             // When / Then
-            assertThat(RestClientMetrics.utf8Size(loneHigh)).isEqualTo(loneHigh.toByteArray(Charsets.UTF_8).size)
-            assertThat(RestClientMetrics.utf8Size(loneLow)).isEqualTo(loneLow.toByteArray(Charsets.UTF_8).size)
+            assertThat(ResponseBodyMetrics.utf8Size(loneHigh)).isEqualTo(loneHigh.toByteArray(Charsets.UTF_8).size)
+            assertThat(ResponseBodyMetrics.utf8Size(loneLow)).isEqualTo(loneLow.toByteArray(Charsets.UTF_8).size)
         }
 
         @Test
@@ -67,9 +66,9 @@ class RestClientMetricsTest {
             // counter errs the other way, and by how much at the extreme (three bytes per BMP character).
             //
             // Given / When / Then
-            assertThat(RestClientMetrics.utf8Size("ascii")).isEqualTo("ascii".length)
-            assertThat(RestClientMetrics.utf8Size("äöü")).isEqualTo(2 * "äöü".length)
-            assertThat(RestClientMetrics.utf8Size("漢字")).isEqualTo(3 * "漢字".length)
+            assertThat(ResponseBodyMetrics.utf8Size("ascii")).isEqualTo("ascii".length)
+            assertThat(ResponseBodyMetrics.utf8Size("äöü")).isEqualTo(2 * "äöü".length)
+            assertThat(ResponseBodyMetrics.utf8Size("漢字")).isEqualTo(3 * "漢字".length)
         }
     }
 }

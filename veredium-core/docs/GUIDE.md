@@ -29,7 +29,11 @@ on. It holds everything that is identical by construction between the blocking c
 - the **HTTP observation report** (`eu.inqudium.veredium.core.observation`): the two startup
   lines that say what a stack's observation toggle achieves in the host at hand;
 - `BaseAdapter`: the two budgets an adapter over either client publishes to its callers,
-  `timeLimiterTimeout` and `responseTimeout`, one contract for both stacks.
+  `timeLimiterTimeout` and `responseTimeout`, one contract for both stacks;
+- the **per-call log and validation** (`eu.inqudium.veredium.core.client`): `ClientCallLog`, the
+  transport lines a client writes under the caller's correlation keys, the verdict-driven severity
+  of its error line, the size sample and the Bean Validation of the decoded response; and
+  `ResponseBodyMetrics`, the UTF-8 size the sample is taken in.
 
 Nothing in here knows an HTTP stack. A host does not depend on this module directly; it comes
 with the client module the host chooses. The decision to cut the modules this way is
@@ -102,6 +106,15 @@ alias that does not validate), with the provider verdict for the startup line.
 `HttpObservationReport` reads the stack's toggle, the central Micrometer disable-filter and the
 host's `ObservationRegistry` and says, once, which of the three silences the
 `http.client.requests` observation; each stack subclasses it with its name and key.
+
+**The per-call log.** Each client holds one `ClientCallLog` per backend and hands it what it does
+with a call besides the exchange: the opening DEBUG line, the size sample, `validate` of the
+decoded value, the error line (DEBUG without a stack trace for a benign 4xx, WARN with one for
+everything else - the same verdict the breaker's record predicate follows), the buffer-limit line
+naming the number to raise, and the cancellation line at DEBUG. Every line carries `adapter_name`
+and `adapter_url_template`, the fields legatium's exchange event uses, under the client's own
+logger name. What a stack contributes is its wording of the buffer limit, its properties prefix and
+how it reads the declared `Content-Length` off its exception.
 
 ## Bounding a blocking call of your own
 

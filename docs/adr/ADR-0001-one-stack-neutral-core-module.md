@@ -70,7 +70,10 @@ vocabulary.
   written twice - once as classes in the blocking client, once inline in
   the reactive client's factory - and each stack now keeps a subclass or a
   property of the shared type. `BaseAdapter`, the two budgets an adapter
-  publishes to its callers, followed for the same reason.
+  publishes to its callers, followed for the same reason; so did the
+  per-call log, size sample and validation of the two clients
+  (`eu.inqudium.veredium.core.client`: `ClientCallLog`, `ResponseBodyMetrics`),
+  which had been identical private methods in both.
 
 The core depends on `spring-boot-starter` and `resilience4j-spring-boot4`
 and on no HTTP stack.

@@ -1,6 +1,8 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
+import eu.inqudium.veredium.core.client.ClientCallLog
+import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import eu.inqudium.veredium.core.validation.ResponseValidationProperties
@@ -49,7 +51,7 @@ import java.util.concurrent.TimeUnit
  * on the `adapter-http-exchange` logger (`adapter_name` = [backendName], via the request attribute the factory
  * sets). What this class logs is the transport detail underneath: the per-call DEBUG lines, the error line
  * with the exception class, the cancellation line and the buffer-limit line - each carrying `adapter_name` and
- * `adapter_url_template` under the library's own field names ([log]), so it joins the exchange event on sight.
+ * `adapter_url_template` under the library's own field names ([ClientCallLog]), so it joins the exchange event on sight.
  */
 class ResilientRestClient(
     private val restClient: RestClient,
@@ -60,7 +62,7 @@ class ResilientRestClient(
     /**
      * The buffering limit for a response body, in bytes - `maxInMemorySize` as the factory resolved it for this
      * client. Enforced HERE, by the bounded read in [exchange], because the blocking client has no codec limit
-     * of its own; and named on the line that reports a response exceeding it ([logIfBufferLimitExceeded]), so
+     * of its own; and named on the line that reports a response exceeding it (the buffer-limit line of [ClientCallLog]), so
      * that line carries the number an operator has to raise.
      */
     private val maxInMemoryBytes: Int,
@@ -91,7 +93,7 @@ class ResilientRestClient(
      * Sampled AFTER decompression, which is where the limit applies: Apache HttpClient inflates a compressed
      * body transparently, so what the bounded reader counts and what this meter records are the same bytes.
      *
-     * Recorded in UTF-8 BYTES ([RestClientMetrics.utf8Size]) rather than `String.length`, so the sample and the
+     * Recorded in UTF-8 BYTES ([ResponseBodyMetrics.utf8Size]) rather than `String.length`, so the sample and the
      * limit it informs are the same unit.
      *
      * Null-as-off, like [validator]: resolved once per backend by [ResilientRestClientFactory], so the hot path
@@ -109,6 +111,34 @@ class ResilientRestClient(
     val responseTimeout: Duration get() = endpoint.responseTimeout
     val timeLimiterTimeout: Duration get() = resilience.requestBudget(backendName)
     private val logger: Logger = LoggerFactory.getLogger(ResilientRestClient::class.java)
+
+    /** The transport lines, the size sample and the validation of a call - shared with the reactive client. */
+    private val calls =
+        ClientCallLog(
+            logger = logger,
+            backendName = backendName,
+            pathTemplate = pathTemplate,
+            propertiesPrefix = "app.restclient",
+            responseTimeout = { responseTimeout },
+            timeLimiterTimeout = { timeLimiterTimeout },
+            verdicts = RestClientVerdicts.breakerVerdicts,
+            validator = validator,
+            failOnViolation = failOnViolation,
+            responseBodySize = responseBodySize,
+            bufferLimit =
+                ClientCallLog.BufferLimitLine(
+                    wording = "buffer limit",
+                    maxInMemoryBytes = maxInMemoryBytes,
+                    meterName = RestClientMetrics.RESPONSE_BODY_SIZE,
+                    // Carried on this module's own exception, wherever in the cause chain it sits.
+                    contentLengthOf = { error ->
+                        generateSequence(error) { it.cause.takeIf { cause -> cause !== it } }
+                            .filterIsInstance<ResponseBodyLimitExceededException>()
+                            .firstOrNull()
+                            ?.contentLength ?: -1L
+                    },
+                ),
+        )
 
     /**
      * Executes a GET and blocks for the result. [block] receives a fresh request spec and must apply the URI
@@ -215,7 +245,7 @@ class ResilientRestClient(
         responseType: Class<T>,
         requestBody: String?,
     ): CompletableFuture<T> {
-        logExecuting(responseType, requestBody)
+        calls.logExecuting(responseType, requestBody)
         val startNanos = nanoTime()
         val elapsedMillis = { TimeUnit.NANOSECONDS.toMillis(nanoTime() - startNanos) }
 
@@ -229,28 +259,28 @@ class ResilientRestClient(
                     // through it, and that is the signal that arrives here. The blocking form's InterruptedException.
                     failure is CancellationException -> {
                         outcome = "cancelled"
-                        doOnCancel(responseType, elapsedMillis)
+                        calls.onCancel(responseType, elapsedMillis)
                     }
 
                     failure != null -> {
                         outcome = "error"
-                        doOnError(responseType, failure, elapsedMillis)
+                        calls.onError(responseType, failure, elapsedMillis)
                         result.completeExceptionally(failure)
                     }
 
                     else -> {
                         try {
-                            responseBodySize?.record(RestClientMetrics.utf8Size(rawBody).toDouble())
-                            result.complete(validate(objectMapper.readValue(rawBody, responseType)))
+                            calls.recordBodySize(rawBody)
+                            result.complete(calls.validate(objectMapper.readValue(rawBody, responseType)))
                         } catch (e: Throwable) {
                             outcome = "error"
-                            doOnError(responseType, e, elapsedMillis)
+                            calls.onError(responseType, e, elapsedMillis)
                             result.completeExceptionally(e)
                         }
                     }
                 }
             } finally {
-                log(Level.DEBUG, "Completed request to backend '{}' with outcome={}", backendName, outcome)
+                calls.log(Level.DEBUG, "Completed request to backend '{}' with outcome={}", backendName, outcome)
             }
         }
         return result
@@ -278,7 +308,7 @@ class ResilientRestClient(
         responseType: Class<T>,
         requestBody: String?,
     ): T {
-        logExecuting(responseType, requestBody)
+        calls.logExecuting(responseType, requestBody)
 
         // The attempt's own clock. The error and cancel lines below promise a number regardless of any logging
         // configuration, so it is measured here and nowhere else.
@@ -294,13 +324,13 @@ class ResilientRestClient(
             // CircuitBreaker must not see it as a failure and open the circuit while the backend is healthy.
             // Validation sits in the SAME place for the same reason - a response that violates its schema is a
             // contract problem, not an outage, and must not open the circuit either.
-            responseBodySize?.record(RestClientMetrics.utf8Size(rawBody).toDouble())
-            return validate(objectMapper.readValue(rawBody, responseType))
+            calls.recordBodySize(rawBody)
+            return calls.validate(objectMapper.readValue(rawBody, responseType))
         } catch (e: InterruptedException) {
             // The caller was interrupted while waiting - its own budget expired, or its scope was cancelled.
             // The blocking counterpart of a subscriber cancelling, and reported the same way: not an error.
             outcome = "cancelled"
-            doOnCancel(responseType, elapsedMillis)
+            calls.onCancel(responseType, elapsedMillis)
             throw e
         } catch (e: Throwable) {
             // Everything else carries the resilience verdict as well as the raw HTTP outcome: a TimeLimiter
@@ -309,34 +339,10 @@ class ResilientRestClient(
             // short-circuit or a full bulkhead produces no exchange and no event - this line is where those
             // verdicts are logged.)
             outcome = "error"
-            doOnError(responseType, e, elapsedMillis)
+            calls.onError(responseType, e, elapsedMillis)
             throw e
         } finally {
-            log(Level.DEBUG, "Completed request to backend '{}' with outcome={}", backendName, outcome)
-        }
-    }
-
-    /**
-     * The opening DEBUG line of both forms. Guarded AND parameterised: this runs on every outbound call. A
-     * Kotlin string template is built before the call regardless of the level, and two of the arguments are
-     * not free - timeLimiterTimeout resolves through the R4j registry, and take(100) allocates - so the guard is
-     * what keeps them off the hot path, not just the formatting.
-     */
-    private fun logExecuting(
-        responseType: Class<*>,
-        requestBody: String?,
-    ) {
-        if (logger.isDebugEnabled) {
-            log(
-                Level.DEBUG,
-                "Executing request to backend '{}' with responseType={} responseTimeout: {}ms," +
-                    " timeLimiterTimeout: {}ms and requestBody={}",
-                backendName,
-                responseType.simpleName,
-                responseTimeout.toMillis(),
-                timeLimiterTimeout.toMillis(),
-                requestBody?.take(100) ?: "null",
-            )
+            calls.log(Level.DEBUG, "Completed request to backend '{}' with outcome={}", backendName, outcome)
         }
     }
 
@@ -396,183 +402,7 @@ class ResilientRestClient(
     /** The response's declared charset, UTF-8 when it declares none or declares nonsense. */
     private fun charsetOf(headers: HttpHeaders): Charset = runCatching { headers.contentType?.charset }.getOrNull() ?: Charsets.UTF_8
 
-    /**
-     * Validates [value] against its Bean Validation constraints, or returns it untouched when validation is
-     * off for this backend ([validator] is then null - the decision is made once at construction rather than
-     * per call).
-     *
-     * On a violation the behaviour depends on [failOnViolation]:
-     * - `true` (enforce): throws [ConstraintViolationException] carrying every violation, so the caller sees
-     *   which field of which type broke the contract instead of a bare "invalid". The failure is NOT an
-     *   `RestClientVerdicts.httpExchangeError.isExpectedClientError`, so it keeps full severity: a backend answering outside its
-     *   own published schema is an anomaly worth a WARN with its cause, not a business-as-usual outcome.
-     * - `false` (report-only): logs the same detail at WARN and returns [value] unchanged, so a backend can be
-     *   observed against real traffic before its violations are made fatal.
-     */
-    private fun <T : Any> validate(value: T): T {
-        validator?.let { validator ->
-            log(Level.TRACE, "Going to validate response value for backend '{}'", backendName)
-            val violations = validator.validate(value).orEmpty()
-            if (violations.isNotEmpty()) {
-                val msg =
-                    "Response from backend '$backendName' violates its own schema: " +
-                        violations.joinToString("; ") { "${it.propertyPath} ${it.message}" }
-                if (failOnViolation) {
-                    log(Level.WARN, msg)
-                    throw ConstraintViolationException(msg, violations)
-                }
-                log(
-                    Level.WARN,
-                    "{} - reported only, not enforced " +
-                        "(app.restclient.validation.fail-on-violation=false)",
-                    msg,
-                )
-            } else {
-                log(Level.DEBUG, "Response from backend '{}' has no violations", backendName)
-            }
-        } ?: log(Level.TRACE, "Validation of the response value for backend '{}' disabled", backendName)
-        return value
-    }
-
-    private fun <T : Any> doOnError(
-        responseType: Class<T>,
-        error: Throwable,
-        elapsedMillis: () -> Long,
-    ) {
-        // Severity follows the SAME classification as the circuit breaker's record predicate
-        // (RestClientVerdicts.httpExchangeError.isExpectedClientError), so the two never disagree: a documented 4xx - which the
-        // adapter contract declares as a normal outcome and the caller handles - is logged at DEBUG WITHOUT a
-        // stack trace, everything else at WARN with one. Logging every non-2xx at ERROR made routine "not found"
-        // answers indistinguishable from real outages. (legatium's exchange event classifies on its own terms: a
-        // 4xx answer is `rejected` with its status there, INFO except for 401/403/408/429 - see the runbook.)
-        //
-        // The cause is attached ONLY to the unexpected branch: a benign 4xx must not carry a stack trace that
-        // explains nothing the status and URL do not. Pinned by
-        // `ResilientRestClientIntegrationTest.should log a benign 4xx at DEBUG and without a stack trace`.
-        val expected = RestClientVerdicts.httpExchangeError.isExpectedClientError(error)
-        val level = if (expected) Level.DEBUG else Level.WARN
-        log(
-            level = level,
-            msg =
-                "Error during request to backend '{}' with responseType={} responseTimeout: {}ms," +
-                    " timeLimiterTimeout: {}ms duration so far: {}ms{}",
-            cause = error.takeUnless { expected },
-            backendName,
-            responseType.simpleName,
-            responseTimeout.toMillis(),
-            timeLimiterTimeout.toMillis(),
-            elapsedMillis(),
-            if (expected) " - expected client error: $error" else "",
-        )
-        logIfBufferLimitExceeded(error)
-    }
-
-    /**
-     * The one line that says how far the buffer limit was missed, for the calls the summary cannot sample.
-     *
-     * [responseBodySize] only ever sees bodies that FIT, so a response too large for the buffer leaves no
-     * measurement at all - the bounded reader stops and no `String` is ever produced. `Content-Length`, read off
-     * the response and carried on the exception, is the only figure available for it.
-     *
-     * **It is a LOWER bound, and the message says so.** The header is the WIRE size: with content compression
-     * on the transport, a compressed body reports far less than the decompressed bytes the limit actually bounds.
-     * It may also be absent entirely under chunked encoding, which is why the line still carries the limit on
-     * its own - `limit=N, Content-Length=unknown` is a useful line, `Content-Length` alone is not.
-     *
-     * WARN and unconditional: this is a permanent, deterministic condition for the party whose response it is,
-     * not a blip, and one line per occurrence is what makes it findable. The generic error line above already
-     * fired for the same call, but it names neither number.
-     */
-    private fun logIfBufferLimitExceeded(error: Throwable) {
-        if (!RestClientVerdicts.clientSideFailure.isBufferLimitFailure(error)) return
-        val contentLength =
-            generateSequence(error) { it.cause.takeIf { cause -> cause !== it } }
-                .filterIsInstance<ResponseBodyLimitExceededException>()
-                .firstOrNull()
-                ?.contentLength ?: -1L
-        logger.warn(
-            "Response body exceeded the buffer limit on backend '{}': limit={} bytes, Content-Length={}" +
-                " (wire size, a lower bound - the body may be compressed). Raise app.restclient.max-in-memory-size;" +
-                " see restclient.response.body.size for the sizes that do fit.",
-            backendName,
-            maxInMemoryBytes,
-            if (contentLength >= 0) contentLength.toString() else "unknown",
-        )
-    }
-
-    /**
-     * Records an abandoned call - at DEBUG, deliberately.
-     *
-     * A cancellation is not a fault of this client: it means the CALLER went away, because its own budget
-     * expired or because the request it serves was abandoned. Both are normal outcomes, both correlate with
-     * load, and under a disturbance they arrive not one at a time but all at once - so WARN, the level
-     * operators alert on, filled up with the one class of event that says nothing about this module's health,
-     * exactly when the lines that do say something are needed.
-     *
-     * The operator-facing signal lives elsewhere: the decorator cancels the worker, whose socket read fails at
-     * once with `Closed by interrupt`, and legatium's exchange event then reports that exchange's end with full
-     * exchange context - as a `failure`, since the blocking stack has no `cancelled` outcome
-     * (`LegatiumExchangeLoggingIntegrationTest` pins the vocabulary). This line is the per-call detail
-     * underneath it, on the caller's side.
-     */
-    private fun <T : Any> doOnCancel(
-        responseType: Class<T>,
-        elapsedMillis: () -> Long,
-    ) {
-        log(
-            level = Level.DEBUG,
-            msg =
-                "Cancelled request to backend '{}' with responseType={} " +
-                    "responseTimeout: {}ms," +
-                    " timeLimiterTimeout: {}ms duration so far: {}ms",
-            backendName,
-            responseType.simpleName,
-            responseTimeout.toMillis(),
-            timeLimiterTimeout.toMillis(),
-            elapsedMillis(),
-        )
-    }
-
-    fun log(
-        level: Level,
-        msg: String,
-        vararg arguments: Any?,
-    ) {
-        log(level, msg, null, *arguments)
-    }
-
-    /**
-     * Writes one transport line with the two fields that join it to the exchange event: the backend name as
-     * `adapter_name` and the URI template as `adapter_url_template` - the SAME wire names and values legatium
-     * puts on the `adapter-http-exchange` event ([ADAPTER_NAME_FIELD], [URL_TEMPLATE_FIELD]). One vocabulary
-     * for both loggers is what lets a dashboard group either by the same field.
-     */
-    fun log(
-        level: Level,
-        msg: String,
-        cause: Throwable?,
-        vararg arguments: Any?,
-    ) {
-        val event = logger.atLevel(level)
-        event.setMessage(msg)
-        for (arg in arguments) {
-            event.addArgument(arg?.toString())
-        }
-        event.addKeyValue(ADAPTER_NAME_FIELD, backendName)
-        event.addKeyValue(URL_TEMPLATE_FIELD, pathTemplate)
-        cause?.let { event.setCause(it) }
-        event.log()
-    }
-
     private companion object {
-        /**
-         * The two wire names the transport lines share with legatium's exchange event (`ClientLogField.NAME`
-         * and `.URL_TEMPLATE` there). Spelled out because that enum is internal to the library; they are a
-         * contract with the log index and with the runbook, and `ResilientRestClientIntegrationTest` pins them.
-         */
-        const val ADAPTER_NAME_FIELD = "adapter_name"
-        const val URL_TEMPLATE_FIELD = "adapter_url_template"
-
         /** How much of an error body the exception MESSAGE shows; the exception itself carries all of it. */
         const val ERROR_BODY_PREVIEW_CHARS = 200
     }

@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
+import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.validation.ResponseValidation
@@ -217,8 +218,8 @@ class ResilientWebClientFactory(
             DistributionSummary
                 .builder(WebClientMetrics.RESPONSE_BODY_SIZE)
                 .description("Decoded response body size in UTF-8 bytes, for sizing app.webclient.max-in-memory-size")
-                .baseUnit(WebClientMetrics.RESPONSE_BODY_BASE_UNIT)
-                .tag(WebClientMetrics.ADAPTER_TAG, backendName)
+                .baseUnit(ResponseBodyMetrics.BASE_UNIT)
+                .tag(ResponseBodyMetrics.ADAPTER_TAG, backendName)
                 .register(registry)
         }
 
@@ -319,76 +320,11 @@ object WebClientMetrics {
     /** Catch-all for any path not explicitly templated - bounds cardinality on the unknown. */
     const val UNKNOWN: String = "other"
 
-    /** Decoded response body size per call - the input for sizing `app.webclient.max-in-memory-size`. */
+    /**
+     * Decoded response body size per call - the input for sizing `app.webclient.max-in-memory-size`; unit, tag
+     * and measurement are [ResponseBodyMetrics], shared with the blocking client.
+     */
     const val RESPONSE_BODY_SIZE: String = "webclient.response.body.size"
-
-    /**
-     * BYTES - the same unit as `app.webclient.max-in-memory-size`, which is the whole point of the meter.
-     *
-     * Sampled with [utf8Size], not `String.length`. The two agree on ASCII and diverge in exactly one
-     * direction: a `length` of N encodes to between N and 3N UTF-8 bytes, so counting UTF-16 units would
-     * UNDER-state the buffered size - the direction that quietly sizes a ceiling too small. Measured over the
-     * 114 real response bodies in the 2026-08-08 log windows the difference was 0.000 %, but that is a
-     * property of today's data (account names are customer-set free text), not of the payload shape.
-     */
-    const val RESPONSE_BODY_BASE_UNIT: String = "bytes"
-
-    /**
-     * The UTF-8 encoded size of [text], counted in one pass and without allocating.
-     *
-     * Equivalent to `text.toByteArray(Charsets.UTF_8).size` for every input, including unpaired surrogates -
-     * `WebClientMetricsTest` pins that against the JDK encoder rather than against hand-written expectations.
-     * The point of not simply calling `toByteArray` is the copy: on the hot path that is a second full buffer
-     * per response, up to `max-in-memory-size` each, to produce a single number.
-     *
-     * The surrogate handling is the part worth reading. A valid high/low pair is ONE code point in four bytes
-     * and consumes two UTF-16 units; an UNPAIRED surrogate is not encodable, and the JDK encoder substitutes
-     * `?` - one byte - rather than failing. Both cases are counted the way the encoder counts them, so the
-     * meter can never disagree with the codec about the same body.
-     */
-    fun utf8Size(text: String): Int {
-        var bytes = 0
-        var i = 0
-        while (i < text.length) {
-            val c = text[i]
-            when {
-                c.code < 0x80 -> {
-                    bytes += 1
-                }
-
-                c.code < 0x800 -> {
-                    bytes += 2
-                }
-
-                c.isHighSurrogate() && i + 1 < text.length && text[i + 1].isLowSurrogate() -> {
-                    bytes += 4
-                    i++
-                }
-
-                c.isSurrogate() -> {
-                    bytes += 1
-                }
-
-                else -> {
-                    bytes += 3
-                }
-            }
-            i++
-        }
-        return bytes
-    }
-
-    /**
-     * Identifies which downstream this sample came from. Named after the `adapter_*` family of the log fields,
-     * so a meter and a log line can be correlated on sight: the value is exactly what the exchange event and
-     * this module's transport lines carry as `adapter_name`.
-     *
-     * **The value is the mesh ENDPOINT alias, not an adapter class.** Four values today
-     * (`api-example-com-GET-v5-access-profiles-by-involved-party` and three siblings), so no cardinality concern -
-     * but note that `InvolvedPartyAdapter` owns two of them (`ALIAS_LOOKUP`, `ALIAS_GET`), so a filter on this
-     * tag selects one CALL, not one adapter.
-     */
-    const val ADAPTER_TAG: String = "adapter"
 
     /**
      * Build (static prefix, template) pairs from the path templates: the prefix is the template up to its
