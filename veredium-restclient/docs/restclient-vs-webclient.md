@@ -18,7 +18,7 @@ so the differences are decisions on record rather than surprises in production.
 
 | web-client (`adapter/web`)            | rest-client (`adapter/rest`)           | Notes |
 |---------------------------------------|----------------------------------------|-------|
-| `ResilientWebClient`                  | `ResilientRestClient`                  | Same per-call pipeline; `get`/`post` return `T` or throw. |
+| `ResilientWebClient`                  | `ResilientRestClient`                  | Same per-call pipeline; `get`/`post` return `T` or throw, `getAsync`/`postAsync` return a `CompletableFuture<T>` (§2). |
 | `ResilientWebClientFactory`           | `ResilientRestClientFactory`           | Same optional collaborators, same required `RestClient.Builder` bean from Boot, same startup lines. |
 | `ReactiveResilienceDecorator`         | `BlockingResilienceDecorator` (`veredium-core`) | Same order `CircuitBreaker(TimeLimiter(Bulkhead(call)))`, see §2. The blocking one is a component of the core, usable without this client; this module declares its bean in `RestClientResilienceConfig`. |
 | `WebClientVerdicts` / `WebClientVerdictsConfig` | `RestClientVerdicts` / `RestClientVerdictsConfig` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the config bean that imports the core's `MeshTimeoutConfig` (§8). |
@@ -81,12 +81,15 @@ normal conditions the transport trips first (a `ResourceAccessException` over `S
 breaker records and legatium classifies as `timeout`) and the TimeLimiter is the outer backstop over connect and
 pending-acquire.
 
-**No asynchronous client API.** Where the twin's every call is a `Mono` the subscriber composes, this module's
-client offers the blocking call only; it does not ship a second calling convention for a consumer that does not
-exist yet (architecture review 2026-10-19, finding 3). The mechanism underneath has one, though: the core
-decorator's `decorateAsync` runs the same pipeline with the wait on a second virtual thread and returns a
-`CompletableFuture` whose `cancel` interrupts the worker (ADR-0002). A host that wants an asynchronous call
-composes it from that rather than from an executor of its own.
+**The asynchronous form.** Where the twin's every call is a `Mono` the subscriber composes, this module's client
+offers both: `get`/`post` block, `getAsync`/`postAsync` return a `CompletableFuture<T>` at once. The second is
+not a second pipeline - it is the core decorator's `decorateAsync` (ADR-0002), which puts the wait on a second
+virtual thread; deserialisation, validation and the log lines then run there, with the same verdicts. Every
+outcome arrives on the future, unwrapped - a serialisation failure included, which the blocking form throws out
+of `post` instead - and `cancel` on the future abandons the exchange exactly as interrupting a blocking caller
+does (worker interrupted, permit released, the `Cancelled request` line at DEBUG). The origin module's
+asynchronous API was dropped at the port for want of a consumer (architecture review 2026-10-19, finding 3);
+this one exists because the mechanism exists anyway and the client is the natural place to expose it.
 
 ---
 

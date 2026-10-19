@@ -60,10 +60,14 @@ a standalone user needs, and no further.
   arrive on the future unwrapped, the refusal after `shutdown` included;
   derived stages are plain futures whose cancellation does not touch the
   call. Two virtual threads per call are the price of one set of
-  semantics for both forms. `ResilientRestClient` does not expose it: the
-  origin's asynchronous client API had no consumer (its architecture
-  review, finding 3), and a host that wants one composes it from the
-  decorator.
+  semantics for both forms. `ResilientRestClient` exposes it as
+  `getAsync`/`postAsync`: the exchange through `decorateAsync`, the
+  deserialisation, validation and log lines on the waiter once the
+  exchange is done, every outcome on the future (a serialisation
+  failure included), and a future whose `cancel` reaches the decorator's.
+  The origin's asynchronous client API had been dropped at the port for
+  want of a consumer (its architecture review, finding 3); this one costs
+  no second pipeline, because the mechanism is the decorator's.
 - **The decorator names its own failures.** `SELF_INFLICTED_FAILURES`
   lists `BulkheadFullException`, `InterruptedException` and
   `RejectedExecutionException`: the backend was never called, or the

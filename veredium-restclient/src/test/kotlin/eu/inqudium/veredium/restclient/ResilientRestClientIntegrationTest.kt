@@ -1044,6 +1044,150 @@ class ResilientRestClientIntegrationTest {
     }
 
     // ---------------------------------------------------------------------------
+    // The asynchronous form
+    // ---------------------------------------------------------------------------
+
+    @Test
+    fun `should deliver a GET response on the future without blocking the caller`() {
+        // What is tested: getAsync returns before the backend has answered and completes with the deserialised
+        //   value once it has - the same pipeline as get(), minus the wait on the caller's thread.
+        // How success is judged: the future is not done right after the call (the backend holds the answer for a
+        //   moment), then completes with the decoded body; the request reached the wire once.
+        // Why it matters: an asynchronous form that secretly waited for the hand-off before returning would pass
+        //   on a fast backend and serialise every caller composing futures.
+        //
+        // Given: a backend that answers after a short delay
+        wireMock.stubFor(get(urlEqualTo("/later")).willReturn(okJson("""{"message":"eventually"}""").withFixedDelay(300)))
+        val client = newClient("async-get", timeLimiter = TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build())
+
+        // When
+        val future = client.getAsync(Greeting::class.java) { it.uri("/later") }
+
+        // Then
+        assertThat(future.isDone).`as`("the caller must get the future back before the answer arrives").isFalse()
+        assertThat(future.get(5, TimeUnit.SECONDS).message).isEqualTo("eventually")
+        wireMock.verify(1, getRequestedFor(urlEqualTo("/later")))
+    }
+
+    @Test
+    fun `should send a POST body on the wire and deliver the response on the future`() {
+        // Given
+        wireMock.stubFor(post(urlEqualTo("/lookup")).willReturn(okJson("""{"message":"found"}""")))
+        val client = newClient("async-post")
+
+        // When
+        val result =
+            client
+                .postAsync(Greeting::class.java, LookupRequest(id = "42")) {
+                    it.uri("/lookup").contentType(MediaType.APPLICATION_JSON)
+                }.get(5, TimeUnit.SECONDS)
+
+        // Then
+        assertThat(result.message).isEqualTo("found")
+        wireMock.verify(1, postRequestedFor(urlEqualTo("/lookup")).withRequestBody(equalToJson("""{"id":"42"}""")))
+    }
+
+    @Test
+    fun `should deliver a non-2xx on the future as Spring's status exception, unwrapped`() {
+        // What is tested: the failure contract of the future - the SAME exception the blocking form throws, so a
+        //   handler can match on its type; get() adds only the ExecutionException every CompletableFuture adds.
+        //
+        // Given
+        wireMock.stubFor(get(urlEqualTo("/missing")).willReturn(aResponse().withStatus(404)))
+        val client = newClient("async-404")
+
+        // When
+        val future = client.getAsync(Greeting::class.java) { it.uri("/missing") }
+        val seenByHandler = future.handle { _, t -> t }.get(5, TimeUnit.SECONDS)
+        val thrownByGet = catchThrowable { future.get(5, TimeUnit.SECONDS) }
+
+        // Then
+        assertThat(seenByHandler).isInstanceOf(HttpClientErrorException.NotFound::class.java)
+        assertThat(thrownByGet).isInstanceOf(ExecutionException::class.java).hasCause(seenByHandler)
+    }
+
+    @Test
+    fun `should fail a POST whose body cannot be serialised on the future, before anything reaches the wire`() {
+        // What is tested: the one failure the blocking form throws out of the method arrives, in the asynchronous
+        //   form, where every other outcome does - on the future - and still before any exchange exists.
+        // How success is judged: the future is already failed when handed back, its cause is the Jackson failure
+        //   with the accessor's exception underneath, and WireMock received nothing.
+        //
+        // Given
+        wireMock.stubFor(post(urlEqualTo("/lookup")).willReturn(okJson("""{"message":"found"}""")))
+        val client = newClient("async-unserialisable")
+
+        // When
+        val future = client.postAsync(Greeting::class.java, Unserialisable()) { it.uri("/lookup") }
+
+        // Then
+        assertThat(future.isCompletedExceptionally).isTrue()
+        assertThat(catchThrowable { future.get() }).hasRootCauseInstanceOf(IllegalStateException::class.java)
+        wireMock.verify(0, postRequestedFor(urlEqualTo("/lookup")))
+    }
+
+    @Test
+    fun `should deliver a deserialisation failure on the future without charging the breaker`() {
+        // What is tested: deserialisation runs on the waiter, after the decoration, in the asynchronous form as
+        //   well - so a body that does not parse fails the future but is not a backend failure for the breaker.
+        // How success is judged: the future fails with a Jackson exception; the breaker counted the exchange as
+        //   a success (the backend answered 200), not as a failure.
+        //
+        // Given: a 200 whose body is not JSON, and a breaker the test can read
+        wireMock.stubFor(get(urlEqualTo("/garbage")).willReturn(aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody("not json at all")))
+        val circuitBreakers = CircuitBreakerRegistry.of(CircuitBreakerConfig.ofDefaults())
+        val client = newFactory("async-garbage", circuitBreakers = circuitBreakers).create("async-garbage")
+
+        // When
+        val outcome = client.getAsync(Greeting::class.java) { it.uri("/garbage") }.handle { _, t -> t }.get(5, TimeUnit.SECONDS)
+
+        // Then
+        assertThat(outcome).isInstanceOf(tools.jackson.core.JacksonException::class.java)
+        assertThat(circuitBreakers.circuitBreaker("async-garbage").metrics.numberOfFailedCalls).isZero()
+        assertThat(circuitBreakers.circuitBreaker("async-garbage").metrics.numberOfSuccessfulCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun `should abandon the exchange and log the cancellation at DEBUG when the future is cancelled`() {
+        // What is tested: cancel() on the future the client handed out reaches the decorator's future and through
+        //   it the worker - the exchange is abandoned, not merely detached from - and this side reports it the
+        //   way it reports an interrupted blocking caller: one "Cancelled request" line at DEBUG.
+        // How success is judged: the future is cancelled, the client's closing line reports outcome=cancelled, and
+        //   the single cancellation line is at DEBUG.
+        // Why it matters: a CompletableFuture's cancel() interrupts nothing by itself; without the pass-through a
+        //   cancelled call would hold its worker, its permit and its connection until the budget.
+        //
+        // Given: a backend that does not answer within the test's window, and the client logger capturing
+        wireMock.stubFor(get(urlEqualTo("/never-async")).willReturn(okJson("{}").withFixedDelay(30_000)))
+        val inFlight = CountDownLatch(1)
+        wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/never-async") inFlight.countDown() }
+        val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
+        val clientEvents = CapturingAppender("backend 'cancelled-async'", COMPLETED_PREFIX).apply { start() }
+        val previousClientLevel = clientLogger.level
+        clientLogger.level = Level.DEBUG
+        clientLogger.addAppender(clientEvents)
+        try {
+            val client = newClient("cancelled-async", timeLimiter = TimeLimiterConfig.custom().timeoutDuration(Duration.ofMinutes(5)).build())
+            val future = client.getAsync(Greeting::class.java) { it.uri("/never-async") }
+            assertThat(inFlight.await(5, TimeUnit.SECONDS)).`as`("the request must have reached the backend").isTrue()
+
+            // When: the caller walks away before the answer arrives
+            assertThat(future.cancel(true)).isTrue()
+
+            // Then: the future is cancelled, and this side reports it at DEBUG
+            assertThat(future.isCancelled).isTrue()
+            assertThat(catchThrowable { future.get() }).isInstanceOf(CancellationException::class.java)
+            val events = clientEvents.awaitEvents()
+            val cancelLine = events.single { it.formattedMessage.startsWith("Cancelled request") }
+            assertThat(cancelLine.level).isEqualTo(Level.DEBUG)
+            assertThat(events.last().formattedMessage).endsWith("outcome=cancelled")
+        } finally {
+            clientLogger.detachAppender(clientEvents)
+            clientLogger.level = previousClientLevel
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------
 

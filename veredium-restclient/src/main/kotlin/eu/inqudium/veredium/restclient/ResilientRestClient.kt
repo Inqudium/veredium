@@ -19,6 +19,9 @@ import org.springframework.web.client.RestClientResponseException
 import tools.jackson.databind.ObjectMapper
 import java.nio.charset.Charset
 import java.time.Duration
+import java.util.concurrent.CancellationException
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 /**
@@ -76,6 +79,13 @@ interface BaseAdapter {
  * call. The thread that waits is the caller's; the HTTP exchange itself runs on a worker the decorator hands it
  * to (see [BlockingResilienceDecorator]), which is invisible to a caller except in what cancellation means:
  * interrupting the caller abandons the call and is reported as a cancellation, not an error.
+ *
+ * [getAsync] and [postAsync] are the same calls without the wait: they return a [CompletableFuture] at once and
+ * run the same pipeline - the decorator's asynchronous form puts the wait on a second virtual thread, and the
+ * deserialisation and validation run there too, once the exchange is done. Every outcome arrives on the
+ * future, unwrapped (the exception the blocking form would have thrown, a serialisation failure included);
+ * cancelling the future abandons the call exactly as interrupting a blocking caller does, and is reported the
+ * same way. The two forms share the exchange, the verdicts and the log lines; they differ only in who waits.
  *
  * The exchange itself is NOT logged here. legatium-restclient-logging hangs its interceptor on Boot's
  * `RestClient.Builder` bean, which the factory clones per backend, and writes one structured event per exchange
@@ -196,27 +206,122 @@ class ResilientRestClient(
         return execute(spec, responseType, requestBody = serialized)
     }
 
+    /**
+     * Executes a GET without blocking: [get], with the result delivered on the returned future (class KDoc).
+     */
+    fun <T : Any> getAsync(
+        responseType: Class<T>,
+        block: (RestClient.RequestHeadersUriSpec<*>) -> RestClient.RequestHeadersSpec<*>,
+    ): CompletableFuture<T> =
+        executeAsync(
+            block(restClient.get()).attribute(ClientRequestLoggingInterceptor.URI_TEMPLATE_ATTRIBUTE, pathTemplate),
+            responseType,
+            requestBody = null,
+        )
+
+    /**
+     * Executes a POST of [body] without blocking: [post], with the result delivered on the returned future.
+     *
+     * The serialisation still runs BEFORE the exchange and outside the decoration, for the reasons [post] gives;
+     * what differs is where its failure goes. A blocking caller gets it thrown; an asynchronous caller reads
+     * every outcome off the future, so the failure is delivered there as a failed future - no exchange, no
+     * event, no worker started.
+     */
+    fun <T : Any> postAsync(
+        responseType: Class<T>,
+        body: Any,
+        block: (RestClient.RequestBodyUriSpec) -> RestClient.RequestBodySpec,
+    ): CompletableFuture<T> {
+        val serialized =
+            try {
+                objectMapper.writeValueAsString(body)
+            } catch (e: Exception) {
+                return CompletableFuture.failedFuture(e)
+            }
+        val spec =
+            block(restClient.post())
+                .body(serialized)
+                .attribute(ClientRequestLoggingInterceptor.URI_TEMPLATE_ATTRIBUTE, pathTemplate)
+        return executeAsync(spec, responseType, requestBody = serialized)
+    }
+
+    /**
+     * [execute] without the wait. The decorator's asynchronous form runs the exchange and hands back a future
+     * that completes on the waiter thread - under the caller's MDC, which the decorator carried there - and
+     * that is where the rest of [execute] runs: the size sample, deserialisation, validation and the log lines,
+     * in the same order and with the same verdicts as the blocking form. The future handed to the caller
+     * cancels THROUGH to the decorator's, so a caller's `cancel` abandons the exchange (worker interrupted,
+     * permit released) rather than merely detaching from its result.
+     */
+    private fun <T : Any> executeAsync(
+        spec: RestClient.RequestHeadersSpec<*>,
+        responseType: Class<T>,
+        requestBody: String?,
+    ): CompletableFuture<T> {
+        logExecuting(responseType, requestBody)
+        val startNanos = nanoTime()
+        val elapsedMillis = { TimeUnit.NANOSECONDS.toMillis(nanoTime() - startNanos) }
+
+        val exchange: CompletableFuture<String> = resilience.decorateAsync(backendName) { exchange(spec) }
+        val result = CancelThroughFuture<T>(exchange)
+        exchange.whenComplete { rawBody, failure ->
+            var outcome = "success"
+            try {
+                when {
+                    // The caller cancelled the future handed out below: the decorator's future is cancelled
+                    // through it, and that is the signal that arrives here. The blocking form's InterruptedException.
+                    failure is CancellationException -> {
+                        outcome = "cancelled"
+                        doOnCancel(responseType, elapsedMillis)
+                    }
+
+                    failure != null -> {
+                        outcome = "error"
+                        doOnError(responseType, failure, elapsedMillis)
+                        result.completeExceptionally(failure)
+                    }
+
+                    else -> {
+                        try {
+                            responseBodySize?.record(RestClientMetrics.utf8Size(rawBody).toDouble())
+                            result.complete(validate(objectMapper.readValue(rawBody, responseType)))
+                        } catch (e: Throwable) {
+                            outcome = "error"
+                            doOnError(responseType, e, elapsedMillis)
+                            result.completeExceptionally(e)
+                        }
+                    }
+                }
+            } finally {
+                log(Level.DEBUG, "Completed request to backend '{}' with outcome={}", backendName, outcome)
+            }
+        }
+        return result
+    }
+
+    /**
+     * The future [executeAsync] hands out: completed by the exchange's continuation, and cancelling it cancels
+     * the decorator's future underneath - which interrupts the worker. Derived stages are plain futures, as
+     * everywhere else; only the one the caller got from the client reaches the call.
+     */
+    private class CancelThroughFuture<T>(
+        private val upstream: Future<*>,
+    ) : CompletableFuture<T>() {
+        override fun cancel(mayInterruptIfRunning: Boolean): Boolean {
+            val cancelled = super.cancel(mayInterruptIfRunning)
+            upstream.cancel(true)
+            return cancelled
+        }
+
+        override fun <U> newIncompleteFuture(): CompletableFuture<U> = CompletableFuture()
+    }
+
     private fun <T : Any> execute(
         spec: RestClient.RequestHeadersSpec<*>,
         responseType: Class<T>,
         requestBody: String?,
     ): T {
-        // Guarded AND parameterised: this runs on every outbound call. A Kotlin string template is built before
-        // the call regardless of the level, and two of the arguments are not free - timeLimiterTimeout resolves
-        // through the R4j registry, and take(100) allocates - so the guard is what keeps them off the hot path,
-        // not just the formatting.
-        if (logger.isDebugEnabled) {
-            log(
-                Level.DEBUG,
-                "Executing request to backend '{}' with responseType={} responseTimeout: {}ms," +
-                    " timeLimiterTimeout: {}ms and requestBody={}",
-                backendName,
-                responseType.simpleName,
-                responseTimeout.toMillis(),
-                timeLimiterTimeout.toMillis(),
-                requestBody?.take(100) ?: "null",
-            )
-        }
+        logExecuting(responseType, requestBody)
 
         // The attempt's own clock. The error and cancel lines below promise a number regardless of any logging
         // configuration, so it is measured here and nowhere else.
@@ -251,6 +356,30 @@ class ResilientRestClient(
             throw e
         } finally {
             log(Level.DEBUG, "Completed request to backend '{}' with outcome={}", backendName, outcome)
+        }
+    }
+
+    /**
+     * The opening DEBUG line of both forms. Guarded AND parameterised: this runs on every outbound call. A
+     * Kotlin string template is built before the call regardless of the level, and two of the arguments are
+     * not free - timeLimiterTimeout resolves through the R4j registry, and take(100) allocates - so the guard is
+     * what keeps them off the hot path, not just the formatting.
+     */
+    private fun logExecuting(
+        responseType: Class<*>,
+        requestBody: String?,
+    ) {
+        if (logger.isDebugEnabled) {
+            log(
+                Level.DEBUG,
+                "Executing request to backend '{}' with responseType={} responseTimeout: {}ms," +
+                    " timeLimiterTimeout: {}ms and requestBody={}",
+                backendName,
+                responseType.simpleName,
+                responseTimeout.toMillis(),
+                timeLimiterTimeout.toMillis(),
+                requestBody?.take(100) ?: "null",
+            )
         }
     }
 

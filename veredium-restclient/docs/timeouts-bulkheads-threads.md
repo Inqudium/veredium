@@ -301,8 +301,9 @@ total), the second by the number of callers, each of which is itself a thread bl
 executor's lack of a bound is therefore not a lack of a limit; it is the refusal to add a redundant one.
 
 **When a `ThreadPoolBulkhead` would be the right tool**: a caller that does not want to block at all and
-consumes the `CompletionStage` asynchronously, on a stack without virtual threads. That caller is better
-served by the reactive twin.
+consumes the `CompletionStage` asynchronously, on a stack WITHOUT virtual threads. With them, that caller uses
+`getAsync`/`postAsync` (`decorateAsync` underneath, §5): the wait moves to a second virtual thread and the
+worker stays interruptible, which a `ThreadPoolBulkhead`'s future never is.
 
 ---
 

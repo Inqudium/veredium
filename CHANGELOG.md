@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SELF_INFLICTED_FAILURES` names the failures a breaker used with it must ignore, and
   `decorateAsync` runs the same pipeline without blocking the caller - a `CompletableFuture` whose
   `cancel` interrupts the worker and frees its bulkhead permit. ADR-0002.
+- `ResilientRestClient.getAsync` / `postAsync`: the blocking client's calls without the wait, over the
+  decorator's asynchronous form - a `CompletableFuture<T>` that carries every outcome unwrapped (a
+  serialisation failure included) and whose `cancel` abandons the exchange.
 
 - `veredium-webclient` installs its breaker verdicts and the mesh-derived rungs through the shared
   customizer wiring of `veredium-core`; the amendment framework (`RegistryAmendments`,
