@@ -4,6 +4,7 @@ import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
+import eu.inqudium.veredium.core.validation.ResponseValidation
 import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.observation.ObservationRegistry
@@ -124,16 +125,10 @@ class ResilientRestClientFactory(
         // because both ways this silently does nothing are invisible at runtime: a backend simply not listed,
         // or no Bean Validation provider on the classpath at all, in which case no configuration can switch it
         // on for anyone.
-        val validated =
-            meshProperties
-                .resolveAll()
-                .values
-                .map { it.alias }
-                .filter(validation::isEnabledFor)
         logger.info(
             "Response Bean Validation: default={}, validated endpoints={} (provider {})",
-            properties.validation.enabled,
-            validated.sorted().ifEmpty { listOf("none") },
+            validation.enabledByDefault,
+            validation.validatedAliases(meshProperties.resolveAll().values.map { it.alias }),
             validation.providerVerdict,
         )
     }

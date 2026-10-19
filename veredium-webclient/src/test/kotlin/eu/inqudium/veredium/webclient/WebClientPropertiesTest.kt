@@ -155,46 +155,4 @@ class WebClientPropertiesTest {
             }.doesNotThrowAnyException()
         }
     }
-
-    @Nested
-    inner class ValidationToggle {
-        @Test
-        fun `should default to off with no per-endpoint overrides`() {
-            // What/why: the shipped default. The DTO constraints come from the published OpenAPI specs, which
-            //   are stricter than reality in places, so validation must be off until a backend opts in - the
-            //   guarantee the whole feature rests on.
-            // Given / When / Then
-            val validation = WebClientProperties.Validation()
-            assertThat(validation.enabled).isFalse()
-            assertThat(validation.endpoints).isEmpty()
-            assertThat(validation.isEnabledFor("any-backend")).isFalse()
-            // Enforcing is the default: once a backend opts in, a violation fails the call rather than passing
-            // silently. Report-only (false) is the deliberate rollout exception, not the shipped stance.
-            assertThat(validation.failOnViolation).isTrue()
-        }
-
-        @Test
-        fun `should let a per-alias override win over the shared default in both directions`() {
-            // What is tested: that a per-backend entry beats the global default whichever way they disagree -
-            //   not just to enable a backend above an off default, but also to disable one above an on default.
-            // How success is judged: with the default ON, an alias mapped to false resolves to false while an
-            //   alias with no entry inherits true; with the default OFF, an alias mapped to true resolves to
-            //   true while an unmapped one inherits false. The override is the only variable in each pair.
-            // Why it matters: the specs are wrong in different ways per endpoint, so validation has to be
-            //   adoptable one backend at a time AND revocable for one backend without giving it up everywhere.
-            //   An all-or-nothing switch would be unusable here.
-            //
-            // Given: default ON, one backend explicitly opted OUT
-            val defaultOn = WebClientProperties.Validation(enabled = true, endpoints = mapOf("opted-out" to false))
-            // Then
-            assertThat(defaultOn.isEnabledFor("opted-out")).isFalse()
-            assertThat(defaultOn.isEnabledFor("inherits")).isTrue()
-
-            // Given: default OFF, one backend explicitly opted IN
-            val defaultOff = WebClientProperties.Validation(enabled = false, endpoints = mapOf("opted-in" to true))
-            // Then
-            assertThat(defaultOff.isEnabledFor("opted-in")).isTrue()
-            assertThat(defaultOff.isEnabledFor("inherits")).isFalse()
-        }
-    }
 }

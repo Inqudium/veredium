@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SELF_INFLICTED_FAILURES` names the failures a breaker used with it must ignore, and
   `decorateAsync` runs the same pipeline without blocking the caller - a `CompletableFuture` whose
   `cancel` interrupts the worker and frees its bulkhead permit. ADR-0002.
+- `veredium-core`: response validation (`ResponseValidationProperties`, the `validation.*` block both
+  clients bind, and `ResponseValidation`, the English-pinned validator derived from the host's factory)
+  and the HTTP observation report (`HttpObservationReport`, subclassed by `RestClientObservationReport`
+  and the new `WebClientObservationReport`) - both written once instead of as a class in the blocking
+  client and inline in the reactive factory. `ResilientWebClientFactory` loses its `environment` and
+  `observationRegistry` constructor parameters; the report reads them instead.
 - `ResilientRestClient.getAsync` / `postAsync`: the blocking client's calls without the wait, over the
   decorator's asynchronous form - a `CompletableFuture<T>` that carries every outcome unwrapped (a
   serialisation failure included) and whose `cancel` abandons the exchange.

@@ -3,6 +3,7 @@ package eu.inqudium.veredium.restclient
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
+import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import io.micrometer.core.instrument.DistributionSummary
 import jakarta.validation.ConstraintViolationException
 import jakarta.validation.Validator
@@ -111,7 +112,7 @@ class ResilientRestClient(
      * Bean Validation for this backend's responses, or `null` when it is switched off for it.
      *
      * Null-as-off rather than a boolean flag: the per-backend decision is resolved ONCE, by
-     * [ResilientRestClientFactory] when it builds this client (see [RestClientProperties.Validation]), so the
+     * [ResilientRestClientFactory] when it builds this client (see [ResponseValidationProperties]), so the
      * hot path holds no toggle to consult and cannot disagree with the configuration mid-flight.
      */
     private val validator: Validator? = null,
@@ -120,7 +121,7 @@ class ResilientRestClient(
      * [ConstraintViolationException]; `false` logs the violation at WARN and returns the response unchanged, so
      * a backend can be watched against real traffic before its violations are made fatal. Irrelevant when
      * [validator] is null (validation off for this backend). Shared, not per-backend - see
-     * [RestClientProperties.Validation.failOnViolation].
+     * [ResponseValidationProperties.failOnViolation].
      */
     private val failOnViolation: Boolean = true,
     /**

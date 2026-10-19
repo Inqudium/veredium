@@ -1,15 +1,8 @@
-package eu.inqudium.veredium.webclient
+package eu.inqudium.veredium.core.observation
 
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
-import eu.inqudium.veredium.core.mesh.MeshProperties
-import io.github.resilience4j.bulkhead.BulkheadConfig
-import io.github.resilience4j.bulkhead.BulkheadRegistry
-import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
-import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
-import io.github.resilience4j.timelimiter.TimeLimiterConfig
-import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import io.micrometer.observation.Observation
 import io.micrometer.observation.ObservationHandler
 import io.micrometer.observation.ObservationRegistry
@@ -20,13 +13,13 @@ import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
 import org.springframework.mock.env.MockEnvironment
-import org.springframework.web.reactive.function.client.WebClient
-import tools.jackson.databind.json.JsonMapper
 
 /**
- * Verifies the two observation lines [ResilientWebClientFactory] writes at startup.
+ * Verifies the two observation lines [HttpObservationReport] writes at startup - once, for both stacks, which
+ * subclass it with nothing but their name and their property key (`RestClientObservationReport`,
+ * `WebClientObservationReport`; each stack's own test pins that pair).
  *
- * 1. What is tested: (a) the factory reads and logs `management.observations.enable.all` and
+ * 1. What is tested: (a) the report reads and logs `management.observations.enable.all` and
  *    `management.observations.enable.http.client.requests` - the ONLY central Spring switch, a name-prefixed
  *    DEACTIVATION filter (default true, NOT an enable switch) - and flags when a `false` there suppresses the
  *    client observation even though the module toggle is on; and (b) that the module-toggle line reports what
@@ -41,26 +34,26 @@ import tools.jackson.databind.json.JsonMapper
  *    left off. Reporting either as a plain "on" is what sends someone hunting through Micrometer configuration
  *    for a span the process was never able to create.
  */
-class ResilientWebClientObservationFilterLoggingTest {
-    private val factoryLogger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
+class HttpObservationReportTest {
+    private val reportLogger = LoggerFactory.getLogger(HttpObservationReport::class.java) as Logger
     private val logAppender = ListAppender<ILoggingEvent>()
 
     @BeforeEach
     fun attachAppender() {
         logAppender.start()
-        factoryLogger.addAppender(logAppender)
+        reportLogger.addAppender(logAppender)
     }
 
     @AfterEach
     fun detachAppender() {
-        factoryLogger.detachAppender(logAppender)
+        reportLogger.detachAppender(logAppender)
     }
 
     @Test
     fun `should log the central disable-filter as true by default when the properties are unset`() {
         // Given: no management.observations.enable.* properties set, module toggle on
-        // When: the factory is constructed (it logs in its init block)
-        newFactory(observationEnabled = true, environment = MockEnvironment())
+        // When: the report is constructed (it logs in its init block)
+        newReport(observationEnabled = true, environment = MockEnvironment())
 
         // Then: the disable-filter line reports both switches as their default true, and does NOT suppress
         val line = disableFilterLine()
@@ -76,7 +69,7 @@ class ResilientWebClientObservationFilterLoggingTest {
             MockEnvironment().withProperty("management.observations.enable.http.client.requests", "false")
 
         // When
-        newFactory(observationEnabled = true, environment = environment)
+        newReport(observationEnabled = true, environment = environment)
 
         // Then: the line shows the false value AND warns the wired observation is suppressed centrally
         val line = disableFilterLine()
@@ -90,7 +83,7 @@ class ResilientWebClientObservationFilterLoggingTest {
         val environment = MockEnvironment().withProperty("management.observations.enable.all", "false")
 
         // When
-        newFactory(observationEnabled = true, environment = environment)
+        newReport(observationEnabled = true, environment = environment)
 
         // Then: the global switch reads false and the suppression note is present
         val line = disableFilterLine()
@@ -102,7 +95,7 @@ class ResilientWebClientObservationFilterLoggingTest {
     fun `should not flag suppression when the module toggle is off regardless of the central defaults`() {
         // Given: module toggle off; the central filter defaults are irrelevant because nothing is wired
         // When
-        newFactory(observationEnabled = false, environment = MockEnvironment())
+        newReport(observationEnabled = false, environment = MockEnvironment())
 
         // Then: the disable-filter line is still logged (for visibility) but carries no suppression note
         val line = disableFilterLine()
@@ -110,23 +103,23 @@ class ResilientWebClientObservationFilterLoggingTest {
         assertThat(line).doesNotContain("SUPPRESSED")
     }
 
-    /** The single central disable-filter log line emitted by the factory's init block. */
+    /** The single central disable-filter log line emitted by the report's init block. */
     private fun disableFilterLine(): String =
         logAppender.list
             .map { it.formattedMessage }
             .single { it.startsWith("Central Micrometer observation disable-filter") }
 
-    /** The single module-toggle log line emitted by the factory's init block. */
+    /** The single module-toggle log line emitted by the report's init block. */
     private fun moduleToggleLine(): String =
         logAppender.list
             .map { it.formattedMessage }
-            .single { it.startsWith("WebClient HTTP observation module toggle") }
+            .single { it.startsWith("Stack HTTP observation module toggle") }
 
     /**
      * The module-toggle line must say what the toggle ACHIEVES, not merely what it asks for.
      *
      * The distinction is invisible at runtime and was, until this group existed, invisible in the log too: with
-     * no `ObservationRegistry` bean the host's `ObservationWebClientCustomizer` never runs (it is
+     * no `ObservationRegistry` bean the host's `ObservationRestClientCustomizer` never runs (it is
      * `@ConditionalOnBean` on one), so a toggle reported as plain "on" produces exactly what "off" produces.
      */
     @Nested
@@ -135,7 +128,7 @@ class ResilientWebClientObservationFilterLoggingTest {
         fun `should report a plain on when a recording ObservationRegistry is behind the toggle`() {
             // Given: the toggle on AND a registry that will actually record - i.e. one with a handler
             // When
-            newFactory(
+            newReport(
                 observationEnabled = true,
                 environment = MockEnvironment(),
                 observationRegistry = recordingRegistry(),
@@ -153,7 +146,7 @@ class ResilientWebClientObservationFilterLoggingTest {
             // Given: the toggle on, no registry bean at all - the state of any host that did not switch
             // Micrometer observation on, and the state this module's own hand-assembled test contexts are in
             // When
-            newFactory(observationEnabled = true, environment = MockEnvironment(), observationRegistry = null)
+            newReport(observationEnabled = true, environment = MockEnvironment(), observationRegistry = null)
 
             // Then: still reported as configured `=true`, but the line says the toggle buys nothing
             assertThat(moduleToggleLine())
@@ -167,7 +160,7 @@ class ResilientWebClientObservationFilterLoggingTest {
         fun `should report on but nothing observed when the registry is the NOOP instance`() {
             // Given: a registry bean exists but is Micrometer's NOOP
             // When
-            newFactory(
+            newReport(
                 observationEnabled = true,
                 environment = MockEnvironment(),
                 observationRegistry = ObservationRegistry.NOOP,
@@ -192,7 +185,7 @@ class ResilientWebClientObservationFilterLoggingTest {
             //
             // Given: a real registry with no handler registered
             // When
-            newFactory(
+            newReport(
                 observationEnabled = true,
                 environment = MockEnvironment(),
                 observationRegistry = ObservationRegistry.create(),
@@ -208,10 +201,10 @@ class ResilientWebClientObservationFilterLoggingTest {
 
         @Test
         fun `should report off when the toggle is off even though a recording registry exists`() {
-            // Given: a perfectly good registry, toggle off - the factory replaces it with NOOP for ITS clients
-            // while every other WebClient of the host keeps observing. The line must name that, not the registry.
+            // Given: a perfectly good registry, toggle off - the stack's factory replaces it with NOOP for ITS
+            // clients while every other client of the host keeps observing. The line must name that, not the registry.
             // When
-            newFactory(
+            newReport(
                 observationEnabled = false,
                 environment = MockEnvironment(),
                 observationRegistry = recordingRegistry(),
@@ -234,40 +227,16 @@ class ResilientWebClientObservationFilterLoggingTest {
             }
     }
 
-    private fun newFactory(
+    private fun newReport(
         observationEnabled: Boolean,
         environment: MockEnvironment,
         observationRegistry: ObservationRegistry? = null,
-    ): ResilientWebClientFactory {
-        val resilience =
-            ReactiveResilienceDecorator(
-                CircuitBreakerRegistry.of(CircuitBreakerConfig.ofDefaults()),
-                TimeLimiterRegistry.of(TimeLimiterConfig.ofDefaults()),
-                BulkheadRegistry.of(BulkheadConfig.ofDefaults()),
-            )
-        val meshProperties =
-            MeshProperties(
-                defaults = MeshProperties.Defaults(individualRequestTimeoutMs = 1000),
-                endpoints =
-                    listOf(
-                        MeshProperties.EndpointConfig(
-                            triplet = "/endpoint/localhost/GET/backend",
-                            alias = "backend",
-                            baseUrl = "http://localhost:1",
-                        ),
-                    ),
-            )
-        val properties =
-            WebClientProperties(observability = WebClientProperties.Observability(httpObservationEnabled = observationEnabled))
-        return ResilientWebClientFactory(
-            properties,
-            meshProperties,
-            resilience,
-            JsonMapper.builder().build(),
+    ): HttpObservationReport =
+        HttpObservationReport(
+            stackName = "Stack",
+            toggleProperty = "app.stack.observability.http-observation-enabled",
+            observationEnabled = observationEnabled,
             environment = environment,
             observationRegistry = observationRegistry,
-            // Deliberately no Spring context here: a bare builder stands in for Boot's bean.
-            webClientBuilder = WebClient.builder(),
         )
-    }
 }

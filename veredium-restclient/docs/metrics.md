@@ -145,8 +145,9 @@ exchange did succeed — and only §1's missing sample and the WARN line say oth
 **Three switches can silence it, all silently.** The module toggle above; the central
 `management.observations.enable.http.client.requests` / `.all` disable-filter (default `true`); and a host
 without a *recording* `ObservationRegistry` bean (Micrometer counts a handler-less registry as noop).
-`RestClientObservationReport` logs the effective verdict at startup — `on (Boot's registry stays on the
-builder)` versus `on, but … nothing is observed` — and `RestClientObservationReportTest` pins every branch.
+`RestClientObservationReport` (the core's `HttpObservationReport` with this module's name and key) logs the
+effective verdict at startup — `on (Boot's registry stays on the builder)` versus `on, but … nothing is
+observed` — and the core's `HttpObservationReportTest` pins every branch.
 When the timer
 is missing, read those two lines before reading Micrometer configuration.
 

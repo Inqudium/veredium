@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.webclient
 
+import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Configuration
@@ -55,9 +56,9 @@ data class WebClientProperties(
     val observability: Observability = Observability(),
     /**
      * Whether a deserialised response is checked against its DTO's Bean Validation constraints. A global default
-     * with per-endpoint (backend-alias) overrides - see [Validation].
+     * with per-endpoint (backend-alias) overrides - the shared [ResponseValidationProperties] of `veredium-core`.
      */
-    val validation: Validation = Validation(),
+    val validation: ResponseValidationProperties = ResponseValidationProperties(),
 ) {
     init {
         // Both ends of this range are load-bearing.
@@ -124,39 +125,4 @@ data class WebClientProperties(
     data class Observability(
         val httpObservationEnabled: Boolean = false,
     )
-
-    /**
-     * Governs whether a backend's deserialised response DTO is checked against its Bean Validation constraints.
-     *
-     * A shared [enabled] default plus per-backend overrides in [endpoints] (keyed by the backend ALIAS, i.e. the
-     * mesh-derived R4j instance name): a per-alias entry wins in BOTH directions - it can switch a single backend
-     * on above an off default, or off above an on default. This granularity is load-bearing, not cosmetic: the
-     * constraints are generated from the published OpenAPI specs, and those specs are demonstrably stricter than
-     * reality in places, differently per endpoint. `ProductAgreementsDataResponseV8DTO` declares `@Size(min = 1)`
-     * on its result list, so validating that endpoint rejects the empty result a lookup without matches
-     * legitimately returns; `AccessProfileAdapter` documents a second, unrelated spec defect (incident
-     * INC15288523). Validation is therefore adopted one backend at a time, against real traffic - which is exactly
-     * what the per-alias override is for.
-     *
-     * The check itself lives OUTSIDE the Resilience4j decoration (see [ResilientWebClient]): a response that
-     * violates its own schema is a contract problem, not an outage, and must not open the circuit breaker.
-     *
-     * @property enabled Default `false`: the constraints promise a guarantee the specs do not keep everywhere, so
-     *   the safe default is off and each backend opts in deliberately.
-     * @property endpoints Per-backend-alias overrides; an alias not present inherits [enabled].
-     * @property failOnViolation Whether a detected violation FAILS the call (a [jakarta.validation
-     *   .ConstraintViolationException]) or is only REPORTED (logged at WARN, the response returned unchanged).
-     *   Default `true` (enforce). SHARED only, deliberately not per-endpoint: report-only is a rollout stance -
-     *   turn validation on for a backend and watch the WARN lines against real traffic before enforcing - and
-     *   that stance applies to the whole adopting wave, not to one backend at a time. The per-alias granularity
-     *   that matters is WHICH backends validate ([endpoints]); WHETHER a violation is fatal is a single posture.
-     */
-    data class Validation(
-        val enabled: Boolean = false,
-        val endpoints: Map<String, Boolean> = emptyMap(),
-        val failOnViolation: Boolean = true,
-    ) {
-        /** The effective toggle for [alias]: its own override when set, otherwise the shared [enabled] default. */
-        fun isEnabledFor(alias: String): Boolean = endpoints[alias] ?: enabled
-    }
 }

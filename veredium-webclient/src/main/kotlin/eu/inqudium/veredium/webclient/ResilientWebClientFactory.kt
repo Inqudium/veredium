@@ -3,18 +3,16 @@ package eu.inqudium.veredium.webclient
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
+import eu.inqudium.veredium.core.validation.ResponseValidation
 import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.observation.ObservationRegistry
 import io.netty.channel.ChannelOption
 import jakarta.annotation.PreDestroy
-import jakarta.validation.MessageInterpolator
-import jakarta.validation.Validator
 import jakarta.validation.ValidatorFactory
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.context.annotation.Configuration
-import org.springframework.core.env.Environment
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
@@ -26,7 +24,6 @@ import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
 import tools.jackson.databind.ObjectMapper
 import java.time.Duration
-import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeoutException
 
@@ -46,37 +43,20 @@ class ResilientWebClientFactory(
     private val meshProperties: MeshProperties,
     private val resilience: ReactiveResilienceDecorator,
     private val objectMapper: ObjectMapper,
-    // Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; the Spring
-    // context always injects it. Read ONLY to log the central Micrometer disable-filter values at startup (see
-    // the init block).
-    environment: Environment? = null,
-    // Nullable like environment: Spring injects the auto-configured factory when a Bean Validation
-    // provider is on the classpath. Absent -> validation cannot run for ANY backend, whatever the properties
-    // say, which the init block reports rather than leaving it to be discovered.
-    //
-    // The FACTORY rather than a ready-made Validator, because a Validator's message interpolator is fixed at
-    // construction while `usingContext()` is the standard way to derive one that differs - here, one pinned to
-    // English (see [validator]). Deriving keeps that choice inside this module: the host's own Validator bean,
-    // which its controllers use, is left exactly as it configured it.
+    // Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; Spring injects
+    // the auto-configured factory when a Bean Validation provider is on the classpath. Absent -> validation
+    // cannot run for ANY backend, whatever the properties say, which the startup line reports rather than
+    // leaving it to be discovered. See [ResponseValidation] for why the FACTORY rather than a Validator.
     validatorFactory: ValidatorFactory? = null,
     // Nullable like the two above: an optional dependency, so a direct (test) construction and a minimal
     // context both work without one. Absent -> the response-size summary is simply not registered and the
     // per-call path records nothing; nothing else about the client changes.
     private val meterRegistry: MeterRegistry? = null,
-    // Nullable like the three above, and like `environment` it is read ONLY to make the startup line below
-    // truthful - the factory does NOT wire it. Boot's ObservationWebClientCustomizer has already put the
-    // host's registry on the builder; this parameter exists so the factory can tell whether there WAS one.
-    //
-    // Without it, the toggle line could only report what the operator ASKED for, never what they will GET:
-    // `http-observation-enabled=true` in a host with no ObservationRegistry bean produces no span, no timer
-    // and no traceparent, and the line still read "on". Absent or NOOP is the normal, correct state for a
-    // host that wants no observation - it is only worth saying out loud when the toggle claims otherwise.
-    observationRegistry: ObservationRegistry? = null,
     // Boot's auto-configured builder (prototype scope: this factory owns its instance and clones it per
     // backend). Every WebClientCustomizer the host declares has already been applied to it - Boot's own
     // (observation registry + convention, codecs, connector) and the host's.
     //
-    // REQUIRED on purpose, unlike the three optional dependencies above: those are optional because the factory
+    // REQUIRED on purpose, unlike the optional dependencies above: those are optional because the factory
     // works sensibly without them. Without this one it would work DIFFERENTLY - a bare builder from the static
     // factory carries no host customizer and no observation registry, so the http.client.requests span would vanish
     // without a log line. Spring treats a Kotlin default as an optional dependency and would take exactly that
@@ -88,134 +68,31 @@ class ResilientWebClientFactory(
 ) {
     private val logger: Logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java)
 
-    /**
-     * The validator the clients use: the host's, but with its messages pinned to [Locale.ENGLISH].
-     *
-     * Constraint messages are interpolated against `Locale.getDefault()`, so the text of a violation otherwise
-     * depends on the locale of the machine the process happens to run on - the same defect would read
-     * "size must be between 1 and ..." on one host and "Groesse muss zwischen 1 und ... sein" on the next.
-     * That belongs nowhere near a log line: this codebase is English throughout, and log consumers, alert
-     * rules and anyone searching for a message have to be able to rely on its wording.
-     */
-    private val validator: Validator? =
-        validatorFactory?.let { factory ->
-            factory
-                .usingContext()
-                .messageInterpolator(EnglishMessageInterpolator(factory.messageInterpolator))
-                .validator
-        }
+    /** Which backends validate, with which validator, and whether a violation fails the call - see [ResponseValidation]. */
+    private val validation = ResponseValidation(properties.validation, validatorFactory)
 
     /** Standalone HTTP observation toggle (see [WebClientProperties.Observability]) - no sync-bridge coupling. */
     private val observationEnabled: Boolean = properties.observability.httpObservationEnabled
-
-    /**
-     * Whether the host has an ObservationRegistry that will actually RECORD something.
-     *
-     * Deliberately `isNoop` rather than a null check alone, because Micrometer defines it as more than identity:
-     * `SimpleObservationRegistry.isNoop()` is `this == NOOP || observationConfig().getObservationHandlers()
-     * .isEmpty()`. A registry bean with no `ObservationHandler` is therefore reported as noop - correctly, since
-     * it records nothing - and a bean-presence check would have called that case "wired" and been wrong.
-     *
-     * This is the difference between what the operator CONFIGURED and what the process will DO. Boot only places
-     * a registry on the builder when an `ObservationRegistry` bean exists (its `ObservationWebClientCustomizer`
-     * is `@ConditionalOnBean` on one); with no bean, or with one that records nothing, every outbound call opens
-     * nothing - no `http.client.requests` timer, no CLIENT span, no `traceparent` - whatever the toggle says.
-     */
-    private val hostObservationRegistryActive: Boolean = observationRegistry?.isNoop == false
-
-    /**
-     * What the module toggle ACHIEVES, as opposed to what it asks for - the text of the startup line below.
-     *
-     * The `on` case is split deliberately. A toggle that is on without a recording registry behind it is
-     * indistinguishable at runtime from one that is off: no span, no timer, nothing in the log. Reporting both
-     * as plain "on" is what sends someone hunting through Micrometer configuration for a span the host was never
-     * able to create.
-     */
-    private val observationVerdict: String =
-        when {
-            !observationEnabled -> {
-                "off (registry replaced by NOOP)"
-            }
-
-            hostObservationRegistryActive -> {
-                "on (Boot's registry stays on the builder)"
-            }
-
-            observationRegistry == null -> {
-                "on, but the host has NO ObservationRegistry bean - nothing is observed " +
-                    "(no span, no timer, no traceparent)"
-            }
-
-            else -> {
-                "on, but the host's ObservationRegistry records nothing - it is the NOOP or has no " +
-                    "ObservationHandler (no span, no timer, no traceparent)"
-            }
-        }
-
-    /**
-     * The central Micrometer observation DEACTIVATION filter, read for logging. `management.observations.enable.
-     * <name>` (default true) is the ONLY central Spring switch and is a name-prefixed DISABLE, not an enable
-     * switch: `all` scopes everything, `http.client.requests` scopes just the client observation. Absent -> the
-     * default `true` (enabled). When present, Spring applies it through the registry's filter predicate, so a
-     * `false` here suppresses the observation even though the module toggle is on.
-     */
-    private val centralEnableAll: Boolean =
-        environment?.getProperty(CENTRAL_ENABLE_ALL, Boolean::class.java, true) ?: true
-    private val centralEnableHttpClient: Boolean =
-        environment?.getProperty(CENTRAL_ENABLE_HTTP_CLIENT, Boolean::class.java, true) ?: true
 
     /**
      * The shared base builder: Boot's, so the host's WebClientCustomizers (observation, codecs, connector, own
      * beans) are already on it and every cloned per-endpoint client inherits them. The module toggle no longer
      * WIRES the observation registry - Boot does, through its ObservationWebClientCustomizer, so each outbound
      * request opens an `http.client.requests` observation (a CLIENT span + `traceparent` injection with a host
-     * tracing bridge) - it only REMOVES it when the operator switched this module's HTTP observation off.
+     * tracing bridge) - it only REMOVES it when the operator switched this module's HTTP observation off. What
+     * the toggle achieves in the host at hand is reported by [WebClientObservationReport], not here.
      */
     private val baseBuilder: WebClient.Builder =
         webClientBuilder.let { if (observationEnabled) it else it.observationRegistry(ObservationRegistry.NOOP) }
 
     init {
-        // Which backends actually validate, resolved the same way the clients resolve it. Worth a startup line
-        // because both ways this silently does nothing are invisible at runtime: a backend simply not listed,
-        // or - the trap the previous state was - no Bean Validation provider on the classpath at all, in which
-        // case no configuration can switch it on for anyone.
-        val validated =
-            meshProperties
-                .resolveAll()
-                .values
-                .map { it.alias }
-                .filter { properties.validation.isEnabledFor(it) }
+        // Which backends actually validate, resolved the same way the clients resolve it - see
+        // ResponseValidation.validatedAliases for why this is worth a line.
         logger.info(
             "Response Bean Validation: default={}, validated endpoints={} (provider {})",
-            properties.validation.enabled,
-            validated.sorted().ifEmpty { listOf("none") },
-            if (validator != null) "present, messages pinned to English" else "MISSING - validation cannot run for any backend",
-        )
-
-        // NOTE: the JVM-global Reactor context-propagation hook this observation setup depends on is NOT flipped
-        // here - it lives in [WebClientReactorContextPropagationConfig], so a process-wide switch is not a side effect of
-        // constructing this factory. What remains here is diagnostics for the factory's own wiring.
-        logger.info(
-            "WebClient HTTP observation module toggle app.webclient.observability.http-observation-enabled={} -> {}",
-            observationEnabled,
-            observationVerdict,
-        )
-        // The ONLY central Spring switch is a DEACTIVATION filter, management.observations.enable.<name>
-        // (default true) - a name-prefixed DISABLE, NOT an enable switch. Log its effective values for the
-        // client observation name so an operator can spot a central override that suppresses a wired
-        // observation (e.g. `...enable.all=false` or `...enable.http.client.requests=false`).
-        val suppressedCentrally = observationEnabled && !(centralEnableAll && centralEnableHttpClient)
-        logger.info(
-            "Central Micrometer observation disable-filter (default true, false = OFF): {}={}, {}={}{}",
-            CENTRAL_ENABLE_ALL,
-            centralEnableAll,
-            CENTRAL_ENABLE_HTTP_CLIENT,
-            centralEnableHttpClient,
-            if (suppressedCentrally) {
-                " -> '$HTTP_CLIENT_OBSERVATION' is SUPPRESSED centrally despite the module toggle being on"
-            } else {
-                ""
-            },
+            validation.enabledByDefault,
+            validation.validatedAliases(meshProperties.resolveAll().values.map { it.alias }),
+            validation.providerVerdict,
         )
     }
 
@@ -306,8 +183,7 @@ class ResilientWebClientFactory(
                 .build()
 
         // The validator is resolved to null when validation is off for THIS backend, so the per-call path
-        // carries no toggle. The decision is the global default plus a per-alias override
-        // (see WebClientProperties.Validation).
+        // carries no toggle (see ResponseValidation).
         return ResilientWebClient(
             webClient,
             backendName,
@@ -315,8 +191,8 @@ class ResilientWebClientFactory(
             resilience,
             objectMapper,
             maxInMemoryBytes,
-            validator.takeIf { properties.validation.isEnabledFor(backendName) },
-            properties.validation.failOnViolation,
+            validation.validatorFor(backendName),
+            validation.failOnViolation,
             responseBodySize(backendName),
         )
     }
@@ -333,7 +209,7 @@ class ResilientWebClientFactory(
      * are absent by construction. Read it as the headroom of the population that works, and pair it with the
      * limit named on the failure line for the ones that do not.
      *
-     * Resolved ONCE per backend here rather than looked up per call, the same way [validator] is: the hot path
+     * Resolved ONCE per backend here rather than looked up per call, the same way the validator is: the hot path
      * should hold no registry lookup and no toggle it could disagree with.
      */
     private fun responseBodySize(backendName: String): DistributionSummary? =
@@ -395,41 +271,7 @@ class ResilientWebClientFactory(
     private companion object {
         /** Name of the single shared Reactor-Netty pool; also the `name` tag on its pool metrics. */
         const val POOL_NAME = "lap-webclient"
-
-        /** Spring's WebClient client observation name - the target of the central disable-filter below. */
-        const val HTTP_CLIENT_OBSERVATION = "http.client.requests"
-
-        /** Central Micrometer disable-filter keys (default true; false = OFF). See [centralEnableAll]. */
-        const val CENTRAL_ENABLE_ALL = "management.observations.enable.all"
-        const val CENTRAL_ENABLE_HTTP_CLIENT = "management.observations.enable.$HTTP_CLIENT_OBSERVATION"
     }
-}
-
-/**
- * A [MessageInterpolator] that renders every constraint message in English, whatever locale is asked for or
- * ambient.
- *
- * Bean Validation interpolates against `Locale.getDefault()` unless told otherwise, which makes the text of a
- * violation a property of the host the process runs on rather than of the defect. These messages end up in log
- * lines and exception texts that people search and alert on, so they have to read the same everywhere.
- *
- * The locale-taking overload deliberately ignores its argument too. It is not called on this path - the engine
- * uses the other one - so honouring it would achieve nothing except leaving a way for the guarantee to be
- * bypassed later.
- */
-private class EnglishMessageInterpolator(
-    private val delegate: MessageInterpolator,
-) : MessageInterpolator {
-    override fun interpolate(
-        messageTemplate: String,
-        context: MessageInterpolator.Context,
-    ): String = delegate.interpolate(messageTemplate, context, Locale.ENGLISH)
-
-    override fun interpolate(
-        messageTemplate: String,
-        context: MessageInterpolator.Context,
-        locale: Locale,
-    ): String = delegate.interpolate(messageTemplate, context, Locale.ENGLISH)
 }
 
 /**

@@ -220,6 +220,9 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Environment is part of what this context reproduces, so a shipped `app.webclient.*` value that
             // never arrives fails a test here instead of silently degrading to the code default.
             .withUserConfiguration(WebClientConfiguration::class.java)
+            // The startup report on the observation toggle, as the context would scan it - the test above reads
+            // its line next to legatium's.
+            .withBean(WebClientObservationReport::class.java)
             .withBean(
                 MeshProperties::class.java,
                 Supplier {
@@ -668,20 +671,20 @@ class LegatiumExchangeLoggingIntegrationTest {
         fun `should report the toggle as plain on, with the library agreeing that the observation is wired`() {
             // What is tested: that the shipped `http-observation-enabled: true` reaches a context which can ACT
             //   on it, and that the two independent verdicts written at startup now tell the same story.
-            // How success is judged: the factory reports the unqualified "on" (a recording registry stayed on
-            //   the builder), and legatium - which decides by BEAN lookup on ObservationWebClientCustomizer -
-            //   reports that it found Boot's client observation.
+            // How success is judged: the module's observation report writes the unqualified "on" (a recording
+            //   registry stayed on the builder), and legatium - which decides by BEAN lookup on
+            //   ObservationWebClientCustomizer - reports that it found Boot's client observation.
             // Why it matters: these two lines are read together when a client span is missing, and they answer
-            //   different questions - the factory's other line reports `management.observations.enable.*`, which
+            //   different questions - the report's other line reports `management.observations.enable.*`, which
             //   are PROPERTIES defaulting to true when unset, while legatium reports BEANS. Before the
             //   observation was wired here they read as a contradiction ("the central filter is on" next to
             //   "found no client observation") while both were true. Pinning them as a PAIR is what keeps that
             //   pair honest: neither line may claim a wiring the context does not have.
             //
             // Given: recorders on both loggers, in place before the context refreshes
-            val factoryLogger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
+            val reportLogger = LoggerFactory.getLogger(WebClientObservationReport::class.java) as Logger
             val libraryLogger = LoggerFactory.getLogger(ClientLoggingAutoConfiguration::class.java) as Logger
-            recording(factoryLogger) { factoryLines ->
+            recording(reportLogger) { reportLines ->
                 recording(libraryLogger) { libraryLines ->
                     // When
                     hostContext("observation-toggle").run { context ->
@@ -693,8 +696,8 @@ class LegatiumExchangeLoggingIntegrationTest {
                             .isFalse()
                     }
 
-                    // Then: the factory's verdict - configured AND effective
-                    assertThat(factoryLines.lineContaining("http-observation-enabled"))
+                    // Then: the report's verdict - configured AND effective
+                    assertThat(reportLines.lineContaining("http-observation-enabled"))
                         .contains("app.webclient.observability.http-observation-enabled=true")
                         .contains("on (Boot's registry stays on the builder)")
                         .doesNotContain("nothing is observed")

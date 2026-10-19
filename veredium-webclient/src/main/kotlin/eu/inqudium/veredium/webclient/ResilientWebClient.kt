@@ -2,6 +2,7 @@ package eu.inqudium.veredium.webclient
 
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
+import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import io.github.resilience4j.reactor.timelimiter.TimeLimiterOperator
 import io.micrometer.core.instrument.DistributionSummary
 import jakarta.validation.ConstraintViolationException
@@ -89,7 +90,7 @@ class ResilientWebClient(
      * Bean Validation for this backend's responses, or `null` when it is switched off for it.
      *
      * Null-as-off rather than a boolean flag: the per-backend decision is resolved ONCE, by
-     * [ResilientWebClientFactory] when it builds this client (see [WebClientProperties.Validation]), so the
+     * [ResilientWebClientFactory] when it builds this client (see [ResponseValidationProperties]), so the
      * hot path holds no toggle to consult and cannot disagree with the configuration mid-flight.
      */
     private val validator: Validator? = null,
@@ -98,7 +99,7 @@ class ResilientWebClient(
      * [ConstraintViolationException]; `false` logs the violation at WARN and returns the response unchanged, so
      * a backend can be watched against real traffic before its violations are made fatal. Irrelevant when
      * [validator] is null (validation off for this backend). Shared, not per-backend - see
-     * [WebClientProperties.Validation.failOnViolation].
+     * [ResponseValidationProperties.failOnViolation].
      */
     private val failOnViolation: Boolean = true,
     /**

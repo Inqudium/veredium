@@ -2,7 +2,7 @@
 
 **Status:** Accepted  
 **Date:** 2026-10-19  
-**Last updated:** 2026-10-19 (ADR-0002 moves the blocking decorator into the core as well)  
+**Last updated:** 2026-10-19 (ADR-0002 moves the blocking decorator into the core as well; the same day, response validation and the HTTP observation report followed - see below)  
 **Deciders:** Dirk Haase (maintainer)  
 **Related:** ADR-0002 (the blocking resilience decorator, the one stack-specific piece this ADR left in the blocking client, moves to the core too)
 
@@ -61,6 +61,15 @@ vocabulary.
   (`MeshResilienceCustomizers.kt`, `MeshResilienceCustomizerRegistrar`) and
   `MeshResilienceStartupGuard`.
 - The guide of the ladder, `veredium-core/docs/mesh-timeout.md`.
+- Added after the cut, by the same rule: `eu.inqudium.veredium.core.validation`
+  (`ResponseValidationProperties`, the `validation.*` block of both
+  properties trees, and `ResponseValidation`, the validator derived from the
+  host's factory with English messages) and
+  `eu.inqudium.veredium.core.observation` (`HttpObservationReport`, the
+  startup lines on what the observation toggle achieves). Both had been
+  written twice - once as classes in the blocking client, once inline in
+  the reactive client's factory - and each stack now keeps a subclass or a
+  property of the shared type.
 
 The core depends on `spring-boot-starter` and `resilience4j-spring-boot4`
 and on no HTTP stack.

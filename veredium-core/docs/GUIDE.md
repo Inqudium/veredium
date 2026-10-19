@@ -22,7 +22,12 @@ on. It holds everything that is identical by construction between the blocking c
   built, and a fail-fast startup guard;
 - the **blocking resilience decorator**: `CircuitBreaker( TimeLimiter( Bulkhead( call ) ) )`
   around any blocking call, with the virtual-thread hand-off the blocking TimeLimiter needs -
-  usable on its own, without a client.
+  usable on its own, without a client;
+- **response validation** (`eu.inqudium.veredium.core.validation`): the `validation.*` block
+  both properties trees bind, and the one Bean Validation `Validator` every client derives from
+  the host's factory, its messages pinned to English;
+- the **HTTP observation report** (`eu.inqudium.veredium.core.observation`): the two startup
+  lines that say what a stack's observation toggle achieves in the host at hand.
 
 Nothing in here knows an HTTP stack. A host does not depend on this module directly; it comes
 with the client module the host chooses. The decision to cut the modules this way is
@@ -86,6 +91,15 @@ interrupts the worker; its failures arrive on the future, unwrapped. The class c
 `veredium-restclient` declares its bean (`RestClientResilienceConfig`, worker name
 `restclient-call-`), and a host with a blocking call of its own declares another or constructs
 one directly ([ADR-0002](../../docs/adr/ADR-0002-blocking-resilience-decorator-as-a-core-component.md)).
+
+**Validation and the observation report.** `ResponseValidationProperties` is the
+`validation.*` block of `app.restclient` and `app.webclient` alike - a shared default, per-alias
+overrides, one `fail-on-violation` posture; `ResponseValidation` turns it and the host's
+`ValidatorFactory` into the validator a client's factory hands each client (or `null` for an
+alias that does not validate), with the provider verdict for the startup line.
+`HttpObservationReport` reads the stack's toggle, the central Micrometer disable-filter and the
+host's `ObservationRegistry` and says, once, which of the three silences the
+`http.client.requests` observation; each stack subclasses it with its name and key.
 
 ## Bounding a blocking call of your own
 

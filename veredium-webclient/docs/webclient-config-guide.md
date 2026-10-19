@@ -129,7 +129,7 @@ itself; this flag decides whether it *keeps* it.
 - Self-contained: it resolves from this module's own property and references nothing from sync-bridge.
 - See also §4.2 for the **central** disable-filter that can suppress the observation even when this is on.
 
-### 1.4 `validation.*` — response Bean Validation (`WebClientProperties.Validation`)
+### 1.4 `validation.*` — response Bean Validation (`ResponseValidationProperties`, shared with the blocking client in `veredium-core`)
 
 Whether a deserialised response DTO is checked against its Bean Validation constraints. **Off by default**,
 because the constraints are generated from the published OpenAPI specs and those specs are demonstrably stricter

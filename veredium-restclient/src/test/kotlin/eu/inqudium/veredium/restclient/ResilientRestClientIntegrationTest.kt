@@ -19,6 +19,7 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
+import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException
@@ -869,7 +870,7 @@ class ResilientRestClientIntegrationTest {
             newFactory(
                 "validated",
                 circuitBreakers = circuitBreakers,
-                validation = RestClientProperties.Validation(enabled = true, failOnViolation = true),
+                validation = ResponseValidationProperties(enabled = true, failOnViolation = true),
                 validatorFactory = validatorFactory,
             ).create("validated")
 
@@ -902,7 +903,7 @@ class ResilientRestClientIntegrationTest {
             val client =
                 newFactory(
                     "reported",
-                    validation = RestClientProperties.Validation(enabled = true, failOnViolation = false),
+                    validation = ResponseValidationProperties(enabled = true, failOnViolation = false),
                     validatorFactory = validatorFactory,
                 ).create("reported")
 
@@ -1222,7 +1223,7 @@ class ResilientRestClientIntegrationTest {
         maxInMemorySize: DataSize = RestClientProperties().maxInMemorySize,
         meterRegistry: MeterRegistry? = null,
         meshProperties: MeshProperties = meshFor(backendName),
-        validation: RestClientProperties.Validation = RestClientProperties.Validation(),
+        validation: ResponseValidationProperties = ResponseValidationProperties(),
         validatorFactory: ValidatorFactory? = null,
         // Deliberately no Spring context here: a bare builder stands in for Boot's bean. A test that needs to
         // observe what the factory puts on its clients passes a builder carrying an interceptor of its own.
