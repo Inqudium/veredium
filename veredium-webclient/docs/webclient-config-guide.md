@@ -274,7 +274,7 @@ Under `defaults`, and — partially, field-merged — per endpoint. Every field 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `global-margin-ms` | `Long` | `200` | Folded into `global = (1 + maxRetries)·individual + globalMargin`. The **one** margin the sidecar also reads. |
-| `web-client-margin-ms` | `Long` | `200` | `responseTimeout = global + webClientMargin`. |
+| `response-timeout-margin-ms` | `Long` | `200` | `responseTimeout = global + responseTimeoutMargin` - Reactor Netty's `responseTimeout` on this stack, Apache's on the blocking one. |
 | `p99-margin-ms` | `Long` | `200` | `p99 = individual − p99Margin` (single-attempt latency recovered from the anchor). |
 | `healthy-retries` | `Int` | `1` | Routine retries still counting as "healthy" (capped at `maxRetries`). |
 | `slow-call-backoff-ms` | `Long` | `200` | Per-attempt backoff feeding the healthy ceiling. |
@@ -337,7 +337,7 @@ You maintain **one** value per endpoint — `individual-request-timeout-ms`. Eve
 
 ```
 global          = (1 + maxRetries) · individual + globalMarginMs
-responseTimeout = global + webClientMarginMs
+responseTimeout = global + responseTimeoutMarginMs
 timeLimiter     = responseTimeout + transport.timeLimiterMargin        (margin computed, not configurable)
 p99             = individual − p99MarginMs
 slowCall        = min( p99·(1 + eff) + eff·slowCallBackoffMs ,  global · slowCallCapFraction )
@@ -402,32 +402,39 @@ resilience4j:
         slow-call-duration-threshold: 60s   # inert unless mesh derives it (§2.6); the TimeLimiter cancels first
     instances: { <alias>: { base-config: lap-backend }, ... }
   timelimiter:
-    instances:
-      api-example-com-GET-v5-access-profiles-by-involved-party:
-        timeout-duration: 3s        # only the R4j default until mesh registers the derived value
+    configs:
+      lap-backend:
+        timeout-duration: 3s        # the fallback for an endpoint whose time-limiter toggle is off
         cancel-running-future: true
+    instances: { <alias>: { base-config: lap-backend }, ... }   # EVERY alias, or the start fails
 ```
 
-### 3.2 How mesh amends the registries
+### 3.2 How mesh customizes the registries
 
-`MeshTimeoutConfig` integrates the derivation into the module's **existing** R4j registries (not new beans). For
-each endpoint, `MeshTimeoutRegistrar` overrides **only** the one derived knob on top of the endpoint's existing
-config:
+The mesh wiring lives in `veredium-core` and is shared with the blocking client; `WebClientVerdictsConfig`
+imports it and contributes the one thing the core cannot know - this stack's exception vocabulary
+(`WebClientVerdicts`). For each endpoint, a `CircuitBreakerConfigCustomizer` and (when `time-limiter.enabled`)
+a `TimeLimiterConfigCustomizer` named after the alias are consulted by Resilience4j's Boot configuration as the
+**last** step of building that `instances.<alias>` entry - after the named base config and the instance's own
+YAML, before the instance exists - and set **only** the derived knobs on top of what YAML produced:
 
 - TimeLimiter `timeoutDuration` ← `timeLimiterTimeout` (when `time-limiter.enabled`),
 - CircuitBreaker `slowCallDurationThreshold` ← `slowCallDuration` (when `circuit-breaker.enabled`), **plus** a
   conditional pin of `slowCallRateThreshold` to **100%** exactly when the derived slow-call sits below
   `individual` (the "inversion") — the derived duration is only safe against a healthy-but-slow endpoint when the
-  rate demands total degradation before opening. Duration and rate are contributed as **one** amendment.
+  rate demands total degradation before opening. Duration and rate are set by the **one** customizer.
 
-A pre-existing instance under the alias is **removed and recreated** with the derived config (R4j configs are
-immutable), so mesh wins over a YAML-pinned instance. This is safe because the decorator resolves the instance
-per call and the WebClient factory is lazy, so nothing holds a stale reference at startup.
+Nothing is removed or recreated and nothing is re-bound: the instance the metric and health binders see is the
+final one. The price is that **every** derived alias must be declared under all three
+`resilience4j.<layer>.instances` - Resilience4j creates an instance for an undeclared customizer name on the
+registry *default*, not on `lap-backend`, and says nothing. `MeshResilienceStartupGuard` (also `veredium-core`)
+fails the start in that case and names the key to add; `MeshResilienceShippedConfigTest` boots the reference
+configuration of this module against it.
 
 ### 3.3 What the CircuitBreaker ignores
 
 The breaker sits **outside** the bulkhead, and out of the box it charges every error against the failure rate.
-The module amends each instance's ignore predicate (additively — the base predicate is OR-ed back in) to discount
+The customizer of §3.2 folds `WebClientVerdicts` into each instance (additively — the base predicate is OR-ed back in) to discount
 faults the client causes **itself**, matched on the thrown exception **and its causes**:
 
 - `BulkheadFullException` — this pipeline's own load shedding, not a backend failure.

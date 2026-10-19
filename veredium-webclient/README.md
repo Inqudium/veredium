@@ -1,6 +1,6 @@
 # veredium-webclient
 
-Veredium, the reactive client: Spring's `WebClient` over Reactor Netty: one resilience-wrapped client per mesh endpoint, the timeout ladder derived from one measured anchor, the three Resilience4j primitives amended at startup, the codec buffer limit and the exchange event of `legatium-webclient-logging`.
+Veredium, the reactive client: Spring's `WebClient` over Reactor Netty: one resilience-wrapped client per mesh endpoint, the timeout ladder derived from one measured anchor, the three Resilience4j primitives installed through the library's own customizers (shared with the blocking client in `veredium-core`), the codec buffer limit and the exchange event of `legatium-webclient-logging`.
 
 ## Usage
 

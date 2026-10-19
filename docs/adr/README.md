@@ -10,11 +10,11 @@ code disagree, the code wins and the ADR is corrected.
 
 ## Index by topic
 
-None yet. The first record takes `ADR-0001` and opens a topic table
-here, in the shape of the sibling projects' indexes:
+### Module structure
 
 | ADR | Title | Status |
 |-----|-------|--------|
+| [ADR-0001](ADR-0001-one-stack-neutral-core-module.md) | One stack-neutral core module instead of twin copies | Accepted |
 
 ## Superseded
 

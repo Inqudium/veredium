@@ -7,7 +7,7 @@
 
 ## Scope
 
-`veredium-webclient` is the reactive client of the Veredium project: Spring's `WebClient` over Reactor Netty: one resilience-wrapped client per mesh endpoint, the timeout ladder derived from one measured anchor, the three Resilience4j primitives amended at startup, the codec buffer limit and the exchange event of `legatium-webclient-logging`.
+`veredium-webclient` is the reactive client of the Veredium project: Spring's `WebClient` over Reactor Netty: one resilience-wrapped client per mesh endpoint, the timeout ladder derived from one measured anchor, the three Resilience4j primitives installed through the library's own customizers (shared with the blocking client in `veredium-core`), the codec buffer limit and the exchange event of `legatium-webclient-logging`.
 
 The module ships the client INFRASTRUCTURE only. A host declares its own adapters on top: one
 `@Component` per backend that asks the factory for the client of its mesh endpoint alias and

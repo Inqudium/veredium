@@ -6,8 +6,8 @@
 This guide explains what happens to a call made through `ResilientRestClient` from the moment an adapter
 invokes it to the moment the caller gets a value or an exception: which thread does what, which of the five
 timeouts fires in which phase, how the bulkhead and the circuit breaker see the call, and what cancellation
-does. It is the blocking counterpart of the reactive twin's `web-client/docs/mesh-timeout.md` and
-`webclient-config-guide.md`, and it goes deeper where the blocking stack differs: the thread hand-off, the
+does. It builds on the shared ladder of `veredium-core/docs/mesh-timeout.md` and is the blocking counterpart
+of the reactive twin's `webclient-config-guide.md`, and it goes deeper where the blocking stack differs: the thread hand-off, the
 interrupt semantics, and the shutdown.
 
 The configuration values quoted are the shipped `application.yml` and the Kotlin defaults. The worked example
@@ -67,7 +67,7 @@ All per-endpoint timeouts derive from ONE measured number, the endpoint's `indiv
 |---|---|---|---|---|
 | `individual` | configured | sidecar, per attempt | 400 | 1000 |
 | `global` | `(1 + maxRetries) × individual + globalMarginMs` (200) | sidecar, whole call incl. its retries (`max-retries: 0` shipped) | 600 | 1200 |
-| `responseTimeout` | `global + restClientMarginMs` (200) | **this module**, Apache `RequestConfig.responseTimeout` | 800 | 1400 |
+| `responseTimeout` | `global + responseTimeoutMarginMs` (200) | **this module**, Apache `RequestConfig.responseTimeout` | 800 | 1400 |
 | `timeLimiterTimeout` | `responseTimeout + connect + pendingAcquire + 100` (= + 400) | **this module**, Resilience4j TimeLimiter | 1200 | 1800 |
 | `slowCall` | `min(p99 × (1 + healthyRetries), 0.8 × global)` | breaker's slow-call threshold, only if `circuit-breaker.enabled` | 200 | 800 |
 
@@ -89,7 +89,7 @@ The ordering `individual < global < responseTimeout < timeLimiterTimeout` holds 
 
 `MeshLadderLogger` prints the resolved ladder per endpoint at startup
 (`mesh ladder [alias] triplet: individual=…ms global=…ms responseTimeout=…ms slowCall=…ms timeLimiter=…ms`),
-and the mesh customizers (`resilience/MeshResilienceCustomizers.kt`) hand the `timeLimiter` rung to Resilience4j
+and the mesh customizers (`veredium-core`, `MeshResilienceCustomizers.kt`) hand the `timeLimiter` rung to Resilience4j
 while it builds each `instances.<alias>` entry — before the instance exists, so the registry never holds a
 pre-mesh value. `MeshResilienceStartupGuard` fails the start when an alias is undeclared or the rung did not
 arrive. Adapters still read their budget on every access: the registry owns it.
@@ -220,7 +220,7 @@ handling. On the worker, the permit's lifetime is exactly the exchange's.
 **Why the breaker must ignore it.** The breaker is outermost, so a `BulkheadFullException` travels outward
 through it like any other error. Resilience4j records every exception unless told otherwise, and a load peak
 would then open the circuit against a backend that was never even called. The per-alias circuit-breaker
-customizer (`resilience/MeshResilienceCustomizers.kt`) installs the ignore predicate while Resilience4j builds the
+customizer (`veredium-core`, fed with `RestClientVerdicts`) installs the ignore predicate while Resilience4j builds the
 instance — in code, not in YAML, because it is a structural invariant of this pipeline, not a tunable.
 
 **Sizing — the invariant with the pool.** Four aliases × 25 permits = 100 = `app.mesh.defaults.transport.
@@ -286,7 +286,7 @@ size and shut down. The decorator makes exactly one hand-off and declares it.
 
 **6. Parity with the twin.** The reactive module must use the semaphore (a `ThreadPoolBulkhead` cannot wrap a
 `Mono`), so the two modules share the `resilience4j.bulkhead.instances.<alias>` configuration, the meter
-names, the ignore registrars and the sizing invariant. A `ThreadPoolBulkhead` lives in its own registry
+names, the shared customizer that installs the ignore verdict (`veredium-core`) and the sizing invariant. A `ThreadPoolBulkhead` lives in its own registry
 (`resilience4j.thread-pool-bulkhead.*`) with its own config surface; the two stacks would be tuned differently
 for the same backends.
 
@@ -408,7 +408,7 @@ What each bound produces, for the caller, the breaker, the exchange event and th
 > **Note on the interrupted caller.** `CircuitBreaker.decorateCallable` catches `Exception`, and
 > `InterruptedException` is one, so without help the breaker would record a caller's interruption as a failure
 > of the backend — a backend that was not even given the time to answer. `InterruptedException` is therefore
-> the third entry of `ClientSideFailurePolicy.CLIENT_SIDE_FAILURES`, and the circuit-breaker customizer
+> the third entry of `RestClientVerdicts.clientSideFailure`, and the circuit-breaker customizer
 > keeps it off every mesh alias's breaker; the reactive twin needs no such entry because a cancelled
 > subscription carries no error signal at all.
 

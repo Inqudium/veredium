@@ -1361,5 +1361,5 @@ not downstream — a subtlety that affects operator order in the chain.
 **TimeLimiter**. A Resilience4J primitive that imposes a wall-clock timeout on
 the decorated call — here as the reactive `TimeLimiterOperator`, one instance
 per mesh endpoint. Its budget and the transport's response timeout are both
-derived from the same per-endpoint mesh ladder (see `mesh-timeout.md`), so they
+derived from the same per-endpoint mesh ladder (see `veredium-core/docs/mesh-timeout.md`), so they
 cannot drift past each other.

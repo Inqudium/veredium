@@ -1,14 +1,16 @@
 # rest-client — the blocking twin of web-client's `adapter/web`
 
-> **Ownership & baseline.** Maintained by **Dirk Haase**. Verified against the code at commit `cd5bceb4`
-> (2026-10-19). Where this text and the code disagree, the code wins.
+> **Ownership & baseline.** Maintained by **Dirk Haase**. Verified against the code of 2026-10-19 (the module
+> cut of ADR-0001). Where this text and the code disagree, the code wins.
 
 `veredium-restclient` is `veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient` re-implemented on Spring's
 blocking `RestClient` over Apache HttpClient 5, with **no reactive dependency on the classpath**. Package
-`eu.inqudium.veredium.restclient`, sub-packages `mesh` and `resilience` exactly as in the twin. The design,
-the names, the configuration surface and the test suite follow the reactive module one-to-one wherever the
-blocking stack allows it; this document records what maps directly and what deliberately differs, so the
-differences are decisions on record rather than surprises in production.
+`eu.inqudium.veredium.restclient`. What is identical by construction between the two stacks - the mesh timeout
+ladder, the breaker verdicts and the Resilience4j wiring that installs them - is not re-implemented at all:
+both modules depend on `veredium-core` for it ([ADR-0001](../../docs/adr/ADR-0001-one-stack-neutral-core-module.md)).
+The design, the names, the configuration surface and the test suite follow the reactive module one-to-one
+wherever the blocking stack allows it; this document records what maps directly and what deliberately differs,
+so the differences are decisions on record rather than surprises in production.
 
 ---
 
@@ -19,19 +21,20 @@ differences are decisions on record rather than surprises in production.
 | `ResilientWebClient`                  | `ResilientRestClient`                  | Same per-call pipeline; `get`/`post` return `T` or throw. |
 | `ResilientWebClientFactory`           | `ResilientRestClientFactory`           | Same optional collaborators, same required `RestClient.Builder` bean from Boot, same startup lines. |
 | `ReactiveResilienceDecorator`         | `BlockingResilienceDecorator`          | Same order `CircuitBreaker(TimeLimiter(Bulkhead(call)))`, see §2. |
-| `ClientSideFailureIgnoreRegistrar`, `ExpectedClientErrorSuccessRegistrar`, `MeshTimeoutRegistrar`, `resilience/*` (the amendment framework) | `resilience/MeshResilienceCustomizers.kt`, `MeshResilienceStartupGuard` | Same three-verdict policy and the same derived rungs — installed through Resilience4j's own `*ConfigCustomizer` beans while each instance is built, not by a remove + recreate after startup; a fail-fast guard replaces the applier's ERROR events (§8). |
-| `HttpExchangeErrorPolicy`, `ClientSideFailurePolicy` | same names | Predicates on `RestClientResponseException` / `ResponseBodyLimitExceededException`. |
+| `WebClientVerdicts` / `WebClientVerdictsConfig` | `RestClientVerdicts` / `RestClientVerdictsConfig` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the config bean that imports the core's `MeshTimeoutConfig` (§8). |
 | `WebClientProperties` (`app.webclient`) | `RestClientProperties` (`app.restclient`) | Same keys except `pool.pending-acquire-max-count` (§3). |
-| `mesh/*`                              | copied (package renamed)               | `ResolvedTimeouts.webClientResponseTimeout` is `responseTimeout`; `Margins.webClientMarginMs` (`web-client-margin-ms`) is `restClientMarginMs` (`rest-client-margin-ms`). |
-| `BaseAdapter`                         | `BaseAdapter`                          | `webClientResponseTimeout` is `responseTimeout`. |
+| `eu.inqudium.veredium.core.mesh`, `eu.inqudium.veredium.core.resilience` | the same classes | **Shared, not copied.** The ladder (`MeshProperties`, `ResolvedTimeouts`, `responseTimeout` and `response-timeout-margin-ms` on both stacks), the two policies, the customizers and the guard live once, in `veredium-core`. |
+| `BaseAdapter`                         | `BaseAdapter`                          | Same `responseTimeout` / `timeLimiterTimeout` surface. |
 | legatium-webclient-logging            | legatium-restclient-logging            | Same `adapter-logging.*` surface, same `adapter_*` fields, same attribute constants. |
 | `WebClientMetrics`                    | `RestClientMetrics`                    | `restclient.response.body.size{adapter}`; no URI tagger (§4). |
 | `adapter.{Access,InvolvedParty,ProductAgreement}Adapter` | same names, same package | Same interfaces minus `suspend`; `@throws RestClientResponseException`. |
 | `adapter.{agreement,party,profile}` DTOs | copied verbatim, same package | Jackson annotations and Bean Validation constraints unchanged. |
 
-The `mesh` and `resilience` packages are copies, not a shared module: the user asked for a self-contained twin,
-and the one thing that would justify extracting them — a third client stack — does not exist. If it ever does,
-extract then.
+The `mesh` and `resilience` packages were copies at first - a self-contained twin, with "extract at the third
+stack" as the rule. That misread the Rule of Three: it guards against abstracting from one example, whereas here
+two real, identical copies were maintained by one person and had started to diverge within a day of the copy.
+They are one module now, `veredium-core`, and each stack keeps only its client, decorator, factory and its
+verdicts object ([ADR-0001](../../docs/adr/ADR-0001-one-stack-neutral-core-module.md)).
 
 The adapters and DTOs keep the twin's **package and class names** (`eu.inqudium.veredium`,
 `.agreement`, `.party`, `.profile`): they are the same API contract, and a consumer switches stacks by swapping
@@ -176,7 +179,7 @@ app:
       enabled: true                  # shipped ON, report only (code defaults: off / fail)
       fail-on-violation: false
       endpoints: {}
-  mesh: ...                          # unchanged, see web-client/docs/mesh-timeout.md
+  mesh: ...                          # the shared tree, see veredium-core/docs/mesh-timeout.md
 adapter-logging: ...                 # unchanged, read by legatium-restclient-logging
 logging:
   level:
@@ -199,9 +202,12 @@ module:
   short-circuit without a worker.
 - `BoundedBodyReaderTest` — both readings of the limit, the inclusive boundary, and that an oversized body is not
   drained into memory.
-- `MeshResilienceCustomizersTest`, `ClientSideFailureCustomizerTest`, `ExpectedClientErrorCustomizerTest`,
-  `MeshResilienceStartupGuardTest` and `MeshResilienceShippedConfigTest` — the customizer wiring of §8; the
-  twin's `MeshTimeoutOrderingTest` and amendment tests have no counterpart here.
+- `RestClientVerdictsTest` — the verdicts through the real decorator and against this stack's exception shapes
+  (Spring's status-specific subclasses, the `ResourceAccessException` wrapper, the four client-side failures of
+  the hand-off); `MeshResilienceShippedConfigTest` — this module's reference configuration booted with the
+  core's wiring and these verdicts. The mechanism itself (the ladder, the customizers, the guard, both
+  directions of its failure) is pinned once, in `veredium-core`'s test suite, with a stand-in stack; the
+  reactive twin carries the same two classes (`WebClientVerdictsTest`, `MeshResilienceShippedConfigTest`).
 
 The adapter tests (`AdapterIntegrationTest`, `ResponseValidationTest`, `ResponseDeserialisationContractTest`,
 `MeshAliasContractTest`, `ResilienceConfigContractTest`, `LoggingLevelContractTest`) are ports with the
@@ -211,36 +217,45 @@ coroutine wrappers removed and the thrown type changed to Spring's status-specif
 `helm-mesh-timeouts` chart, shelling out to the `helm` binary to compare the chart's derived sidecar `global`
 with the Kotlin ladder. This module does not: the proof concerns the one chart and the one derivation, both of
 which the twin already pins, and a vendored copy can only ever prove agreement with itself, never with the chart
-that is deployed. The derived numbers of this module's `mesh` copy are pinned by `MeshPropertiesDerivationTest`.
+that is deployed. The derived numbers of the shared ladder are pinned by `veredium-core`'s `MeshPropertiesDerivationTest`.
 
 ---
 
-## 8. Resilience wiring: customizers, not amendments
+## 8. Resilience wiring: customizers, not amendments - shared, not copied
 
-The twin installs its breaker verdicts and the mesh-derived rungs with a home-grown amendment framework: three
-contributors fill a plan, an applier folds it per instance in `afterSingletonsInstantiated`, removes and
-recreates each Resilience4j instance, verifies the result by identity and reports an ERROR event when an alias
-was unknown. The twin rejected Resilience4j's own extension point because nothing there boots the
+The twin used to install its breaker verdicts and the mesh-derived rungs with a home-grown amendment framework:
+three contributors filled a plan, an applier folded it per instance in `afterSingletonsInstantiated`, removed
+and recreated each Resilience4j instance, verified the result by identity and reported an ERROR event when an
+alias was unknown. It had rejected Resilience4j's own extension point because nothing there booted the
 auto-configuration, so a customizer's effect could not be observed in its tests.
 
-This module uses that extension point. `resilience/MeshResilienceCustomizers.kt` registers one
-`CircuitBreakerConfigCustomizer` per mesh alias and one `TimeLimiterConfigCustomizer` per alias whose
-time-limiter derivation is on (a Spring 7 `BeanRegistrar`, imported by `MeshTimeoutConfig`, because the number
-of beans follows the endpoint list). Resilience4j's Boot configuration consults them as the last step of
-building each `instances.<alias>` entry — after the named base config and the instance's own YAML, before the
-instance exists — so the binders bind to the final instance and nothing is rebuilt later. The verdicts are
-folded onto what YAML produced (ignore OR-ed, record AND-ed), so an operator's own lists survive.
+This module used that extension point from the start, and since the module cut of ADR-0001 both stacks do, from
+one implementation in `veredium-core`: `MeshResilienceCustomizers.kt` registers one `CircuitBreakerConfigCustomizer`
+per mesh alias and one `TimeLimiterConfigCustomizer` per alias whose time-limiter derivation is on (a Spring 7
+`BeanRegistrar`, imported by the core's `MeshTimeoutConfig`, because the number of beans follows the endpoint
+list). Resilience4j's Boot configuration consults them as the last step of building each `instances.<alias>`
+entry — after the named base config and the instance's own YAML, before the instance exists — so the binders
+bind to the final instance and nothing is rebuilt later. The verdicts are folded onto what YAML produced (ignore
+OR-ed, record AND-ed), so an operator's own lists survive.
 
-What the twin's applier reported as an ERROR is here a failed start. An alias missing from
+What the stack contributes is one bean, `BreakerVerdicts` (`RestClientVerdicts` here, `WebClientVerdicts` in the
+twin): how to read a response status off this stack's exception, which exception types this stack raises
+itself, and a 404 in the shape this stack throws it as the guard's probe. `RestClientVerdictsConfig` declares the
+bean and `@Import`s `MeshTimeoutConfig`, so a host that scans this module's package gets the core wiring too.
+The RULES — a benign 4xx except 408/429 is a success, a client-side failure is ignored, the cause chain is
+walked to a bounded depth — are written once and cannot drift between the stacks any more.
+
+What the twin's applier reported as an ERROR is a failed start on both stacks. An alias missing from
 `resilience4j.<layer>.instances` does not go unserved — Resilience4j creates an instance for every customizer
 name it finds no declaration for — but it is built on the registry default, not on the named base config
 (`lap-backend`), so the operator's policy is silently lost (and a bulkhead, which has no customizer, is created
-on the first call). `MeshResilienceStartupGuard` (`SmartInitializingSingleton`) checks for every mesh alias that
-all three layers DECLARE it (read off the bound `resilience4j.*` property beans, not the registry) and that the
-customizer's effect is observable on the instance the registry serves, and fails the context naming the key to
-add. `MeshResilienceShippedConfigTest` boots the
-three auto-configurations against the shipped `application.yml` and pins both directions.
+on the first call). `MeshResilienceStartupGuard` (`SmartInitializingSingleton`, `veredium-core`) checks for every
+mesh alias that all three layers DECLARE it (read off the bound `resilience4j.*` property beans, not the
+registry) and that the customizer's effect is observable on the instance the registry serves, and fails the
+context naming the key to add. The twin's reference configuration once declared a single TimeLimiter instance
+while mesh derives four; it declares all four now, and each module's `MeshResilienceShippedConfigTest` boots the
+three auto-configurations against its own file.
 
 The consequence for consumers of `BaseAdapter`: the budget an adapter publishes is final as soon as the registry
 bean exists; reading it on access is still the right shape (the registry owns it), but no longer an
-init-order requirement, and the twin's `MeshTimeoutOrderingTest` has no counterpart here.
+init-order requirement.

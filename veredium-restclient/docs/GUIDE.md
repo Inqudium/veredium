@@ -38,6 +38,7 @@ of this module is the reference configuration the contract tests pin - a library
 - [Metrics](metrics.md)
 - [What maps to the reactive sibling and what differs](restclient-vs-webclient.md)
 - [Decisions this module relies on](decisions.md)
+- [The mesh timeout ladder](../../veredium-core/docs/mesh-timeout.md) (veredium-core)
 
 ## Provenance
 

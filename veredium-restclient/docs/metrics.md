@@ -167,13 +167,13 @@ resolving each primitive from the registries auto-configured out of `resilience4
 | `resilience4j.bulkhead.*` (`available.concurrent.calls`, `max.allowed.concurrent.calls`) | gauges | Per-endpoint semaphore bulkhead, innermost; the permit is taken **on the worker**, so it counts calls genuinely in flight at the backend. | `available.concurrent.calls == 0` sustained → callers see `BulkheadFullException`; check `restclient.pool.pending` (§2) in the same breath. |
 
 **Three verdicts, not two — what `calls{kind}` actually counts.** Resilience4j has three answers for an error,
-and one customizer per mesh alias (`resilience/MeshResilienceCustomizers.kt`) sorts every exception into them while
+and one customizer per mesh alias (`veredium-core`, fed with `RestClientVerdicts`) sorts every exception into them while
 Resilience4j builds the instance:
 
 | The call | Verdict | Source |
 |---|---|---|
-| never reached the backend, or the caller stopped waiting: `BulkheadFullException`, `ResponseBodyLimitExceededException`, `InterruptedException` (any of them as a cause too) | **ignored** — absent from the window | `ClientSideFailurePolicy` |
-| reached it and got a benign 4xx (every 4xx except 408 and 429) | **success** — enters the window as such | `HttpExchangeErrorPolicy` |
+| never reached the backend, or the caller stopped waiting: `BulkheadFullException`, `ResponseBodyLimitExceededException`, `InterruptedException` (any of them as a cause too) | **ignored** — absent from the window | `RestClientVerdicts.clientSideFailure` |
+| reached it and got a benign 4xx (every 4xx except 408 and 429) | **success** — enters the window as such | `RestClientVerdicts.httpExchangeError` |
 | anything else: transport faults, 5xx, 408/429, the TimeLimiter abort | **failure** | the config defaults |
 
 So `failure.rate` is a statement about the *backend*, not about this process: a 404-heavy lookup, a full
@@ -218,7 +218,7 @@ log fields too.
 
 Startup lines are the other non-metric source an operator reads next to these meters: the resolved mesh
 ladder per endpoint (`MeshLadderLogger`), the two observation verdicts (§3), the Bean Validation summary, and
-the two registrars' policy lines naming the aliases they amended.
+the startup guard's two policy lines naming the aliases the verdicts were installed on.
 
 ---
 

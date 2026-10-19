@@ -9,7 +9,7 @@ import org.slf4j.spi.LoggingEventBuilder
  *
  * Two consumers per stack derive from it and therefore cannot disagree:
  *  - the synchronous error log's severity, in the stack's `Resilient*Client`;
- *  - the circuit breaker's record predicate, via the per-alias customizer in [MeshResilienceCustomizers].
+ *  - the circuit breaker's record predicate, via the per-alias customizer ([circuitBreakerCustomizer]).
  *
  * The exchange event itself (legatium's `adapter-http-exchange` logger) is NOT a consumer: the library
  * classifies on its own terms - a 4xx answer is `rejected` with its status there, at INFO except for
