@@ -27,7 +27,9 @@ on. It holds everything that is identical by construction between the blocking c
   both properties trees bind, and the one Bean Validation `Validator` every client derives from
   the host's factory, its messages pinned to English;
 - the **HTTP observation report** (`eu.inqudium.veredium.core.observation`): the two startup
-  lines that say what a stack's observation toggle achieves in the host at hand.
+  lines that say what a stack's observation toggle achieves in the host at hand;
+- `BaseAdapter`: the two budgets an adapter over either client publishes to its callers,
+  `timeLimiterTimeout` and `responseTimeout`, one contract for both stacks.
 
 Nothing in here knows an HTTP stack. A host does not depend on this module directly; it comes
 with the client module the host chooses. The decision to cut the modules this way is
@@ -88,7 +90,7 @@ MDC and current observation are carried onto the worker for the duration of the 
 caller that is interrupted itself cancels its worker. `decorateAsync` runs the same pipeline
 with the wait on a second virtual thread and returns a `CompletableFuture` whose `cancel`
 interrupts the worker; its failures arrive on the future, unwrapped. The class carries no Spring annotation;
-`veredium-restclient` declares its bean (`RestClientResilienceConfig`, worker name
+`veredium-restclient` declares its bean (`RestClientConfiguration`, worker name
 `restclient-call-`), and a host with a blocking call of its own declares another or constructs
 one directly ([ADR-0002](../../docs/adr/ADR-0002-blocking-resilience-decorator-as-a-core-component.md)).
 

@@ -411,7 +411,7 @@ resilience4j:
 
 ### 3.2 How mesh customizes the registries
 
-The mesh wiring lives in `veredium-core` and is shared with the blocking client; `WebClientVerdictsConfig`
+The mesh wiring lives in `veredium-core` and is shared with the blocking client; `WebClientConfiguration`
 imports it and contributes the one thing the core cannot know - this stack's exception vocabulary
 (`WebClientVerdicts`). For each endpoint, a `CircuitBreakerConfigCustomizer` and (when `time-limiter.enabled`)
 a `TimeLimiterConfigCustomizer` named after the alias are consulted by Resilience4j's Boot configuration as the

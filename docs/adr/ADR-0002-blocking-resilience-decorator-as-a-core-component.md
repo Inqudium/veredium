@@ -37,7 +37,7 @@ a standalone user needs, and no further.
 
 - **No Spring annotation.** The core's configuration is never scanned
   (ADR-0001); a host that wants the decorator as a bean declares one.
-  `veredium-restclient` does so in `RestClientResilienceConfig`, with the
+  `veredium-restclient` does so in `RestClientConfiguration`, with the
   host's `ObservationRegistry` as an optional dependency
   (`ObjectProvider`).
 - **The worker name is the host's.** `workerNamePrefix` is a constructor

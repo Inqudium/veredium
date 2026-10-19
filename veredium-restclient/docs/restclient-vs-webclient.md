@@ -20,13 +20,13 @@ so the differences are decisions on record rather than surprises in production.
 |---------------------------------------|----------------------------------------|-------|
 | `ResilientWebClient`                  | `ResilientRestClient`                  | Same per-call pipeline; `get`/`post` return `T` or throw, `getAsync`/`postAsync` return a `CompletableFuture<T>` (§2). |
 | `ResilientWebClientFactory`           | `ResilientRestClientFactory`           | Same optional collaborators, same required `RestClient.Builder` bean from Boot, same startup lines. |
-| `ReactiveResilienceDecorator`         | `BlockingResilienceDecorator` (`veredium-core`) | Same order `CircuitBreaker(TimeLimiter(Bulkhead(call)))`, see §2. The blocking one is a component of the core, usable without this client; this module declares its bean in `RestClientResilienceConfig`. |
-| `WebClientVerdicts` / `WebClientVerdictsConfig` | `RestClientVerdicts` / `RestClientVerdictsConfig` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the config bean that imports the core's `MeshTimeoutConfig` (§8). |
+| `ReactiveResilienceDecorator`         | `BlockingResilienceDecorator` (`veredium-core`) | Same order `CircuitBreaker(TimeLimiter(Bulkhead(call)))`, see §2. The blocking one is a component of the core, usable without this client; this module declares its bean in `RestClientConfiguration`. |
+| `WebClientVerdicts` / `WebClientConfiguration` | `RestClientVerdicts` / `RestClientConfiguration` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the config bean that imports the core's `MeshTimeoutConfig` (§8). |
 | `WebClientProperties` (`app.webclient`) | `RestClientProperties` (`app.restclient`) | Same keys except `pool.pending-acquire-max-count` (§3). |
 | `WebClientObservationReport` | `RestClientObservationReport` | Each a five-line subclass of the core's `HttpObservationReport` with the stack's name and toggle key; the two startup lines and their four verdicts are written once. |
 | `ResponseValidation`, `ResponseValidationProperties` (`validation.*` of either properties tree) | the same classes (`veredium-core`) | The validator derived from the host's factory with its messages pinned to English, the per-alias toggle, the provider verdict - the webclient used to carry this inline in its factory. |
 | `eu.inqudium.veredium.core.mesh`, `eu.inqudium.veredium.core.resilience` | the same classes | **Shared, not copied.** The ladder (`MeshProperties`, `ResolvedTimeouts`, `responseTimeout` and `response-timeout-margin-ms` on both stacks), the two policies, the customizers and the guard live once, in `veredium-core`. |
-| `BaseAdapter`                         | `BaseAdapter`                          | Same `responseTimeout` / `timeLimiterTimeout` surface. |
+| `BaseAdapter`                         | `BaseAdapter` (`eu.inqudium.veredium.core`) | **Shared, not copied.** The two budgets an adapter publishes, one contract for both stacks. |
 | legatium-webclient-logging            | legatium-restclient-logging            | Same `adapter-logging.*` surface, same `adapter_*` fields, same attribute constants. |
 | `WebClientMetrics`                    | `RestClientMetrics`                    | `restclient.response.body.size{adapter}`; no URI tagger (§4). |
 | `adapter.{Access,InvolvedParty,ProductAgreement}Adapter` | same names, same package | Same interfaces minus `suspend`; `@throws RestClientResponseException`. |
@@ -55,7 +55,7 @@ while the future is cancelled. That hand-off is **the** structural difference to
 three consequences the decorator owns. The decorator itself lives in `veredium-core`
 ([ADR-0002](../../docs/adr/ADR-0002-blocking-resilience-decorator-as-a-core-component.md)): nothing in it is
 specific to an HTTP exchange, so a host bounds a blocking call of its own with the same class; what this module
-adds is its bean (`RestClientResilienceConfig`) with the worker name `restclient-call-`.
+adds is its bean (`RestClientConfiguration`) with the worker name `restclient-call-`.
 
 1. **The worker.** Every call runs on a fresh virtual thread (`restclient-call-N`). No pool to size, nothing that
    could become a second, undeclared bulkhead. The bulkhead permit is taken *on the worker*, so it still counts
@@ -250,7 +250,7 @@ OR-ed, record AND-ed), so an operator's own lists survive.
 
 What the stack contributes is one bean, `BreakerVerdicts` (`RestClientVerdicts` here, `WebClientVerdicts` in the
 twin): how to read a response status off this stack's exception, which exception types this stack raises
-itself, and a 404 in the shape this stack throws it as the guard's probe. `RestClientVerdictsConfig` declares the
+itself, and a 404 in the shape this stack throws it as the guard's probe. `RestClientConfiguration` declares the
 bean and `@Import`s `MeshTimeoutConfig`, so a host that scans this module's package gets the core wiring too.
 The RULES — a benign 4xx except 408/429 is a success, a client-side failure is ignored, the cause chain is
 walked to a bounded depth — are written once and cannot drift between the stacks any more.

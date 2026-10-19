@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `BlockingResilienceDecorator` moves from `veredium-restclient` to `veredium-core` as a component
   usable without a client: no Spring annotation (the blocking client declares its bean in
-  `RestClientResilienceConfig`), the worker-thread name prefix is a constructor parameter
+  `RestClientConfiguration`), the worker-thread name prefix is a constructor parameter
   (`veredium-call-` by default, `restclient-call-` for the blocking client), a second `decorate`
   overload takes the three Resilience4j instances directly instead of a registry name, and
   `SELF_INFLICTED_FAILURES` names the failures a breaker used with it must ignore, and
@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the new `WebClientObservationReport`) - both written once instead of as a class in the blocking
   client and inline in the reactive factory. `ResilientWebClientFactory` loses its `environment` and
   `observationRegistry` constructor parameters; the report reads them instead.
+- `BaseAdapter` moves to `eu.inqudium.veredium.core`: the two budgets an adapter publishes are the same two
+  numbers on both stacks, so a host composes them from one type. The reactive copy's KDoc had the order of
+  the two timeouts inverted; the shared one states the ladder's.
+- One configuration class per client module: `RestClientConfiguration` carries the `app.restclient`
+  binding, the import of the core's `MeshTimeoutConfig`, the `BreakerVerdicts` bean and the
+  `BlockingResilienceDecorator` bean; `WebClientConfiguration` the reactive counterpart without the
+  decorator. The interim `RestClientVerdictsConfig`, `RestClientResilienceConfig` and
+  `WebClientVerdictsConfig` are gone; a host that does not scan imports the one class.
 - `ResilientRestClient.getAsync` / `postAsync`: the blocking client's calls without the wait, over the
   decorator's asynchronous form - a `CompletableFuture<T>` that carries every outcome unwrapped (a
   serialisation failure included) and whose `cancel` abandons the exchange.

@@ -86,8 +86,12 @@ class ResilientRestClientFactoryBuilderWiringTest {
     private fun factoryContext(
         observationEnabled: Boolean,
         meterRegistry: SimpleMeterRegistry,
-    ): ApplicationContextRunner =
-        ApplicationContextRunner()
+    ): ApplicationContextRunner {
+        val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+        // Generous on purpose: the wiring is the subject, the call must never time out.
+        val timeLimiters = TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build())
+        val bulkheads = BulkheadRegistry.ofDefaults()
+        return ApplicationContextRunner()
             .withBean(
                 RestClientProperties::class.java,
                 Supplier {
@@ -107,14 +111,15 @@ class ResilientRestClientFactoryBuilderWiringTest {
                         endpoints = listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/$BACKEND", alias = BACKEND)),
                     )
                 },
-            ).withBean(CircuitBreakerRegistry::class.java, Supplier { CircuitBreakerRegistry.ofDefaults() })
-            // Generous on purpose: the wiring is the subject, the call must never time out.
+            ).withBean(CircuitBreakerRegistry::class.java, Supplier { circuitBreakers })
+            .withBean(TimeLimiterRegistry::class.java, Supplier { timeLimiters })
+            .withBean(BulkheadRegistry::class.java, Supplier { bulkheads })
+            // Built here rather than through RestClientConfiguration, which would also import the core's mesh
+            // wiring - whose guard needs Resilience4j's auto-configuration this hand-assembled context leaves out.
             .withBean(
-                TimeLimiterRegistry::class.java,
-                Supplier { TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build()) },
-            ).withBean(BulkheadRegistry::class.java, Supplier { BulkheadRegistry.ofDefaults() })
-            .withUserConfiguration(RestClientResilienceConfig::class.java)
-            .withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
+                BlockingResilienceDecorator::class.java,
+                Supplier { BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, workerNamePrefix = RestClientConfiguration.WORKER_NAME_PREFIX) },
+            ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
             // A recording registry: every observation lands as a meter in the SimpleMeterRegistry, which is what
             // the host's actuator ObservationAutoConfiguration does with its MeterRegistry.
             .withBean(
@@ -125,6 +130,7 @@ class ResilientRestClientFactoryBuilderWiringTest {
                     }
                 },
             ).withBean(ResilientRestClientFactory::class.java)
+    }
 
     /** Boot's RestClient auto-configuration, which provides the builder bean and the observation customizer. */
     private fun ApplicationContextRunner.withBootsRestClientAutoConfiguration(): ApplicationContextRunner =

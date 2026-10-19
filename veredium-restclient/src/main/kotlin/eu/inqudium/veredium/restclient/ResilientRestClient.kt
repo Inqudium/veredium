@@ -26,50 +26,6 @@ import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 /**
- * The two effective per-call timeouts an adapter exposes to its callers, so upstream orchestration can
- * compose an end-to-end budget from the individual backend budgets (e.g. a resolver summing the timeouts
- * along its call chain) without reaching into the adapter's [ResilientRestClient]s.
- *
- * If an adapter fronts more than one mesh endpoint (one [ResilientRestClient] per operation), then an
- * implementation can aggregate the per-client values - typically the `maxOf` across its clients, the
- * pessimistic ceiling for a single logical call.
- *
- * The two values are layered, not alternatives: the TimeLimiter is the outer, hard deadline after which the
- * CALLER is released, while the transport response timeout is a slightly tighter bound underneath it on the
- * response phase alone (see the ordering in [BlockingResilienceDecorator]). Keeping the response timeout below
- * the TimeLimiter budget ensures the transport is what normally trips, so the worker thread is released too;
- * the TimeLimiter covers the phases before the response (connect, pending-acquire) that the response timeout
- * does not.
- */
-interface BaseAdapter {
-    /**
-     * The Resilience4j TimeLimiter budget for the call - the outer, hard deadline enforced by the blocking
-     * TimeLimiter, after which the caller is released with a `TimeoutException`.
-     *
-     * ## What an adapter call can fail with, beyond the documented non-2xx
-     *
-     * A 200 whose body does not fit the declared DTO fails the call rather than yielding a partially populated
-     * object. A property declared required and non-nullable that is missing is rejected by Jackson; one that is
-     * explicitly `null` is rejected by the null check the Kotlin compiler puts in the constructor. Both surface
-     * as a `tools.jackson.databind.DatabindException` naming the property. This matters to a caller because
-     * Kotlin's types promise the field cannot be null - nothing downstream guards against it, so a silent null
-     * would only fail much later.
-     *
-     * Such a failure is CLIENT-side: the backend answered, and with a 200. Like a parse error it is therefore
-     * kept out of the Resilience4j decoration and does not count towards the circuit breaker (see
-     * [BlockingResilienceDecorator]). It is logged with full severity; the exchange line legatium writes for
-     * the call shows the 200 the backend answered with, because the exchange itself succeeded.
-     */
-    val timeLimiterTimeout: Duration
-
-    /**
-     * The transport's response timeout - the bound on waiting for the HTTP response, sitting just below
-     * [timeLimiterTimeout].
-     */
-    val responseTimeout: Duration
-}
-
-/**
  * A resilience-wrapped HTTP caller for a single downstream backend, handed out by [ResilientRestClientFactory]
  * instead of a bare [RestClient]. It owns the per-call pipeline - the bounded body read, error surfacing, body
  * (de)serialisation and the R4j decoration ([BlockingResilienceDecorator]) - so a caller only describes the

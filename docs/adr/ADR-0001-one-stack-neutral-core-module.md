@@ -69,7 +69,8 @@ vocabulary.
   startup lines on what the observation toggle achieves). Both had been
   written twice - once as classes in the blocking client, once inline in
   the reactive client's factory - and each stack now keeps a subclass or a
-  property of the shared type.
+  property of the shared type. `BaseAdapter`, the two budgets an adapter
+  publishes to its callers, followed for the same reason.
 
 The core depends on `spring-boot-starter` and `resilience4j-spring-boot4`
 and on no HTTP stack.
@@ -86,7 +87,7 @@ class BreakerVerdicts(httpExchangeError, clientSideFailure, benignClientErrorPro
 ```
 
 Each stack holds one instance (`RestClientVerdicts`, `WebClientVerdicts`)
-and one `@Configuration` (`RestClientVerdictsConfig`, `WebClientVerdictsConfig`)
+and one `@Configuration` (`RestClientConfiguration`, `WebClientConfiguration`)
 that declares the `BreakerVerdicts` bean and `@Import`s the core's
 `MeshTimeoutConfig`. The core's configuration is therefore never scanned
 on its own: a host that scans its stack's package gets the shared wiring

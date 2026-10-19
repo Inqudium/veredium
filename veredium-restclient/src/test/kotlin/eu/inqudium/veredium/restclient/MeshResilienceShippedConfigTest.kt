@@ -22,7 +22,7 @@ import org.springframework.web.client.HttpClientErrorException
 /**
  * Boots Resilience4j's own Boot auto-configuration on the `resilience4j.*` and `app.mesh.*` blocks of this
  * module's reference configuration (`src/test/resources/application.yml`) with THIS stack's wiring
- * ([RestClientVerdictsConfig], which imports the core's mesh configuration) - the one proof that the shipped
+ * ([RestClientConfiguration], which imports the core's mesh configuration) - the one proof that the shipped
  * blocks, the derived aliases, the blocking stack's verdicts and the core's guard agree.
  *
  * What is tested: that the context starts, and that every instance the file declares shows the customizer's
@@ -77,7 +77,7 @@ class MeshResilienceShippedConfigTest {
                     CircuitBreakerAutoConfiguration::class.java,
                     BulkheadAutoConfiguration::class.java,
                 ),
-            ).withUserConfiguration(RestClientVerdictsConfig::class.java)
+            ).withUserConfiguration(RestClientConfiguration::class.java)
 
     /** The `resilience4j.*` and `app.mesh.*` keys of the shipped file, flattened the way Boot would load them. */
     private fun shippedProperties(): Map<String, Any> =

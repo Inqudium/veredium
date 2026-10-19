@@ -2,14 +2,8 @@ package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import org.springframework.boot.context.properties.ConfigurationProperties
-import org.springframework.boot.context.properties.EnableConfigurationProperties
-import org.springframework.context.annotation.Configuration
 import org.springframework.util.unit.DataSize
 import java.time.Duration
-
-@Configuration
-@EnableConfigurationProperties(WebClientProperties::class)
-class WebClientConfiguration
 
 /**
  * GLOBAL configuration for the WebClients produced by [ResilientWebClientFactory] - everything NOT

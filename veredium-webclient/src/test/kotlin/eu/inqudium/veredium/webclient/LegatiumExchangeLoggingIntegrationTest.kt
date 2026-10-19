@@ -43,6 +43,7 @@ import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.boot.autoconfigure.AutoConfigurations
+import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.env.YamlPropertySourceLoader
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
@@ -216,10 +217,12 @@ class LegatiumExchangeLoggingIntegrationTest {
                     }
                 },
             )
-            // The module's OWN @EnableConfigurationProperties class, not a hand-made instance: binding from the
-            // Environment is part of what this context reproduces, so a shipped `app.webclient.*` value that
-            // never arrives fails a test here instead of silently degrading to the code default.
-            .withUserConfiguration(WebClientConfiguration::class.java)
+            // The module's OWN @EnableConfigurationProperties binding, not a hand-made instance: binding from
+            // the Environment is part of what this context reproduces, so a shipped `app.webclient.*` value
+            // that never arrives fails a test here instead of silently degrading to the code default.
+            // [WebClientConfiguration] itself is not imported: it also pulls in the core's mesh wiring, whose
+            // startup guard needs Resilience4j's auto-configuration, which this hand-assembled context leaves out.
+            .withUserConfiguration(BoundWebClientProperties::class.java)
             // The startup report on the observation toggle, as the context would scan it - the test above reads
             // its line next to legatium's.
             .withBean(WebClientObservationReport::class.java)
@@ -252,6 +255,10 @@ class LegatiumExchangeLoggingIntegrationTest {
             .withBean(ResilientWebClientFactory::class.java)
             .let { runner -> tracer?.let { bean -> runner.withBean(Tracer::class.java, Supplier { bean }) } ?: runner }
     }
+
+    /** The `app.webclient` binding alone - see [hostContext] for why not [WebClientConfiguration]. */
+    @EnableConfigurationProperties(WebClientProperties::class)
+    class BoundWebClientProperties
 
     /**
      * The [SHIPPED_PREFIXES] keys of the shipped `src/main/resources/application.yml`, flattened the way Boot

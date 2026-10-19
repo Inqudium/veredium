@@ -2,14 +2,8 @@ package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import org.springframework.boot.context.properties.ConfigurationProperties
-import org.springframework.boot.context.properties.EnableConfigurationProperties
-import org.springframework.context.annotation.Configuration
 import org.springframework.util.unit.DataSize
 import java.time.Duration
-
-@Configuration
-@EnableConfigurationProperties(RestClientProperties::class)
-class RestClientConfiguration
 
 /**
  * GLOBAL configuration for the RestClients produced by [ResilientRestClientFactory] - everything NOT

@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicReference
  * call, the three instances) and a `() -> T`, and the call runs guarded. `veredium-restclient` is its one
  * consumer in this repository; a host that has a blocking call of its own to bound - a JDBC lookup, a legacy
  * SDK, a file system - decorates it the same way. There is no Spring annotation on the class: a host that wants
- * it as a bean declares one (the blocking client does, in `RestClientResilienceConfig`), which is also where
+ * it as a bean declares one (the blocking client does, in `RestClientConfiguration`), which is also where
  * the worker-thread name of that host is chosen.
  *
  * ## Why THIS order - it is Resilience4j's own

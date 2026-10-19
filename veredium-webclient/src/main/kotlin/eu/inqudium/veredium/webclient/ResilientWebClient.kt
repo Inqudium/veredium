@@ -3,7 +3,6 @@ package eu.inqudium.veredium.webclient
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.validation.ResponseValidationProperties
-import io.github.resilience4j.reactor.timelimiter.TimeLimiterOperator
 import io.micrometer.core.instrument.DistributionSummary
 import jakarta.validation.ConstraintViolationException
 import jakarta.validation.Validator
@@ -16,50 +15,6 @@ import reactor.core.publisher.Mono
 import tools.jackson.databind.ObjectMapper
 import java.time.Duration
 import java.util.concurrent.TimeUnit
-
-/**
- * The two effective per-call timeouts an adapter exposes to its callers, so upstream orchestration can
- * compose an end-to-end budget from the individual backend budgets (e.g. a resolver summing the timeouts
- * along its call chain) without reaching into the adapter's [ResilientWebClient]s.
- *
- * If an adapter fronts more than one mesh endpoint (one [ResilientWebClient] per operation), than an
- * implementation can aggregate the per-client values - typically the `maxOf` across its clients, the
- * pessimistic ceiling for a single logical call.
- *
- * The two values are layered, not alternatives: the TimeLimiter is the outer, hard deadline that cancels
- * the whole reactive chain, while the WebClient response timeout is a slightly looser transport-level
- * backstop underneath it (see the ordering in [ResilientWebClient]). Keeping the response timeout above
- * the TimeLimiter budget ensures the TimeLimiter is the one that trips first, yielding a clean timeout
- * rather than a raw transport error.
- */
-interface BaseAdapter {
-    /**
-     * The Resilience4j TimeLimiter budget for the call - the outer, hard deadline enforced by the
-     * [TimeLimiterOperator], after which the whole reactive chain is cancelled.
-     *
-     * ## What an adapter call can fail with, beyond the documented non-2xx
-     *
-     * A 200 whose body does not fit the declared DTO fails the call rather than yielding a partially populated
-     * object. A property declared required and non-nullable that is missing is rejected by Jackson; one that is
-     * explicitly `null` is rejected by the null check the Kotlin compiler puts in the constructor. Both surface
-     * as a `tools.jackson.databind.DatabindException` naming the property, and both are pinned by
-     * `ResponseDeserialisationContractTest`. This matters to a caller because Kotlin's types promise the field
-     * cannot be null - nothing downstream guards against it, so a silent null would only fail much later.
-     *
-     * Such a failure is CLIENT-side: the backend answered, and with a 200. Like a parse error it is therefore
-     * kept out of the Resilience4j decoration and does not count towards the circuit breaker (see
-     * [ReactiveResilienceDecorator]). It is logged with full severity; the exchange line legatium writes for
-     * the call shows the 200 the backend answered with, because the exchange itself succeeded.
-     */
-    val timeLimiterTimeout: Duration
-
-    /**
-     * The Reactor Netty response-receive timeout - the transport-level bound on waiting for the HTTP
-     * response, sitting just below [timeLimiterTimeout] as a backstop. The ladder's `responseTimeout` rung
-     * (`veredium-core`), the same number the blocking twin applies as Apache's response timeout.
-     */
-    val responseTimeout: Duration
-}
 
 /**
  * A resilience-wrapped HTTP caller for a single downstream backend, handed out by [ResilientWebClientFactory]

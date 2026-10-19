@@ -38,6 +38,7 @@ import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.boot.autoconfigure.AutoConfigurations
+import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.env.YamlPropertySourceLoader
 import org.springframework.boot.restclient.autoconfigure.RestClientAutoConfiguration
 import org.springframework.boot.restclient.autoconfigure.RestClientObservationAutoConfiguration
@@ -171,8 +172,12 @@ class LegatiumExchangeLoggingIntegrationTest {
      * Micrometer counts a handler-less registry as noop, and a noop registry records nothing however well the
      * rest is wired.
      *
-     * The three Resilience4j registries are beans of their own so that [BlockingResilienceDecorator] is
-     * constructed by the context - and receives the context's `ObservationRegistry`, as it does in the host.
+     * The three Resilience4j registries are beans of their own, and [BlockingResilienceDecorator] is built over
+     * them with the context's `ObservationRegistry` and this module's worker name, as [RestClientConfiguration]
+     * builds it in the host. That configuration itself is NOT imported: it also pulls in the core's mesh
+     * wiring, whose startup guard needs Resilience4j's auto-configuration on the registries - which this
+     * hand-assembled context deliberately leaves out. [BoundRestClientProperties] stands in for its one other
+     * contribution, the `app.restclient` binding.
      *
      * [tracer] is the one knob that switches legatium between its two "observed" verdicts. The library decides
      * by BEAN LOOKUP on the type `io.micrometer.tracing.Tracer`, so any bean of that type is enough; contexts
@@ -184,6 +189,10 @@ class LegatiumExchangeLoggingIntegrationTest {
         tracer: Tracer? = null,
     ): ApplicationContextRunner {
         val meters = SimpleMeterRegistry()
+        val observations = ObservationRegistry.create().apply { observationConfig().observationHandler(DefaultMeterObservationHandler(meters)) }
+        val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+        val timeLimiters = TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(timeLimiter).build())
+        val bulkheads = BulkheadRegistry.ofDefaults()
         return ApplicationContextRunner()
             .withInitializer { context ->
                 context.environment.propertySources.addFirst(MapPropertySource(SHIPPED_PROPERTY_SOURCE, shippedProperties()))
@@ -196,18 +205,11 @@ class LegatiumExchangeLoggingIntegrationTest {
                     ClientLoggingAutoConfiguration::class.java,
                 ),
             ).withBean(SimpleMeterRegistry::class.java, Supplier { meters })
-            .withBean(
-                ObservationRegistry::class.java,
-                Supplier {
-                    ObservationRegistry.create().apply {
-                        observationConfig().observationHandler(DefaultMeterObservationHandler(meters))
-                    }
-                },
-            )
-            // The module's OWN @EnableConfigurationProperties class, not a hand-made instance: binding from the
-            // Environment is part of what this context reproduces, so a shipped `app.restclient.*` value that
-            // never arrives fails a test here instead of silently degrading to the code default.
-            .withUserConfiguration(RestClientConfiguration::class.java)
+            .withBean(ObservationRegistry::class.java, Supplier { observations })
+            // The module's OWN @EnableConfigurationProperties binding, not a hand-made instance: binding from
+            // the Environment is part of what this context reproduces, so a shipped `app.restclient.*` value
+            // that never arrives fails a test here instead of silently degrading to the code default.
+            .withUserConfiguration(BoundRestClientProperties::class.java)
             .withBean(
                 MeshProperties::class.java,
                 Supplier {
@@ -221,17 +223,23 @@ class LegatiumExchangeLoggingIntegrationTest {
                             listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/things/{id}", alias = backend)),
                     )
                 },
-            ).withBean(CircuitBreakerRegistry::class.java, Supplier { CircuitBreakerRegistry.ofDefaults() })
+            ).withBean(CircuitBreakerRegistry::class.java, Supplier { circuitBreakers })
+            .withBean(TimeLimiterRegistry::class.java, Supplier { timeLimiters })
+            .withBean(BulkheadRegistry::class.java, Supplier { bulkheads })
             .withBean(
-                TimeLimiterRegistry::class.java,
-                Supplier { TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(timeLimiter).build()) },
-            ).withBean(BulkheadRegistry::class.java, Supplier { BulkheadRegistry.ofDefaults() })
-            .withUserConfiguration(RestClientResilienceConfig::class.java)
-            .withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
+                BlockingResilienceDecorator::class.java,
+                Supplier {
+                    BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, observations, RestClientConfiguration.WORKER_NAME_PREFIX)
+                },
+            ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
             .withBean(ResilientRestClientFactory::class.java)
             .withBean(RestClientObservationReport::class.java)
             .let { runner -> tracer?.let { bean -> runner.withBean(Tracer::class.java, Supplier { bean }) } ?: runner }
     }
+
+    /** The `app.restclient` binding alone - see [hostContext] for why not [RestClientConfiguration]. */
+    @EnableConfigurationProperties(RestClientProperties::class)
+    class BoundRestClientProperties
 
     /**
      * The [SHIPPED_PREFIXES] keys of the shipped `src/main/resources/application.yml`, flattened the way Boot

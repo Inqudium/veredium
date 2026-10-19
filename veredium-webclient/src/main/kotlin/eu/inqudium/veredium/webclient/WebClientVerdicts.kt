@@ -1,13 +1,9 @@
 package eu.inqudium.veredium.webclient
 
-import eu.inqudium.veredium.core.mesh.MeshTimeoutConfig
 import eu.inqudium.veredium.core.resilience.BreakerVerdicts
 import eu.inqudium.veredium.core.resilience.ClientSideFailurePolicy
 import eu.inqudium.veredium.core.resilience.HttpExchangeErrorPolicy
 import io.github.resilience4j.bulkhead.BulkheadFullException
-import org.springframework.context.annotation.Bean
-import org.springframework.context.annotation.Configuration
-import org.springframework.context.annotation.Import
 import org.springframework.core.io.buffer.DataBufferLimitException
 import org.springframework.http.HttpStatus
 import org.springframework.web.reactive.function.client.WebClientResponseException
@@ -65,17 +61,4 @@ object WebClientVerdicts {
             clientSideFailure = clientSideFailure,
             benignClientErrorProbe = WebClientResponseException(HttpStatus.NOT_FOUND.value(), "Not Found", null, null, null),
         )
-}
-
-/**
- * Hands [WebClientVerdicts] to the shared mesh wiring and pulls that wiring into this module's context: the
- * `app.mesh` binding, the per-alias Resilience4j customizers, the startup guard and the ladder logger
- * ([MeshTimeoutConfig]). A host that scans this module's package therefore gets the core wiring too, without
- * knowing the core package exists.
- */
-@Configuration(proxyBeanMethods = false)
-@Import(MeshTimeoutConfig::class)
-class WebClientVerdictsConfig {
-    @Bean
-    fun breakerVerdicts(): BreakerVerdicts = WebClientVerdicts.breakerVerdicts
 }

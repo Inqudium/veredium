@@ -20,7 +20,7 @@ number helps, an endpoint with a 1 s anchor.
 
 Every call is wrapped as `CircuitBreaker( TimeLimiter( Bulkhead( exchange ) ) )` by
 `BlockingResilienceDecorator` (a component of `veredium-core`, which this module instantiates as a bean in
-`RestClientResilienceConfig`), and the exchange underneath runs on Apache HttpClient 5 with its own three
+`RestClientConfiguration`), and the exchange underneath runs on Apache HttpClient 5 with its own three
 timeouts. Nothing in the call is unbounded; the question is only *which* bound fires, and that is a matter of
 which phase the call is in.
 
@@ -312,7 +312,7 @@ worker stays interruptible, which a `ThreadPoolBulkhead`'s future never is.
 ### 5.1 The worker executor
 
 `BlockingResilienceDecorator` owns `Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name(prefix, 0).factory())`
-with the prefix the host chose - `restclient-call-` here, set by `RestClientResilienceConfig` - one **virtual**
+with the prefix the host chose - `restclient-call-` here, set by `RestClientConfiguration` - one **virtual**
 thread per call, started on submit, gone when the call ends. Consequences:
 
 - **Nothing to size.** A parked virtual thread costs a few hundred bytes of heap and no OS thread. There is no
@@ -428,7 +428,7 @@ What each bound produces, for the caller, the breaker, the exchange event and th
   stopped accepting connections. Widen nothing; look there.
 - **Bulkheads and pool move together**, and only together (§4).
 - **A caller's own budget belongs outside.** An adapter publishes `timeLimiterTimeout` and `responseTimeout`
-  (`BaseAdapter`) so a caller can compose an end-to-end budget from them; a caller that needs less than the
+  (`BaseAdapter`, `veredium-core`) so a caller can compose an end-to-end budget from them; a caller that needs less than the
   budget interrupts its waiting thread and gets the cancellation semantics of §5.3.
 
 **Related:** [metrics guide](metrics.md) · [what differs from the reactive twin](restclient-vs-webclient.md) ·

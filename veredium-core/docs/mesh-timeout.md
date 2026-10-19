@@ -69,7 +69,7 @@ logical budget.
 ## How the R4j registration works
 
 `MeshTimeoutConfig` is the `@Configuration` of this package. It is **not** scanned on its own: each stack's
-configuration (`RestClientVerdictsConfig` / `WebClientVerdictsConfig`) `@Import`s it next to the one bean it
+configuration (`RestClientConfiguration` / `WebClientConfiguration`) `@Import`s it next to the one bean it
 needs from the stack — `BreakerVerdicts`, the stack's reading of the two breaker verdicts (see below) — so a
 host that scans its stack's package gets the mesh wiring with it. It wires:
 
