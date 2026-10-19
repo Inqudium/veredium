@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.bulkhead.BulkheadRegistry

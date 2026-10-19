@@ -15,6 +15,7 @@ code disagree, the code wins and the ADR is corrected.
 | ADR | Title | Status |
 |-----|-------|--------|
 | [ADR-0001](ADR-0001-one-stack-neutral-core-module.md) | One stack-neutral core module instead of twin copies | Accepted |
+| [ADR-0002](ADR-0002-blocking-resilience-decorator-as-a-core-component.md) | The blocking resilience decorator is a core component, usable without a client | Accepted |
 
 ## Superseded
 

@@ -18,6 +18,7 @@ import com.github.tomakehurst.wiremock.core.Options
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException

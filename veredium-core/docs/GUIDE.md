@@ -19,7 +19,10 @@ on. It holds everything that is identical by construction between the blocking c
   predicates derive from;
 - the **Resilience4j wiring** that installs both into the registries Spring Boot
   auto-configures: one `*ConfigCustomizer` per mesh alias, consulted while each instance is
-  built, and a fail-fast startup guard.
+  built, and a fail-fast startup guard;
+- the **blocking resilience decorator**: `CircuitBreaker( TimeLimiter( Bulkhead( call ) ) )`
+  around any blocking call, with the virtual-thread hand-off the blocking TimeLimiter needs -
+  usable on its own, without a client.
 
 Nothing in here knows an HTTP stack. A host does not depend on this module directly; it comes
 with the client module the host chooses. The decision to cut the modules this way is
@@ -70,6 +73,51 @@ the context when an alias is not declared under all three `resilience4j.<layer>.
 instance would silently run on the registry default) or when the customizer's effect is not
 observable on the instance the registry serves. Each stack's `*VerdictsConfig` `@Import`s
 `MeshTimeoutConfig`, so a host that scans its stack's package gets all of it.
+
+**The blocking decorator.** `BlockingResilienceDecorator` runs a `() -> T` as
+`CircuitBreaker( TimeLimiter( Bulkhead( call ) ) )` - Resilience4j's own aspect order - on a fresh
+virtual worker thread, because a blocking call cannot time itself out: the caller waits on the
+worker's future for at most the TimeLimiter budget and is released at the budget whatever the
+worker is doing; the worker is interrupted, which a blocking socket read honours. The caller's
+MDC and current observation are carried onto the worker for the duration of the call, and a
+caller that is interrupted itself cancels its worker. `decorateAsync` runs the same pipeline
+with the wait on a second virtual thread and returns a `CompletableFuture` whose `cancel`
+interrupts the worker; its failures arrive on the future, unwrapped. The class carries no Spring annotation;
+`veredium-restclient` declares its bean (`RestClientResilienceConfig`, worker name
+`restclient-call-`), and a host with a blocking call of its own declares another or constructs
+one directly ([ADR-0002](../../docs/adr/ADR-0002-blocking-resilience-decorator-as-a-core-component.md)).
+
+## Bounding a blocking call of your own
+
+```kotlin
+val decorator = BlockingResilienceDecorator(
+    circuitBreakerRegistry, timeLimiterRegistry, bulkheadRegistry,   // Boot's beans, or Registry.of(...)
+    observationRegistry = observationRegistry,                       // optional: nests the call under the caller's span
+    workerNamePrefix = "ledger-call-",                               // the thread name on every log line of the call
+)
+
+// by name: the three instances under resilience4j.<layer>.instances.ledger
+val balance = decorator.decorate("ledger") { ledgerSdk.balanceOf(accountId) }
+
+// or with instances built by hand, no registry involved
+val breaker = CircuitBreaker.of("ledger", CircuitBreakerConfig.custom()
+    .ignoreExceptions(*BlockingResilienceDecorator.SELF_INFLICTED_FAILURES.toTypedArray())
+    .build())
+val balance = decorator.decorate(breaker, timeLimiter, bulkhead) { ledgerSdk.balanceOf(accountId) }
+
+// or without blocking the caller: the same pipeline, the wait on a second virtual thread
+val pending: CompletableFuture<Balance> = decorator.decorateAsync("ledger") { ledgerSdk.balanceOf(accountId) }
+pending.cancel(true)   // interrupts the worker and frees its permit - unlike a plain CompletableFuture
+```
+
+Two things the decorator cannot do for you. The breaker it is used with has to be told to ignore
+the three failures the pipeline raises itself - the bulkhead's rejection, the caller's
+`InterruptedException`, the `RejectedExecutionException` after shutdown - or load shedding opens
+the circuit against a healthy backend; `SELF_INFLICTED_FAILURES` names them, and on a mesh alias
+the customizer installs them. (A cancelled `decorateAsync` future reaches the breaker as that
+`InterruptedException`, so the list matters for the asynchronous form too.) And the call has to honour interruption: the budget releases the
+caller regardless, but a worker that ignores its interrupt runs on until it returns. Call
+`shutdown()` when done (`@PreDestroy` does it for a bean).
 
 ## Configuration
 

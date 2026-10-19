@@ -1,10 +1,10 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.mesh.MeshTimeoutConfig
+import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import eu.inqudium.veredium.core.resilience.BreakerVerdicts
 import eu.inqudium.veredium.core.resilience.ClientSideFailurePolicy
 import eu.inqudium.veredium.core.resilience.HttpExchangeErrorPolicy
-import io.github.resilience4j.bulkhead.BulkheadFullException
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
@@ -12,7 +12,6 @@ import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.web.client.HttpClientErrorException
 import org.springframework.web.client.RestClientResponseException
-import java.util.concurrent.RejectedExecutionException
 
 /**
  * The blocking stack's reading of the shared breaker verdicts (`veredium-core`): which exception carries a
@@ -35,26 +34,17 @@ object RestClientVerdicts {
      * The failures the backend is NOT at fault for on this stack. Extend HERE, and only for a failure that meets
      * the criterion in [ClientSideFailurePolicy]'s KDoc.
      *
-     * - [BulkheadFullException]: this pipeline's own load shedding. The bulkhead is the innermost decoration
-     *   and the breaker the outermost (see [BlockingResilienceDecorator]), so a rejection travels outwards
-     *   straight through the breaker - yet the backend was never even called.
+     * - The three the pipeline raises itself, declared by the decorator that raises them
+     *   ([BlockingResilienceDecorator.SELF_INFLICTED_FAILURES]): the bulkhead's rejection, the CALLER's
+     *   `InterruptedException` (the blocking counterpart of a subscriber cancelling, which the reactive twin's
+     *   breaker never sees because a cancellation carries no error signal - here it does, and without the entry
+     *   a host that cancels callers routinely would open the circuit against a backend that was not even given
+     *   the time to answer), and the `RejectedExecutionException` of a worker submitted after shutdown.
      * - [ResponseBodyLimitExceededException]: the response exceeded `maxInMemorySize` (see
      *   [RestClientProperties]). The backend answered correctly, with a 200; this process declined to buffer
      *   the answer. The blocking counterpart of the reactive codec's `DataBufferLimitException`, raised by
      *   this module's own bounded reader rather than by a Spring codec - which is why it is a type of this
      *   module and not a Spring one.
-     * - [InterruptedException]: the CALLER went away while waiting for the worker - its own deadline expired,
-     *   its scope was cancelled, its executor is shutting down. The blocking counterpart of a subscriber
-     *   cancelling, which the reactive twin's breaker never sees at all because a cancellation carries no
-     *   error signal. Here it does: [BlockingResilienceDecorator] rethrows the `InterruptedException` out of the
-     *   decorated call and `CircuitBreaker.decorateCallable` records every `Exception`, so without this entry
-     *   a host that cancels callers routinely would open the circuit against a backend that answered nothing
-     *   wrong - it was not even given the time to answer.
-     * - [RejectedExecutionException]: the decorator's worker executor refused the submission because the
-     *   decorator is already shut down - a call made during context teardown. [BlockingResilienceDecorator]
-     *   submits the worker INSIDE the callable the breaker wraps (so that a short-circuited call submits
-     *   nothing), which puts this refusal on the breaker's path like any other exception. The backend was
-     *   never called.
      *
      * The cause walk matters on this stack because Spring's blocking client wraps every `IOException` of the
      * exchange into a `ResourceAccessException`; the limit exception is thrown bare today, but the predicate
@@ -64,13 +54,7 @@ object RestClientVerdicts {
      */
     val clientSideFailure: ClientSideFailurePolicy =
         ClientSideFailurePolicy(
-            clientSideFailures =
-                listOf(
-                    BulkheadFullException::class.java,
-                    ResponseBodyLimitExceededException::class.java,
-                    InterruptedException::class.java,
-                    RejectedExecutionException::class.java,
-                ),
+            clientSideFailures = BlockingResilienceDecorator.SELF_INFLICTED_FAILURES + ResponseBodyLimitExceededException::class.java,
             bufferLimitFailure = ResponseBodyLimitExceededException::class.java,
         )
 

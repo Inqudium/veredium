@@ -8,6 +8,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.okJson
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
@@ -112,7 +113,7 @@ class ResilientRestClientFactoryBuilderWiringTest {
                 TimeLimiterRegistry::class.java,
                 Supplier { TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build()) },
             ).withBean(BulkheadRegistry::class.java, Supplier { BulkheadRegistry.ofDefaults() })
-            .withBean(BlockingResilienceDecorator::class.java)
+            .withUserConfiguration(RestClientResilienceConfig::class.java)
             .withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
             // A recording registry: every observation lands as a meter in the SimpleMeterRegistry, which is what
             // the host's actuator ObservationAutoConfiguration does with its MeterRegistry.

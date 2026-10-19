@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `BlockingResilienceDecorator` moves from `veredium-restclient` to `veredium-core` as a component
+  usable without a client: no Spring annotation (the blocking client declares its bean in
+  `RestClientResilienceConfig`), the worker-thread name prefix is a constructor parameter
+  (`veredium-call-` by default, `restclient-call-` for the blocking client), a second `decorate`
+  overload takes the three Resilience4j instances directly instead of a registry name, and
+  `SELF_INFLICTED_FAILURES` names the failures a breaker used with it must ignore, and
+  `decorateAsync` runs the same pipeline without blocking the caller - a `CompletableFuture` whose
+  `cancel` interrupts the worker and frees its bulkhead permit. ADR-0002.
+
 - `veredium-webclient` installs its breaker verdicts and the mesh-derived rungs through the shared
   customizer wiring of `veredium-core`; the amendment framework (`RegistryAmendments`,
   `ResilienceAmendmentApplier`, `AmendmentLogFields`, the three registrars) and its ERROR events are

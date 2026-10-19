@@ -20,7 +20,7 @@ so the differences are decisions on record rather than surprises in production.
 |---------------------------------------|----------------------------------------|-------|
 | `ResilientWebClient`                  | `ResilientRestClient`                  | Same per-call pipeline; `get`/`post` return `T` or throw. |
 | `ResilientWebClientFactory`           | `ResilientRestClientFactory`           | Same optional collaborators, same required `RestClient.Builder` bean from Boot, same startup lines. |
-| `ReactiveResilienceDecorator`         | `BlockingResilienceDecorator`          | Same order `CircuitBreaker(TimeLimiter(Bulkhead(call)))`, see §2. |
+| `ReactiveResilienceDecorator`         | `BlockingResilienceDecorator` (`veredium-core`) | Same order `CircuitBreaker(TimeLimiter(Bulkhead(call)))`, see §2. The blocking one is a component of the core, usable without this client; this module declares its bean in `RestClientResilienceConfig`. |
 | `WebClientVerdicts` / `WebClientVerdictsConfig` | `RestClientVerdicts` / `RestClientVerdictsConfig` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the config bean that imports the core's `MeshTimeoutConfig` (§8). |
 | `WebClientProperties` (`app.webclient`) | `RestClientProperties` (`app.restclient`) | Same keys except `pool.pending-acquire-max-count` (§3). |
 | `eu.inqudium.veredium.core.mesh`, `eu.inqudium.veredium.core.resilience` | the same classes | **Shared, not copied.** The ladder (`MeshProperties`, `ResolvedTimeouts`, `responseTimeout` and `response-timeout-margin-ms` on both stacks), the two policies, the customizers and the guard live once, in `veredium-core`. |
@@ -50,7 +50,10 @@ A blocking call cannot time itself out: the thread that would notice the deadlin
 read. Resilience4j's blocking `TimeLimiter` therefore works on a `Future`: the call runs on another thread, the
 caller waits on the future for at most the budget, and on expiry the caller is released with a `TimeoutException`
 while the future is cancelled. That hand-off is **the** structural difference to the reactive twin, and it has
-three consequences the decorator owns:
+three consequences the decorator owns. The decorator itself lives in `veredium-core`
+([ADR-0002](../../docs/adr/ADR-0002-blocking-resilience-decorator-as-a-core-component.md)): nothing in it is
+specific to an HTTP exchange, so a host bounds a blocking call of its own with the same class; what this module
+adds is its bean (`RestClientResilienceConfig`) with the worker name `restclient-call-`.
 
 1. **The worker.** Every call runs on a fresh virtual thread (`restclient-call-N`). No pool to size, nothing that
    could become a second, undeclared bulkhead. The bulkhead permit is taken *on the worker*, so it still counts
@@ -78,10 +81,12 @@ normal conditions the transport trips first (a `ResourceAccessException` over `S
 breaker records and legatium classifies as `timeout`) and the TimeLimiter is the outer backstop over connect and
 pending-acquire.
 
-**No asynchronous form.** Where the twin's every call is a `Mono` the subscriber composes, this module offers
-the blocking call only. A caller that wants a future wraps the call on an executor of its own; the module does
-not ship a second calling convention for a consumer that does not exist yet (architecture review 2026-10-19,
-finding 3).
+**No asynchronous client API.** Where the twin's every call is a `Mono` the subscriber composes, this module's
+client offers the blocking call only; it does not ship a second calling convention for a consumer that does not
+exist yet (architecture review 2026-10-19, finding 3). The mechanism underneath has one, though: the core
+decorator's `decorateAsync` runs the same pipeline with the wait on a second virtual thread and returns a
+`CompletableFuture` whose `cancel` interrupts the worker (ADR-0002). A host that wants an asynchronous call
+composes it from that rather than from an executor of its own.
 
 ---
 

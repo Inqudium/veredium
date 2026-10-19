@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import eu.inqudium.veredium.core.resilience.circuitBreakerCustomizer
 import eu.inqudium.veredium.core.resilience.timeLimiterCustomizer
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig

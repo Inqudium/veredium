@@ -19,7 +19,8 @@ number helps, an endpoint with a 1 s anchor.
 ## 1. The three layers in one picture
 
 Every call is wrapped as `CircuitBreaker( TimeLimiter( Bulkhead( exchange ) ) )` by
-`BlockingResilienceDecorator`, and the exchange underneath runs on Apache HttpClient 5 with its own three
+`BlockingResilienceDecorator` (a component of `veredium-core`, which this module instantiates as a bean in
+`RestClientResilienceConfig`), and the exchange underneath runs on Apache HttpClient 5 with its own three
 timeouts. Nothing in the call is unbounded; the question is only *which* bound fires, and that is a matter of
 which phase the call is in.
 
@@ -309,8 +310,9 @@ served by the reactive twin.
 
 ### 5.1 The worker executor
 
-`BlockingResilienceDecorator` owns `Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("restclient-call-", 0).factory())`
-— one **virtual** thread per call, started on submit, gone when the call ends. Consequences:
+`BlockingResilienceDecorator` owns `Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name(prefix, 0).factory())`
+with the prefix the host chose - `restclient-call-` here, set by `RestClientResilienceConfig` - one **virtual**
+thread per call, started on submit, gone when the call ends. Consequences:
 
 - **Nothing to size.** A parked virtual thread costs a few hundred bytes of heap and no OS thread. There is no
   pool that could become a second, undeclared bulkhead; the number of live workers equals the number of calls

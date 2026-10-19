@@ -2,6 +2,7 @@ package eu.inqudium.veredium.restclient
 
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
+import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import io.micrometer.core.instrument.DistributionSummary
 import jakarta.validation.ConstraintViolationException
 import jakarta.validation.Validator

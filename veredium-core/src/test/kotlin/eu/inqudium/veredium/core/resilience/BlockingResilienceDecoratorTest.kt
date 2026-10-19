@@ -1,5 +1,6 @@
-package eu.inqudium.veredium.restclient
+package eu.inqudium.veredium.core.resilience
 
+import io.github.resilience4j.bulkhead.Bulkhead
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.bulkhead.BulkheadRegistry
@@ -7,6 +8,7 @@ import io.github.resilience4j.circuitbreaker.CallNotPermittedException
 import io.github.resilience4j.circuitbreaker.CircuitBreaker
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
+import io.github.resilience4j.timelimiter.TimeLimiter
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import io.micrometer.observation.Observation
@@ -32,9 +34,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Tests for the mechanics of [BlockingResilienceDecorator] that the reactive twin does not have: the thread
+ * Tests for the mechanics of [BlockingResilienceDecorator] that a reactive pipeline does not have: the thread
  * hand-off the blocking TimeLimiter needs, and everything that has to survive it - the caller's MDC, the
- * caller's observation, the exception types the breaker sees, and the two ways a call can be abandoned.
+ * caller's observation, the exception types the breaker sees, and the two ways a call can be abandoned. Against
+ * plain registries and hand-built instances, without a client and without Spring - the way a standalone user
+ * takes the decorator.
  *
  * Contention is produced deterministically, with latches a worker blocks on and the test releases, never with
  * racing threads or sleeps. The only real time in this class is the TimeLimiter budget of the timeout cases,
@@ -75,7 +79,20 @@ class BlockingResilienceDecoratorTest {
             // Then
             assertThat(worker).isNotSameAs(caller)
             assertThat(worker.isVirtual).isTrue()
-            assertThat(worker.name).startsWith("restclient-call-")
+            assertThat(worker.name).startsWith(BlockingResilienceDecorator.DEFAULT_WORKER_NAME_PREFIX)
+        }
+
+        @Test
+        fun `should name the worker after the prefix the host chose`() {
+            // What is tested: the one knob a host has on the hand-off - the worker-thread name, which is what a
+            //   thread dump and every log line written during the call show.
+            // Why it matters: two decorators in one JVM (a client's and a host's own) are told apart by nothing
+            //   else; the blocking client relies on it to label its exchange events `restclient-call-<n>`.
+            //
+            // Given / When / Then
+            val decorator = decorator(workerNamePrefix = "ledger-call-")
+            val worker = decorator.decorate(alias) { Thread.currentThread() }
+            assertThat(worker.name).startsWith("ledger-call-")
         }
 
         @Test
@@ -169,7 +186,7 @@ class BlockingResilienceDecoratorTest {
             // What is tested: that the Future hand-off does not change the type of a failure. A worker's exception
             //   arrives at the caller wrapped in an ExecutionException; the TimeLimiter unwraps it, and the breaker
             //   outside must see - and record - the ORIGINAL.
-            // Why it matters: every predicate on the breaker (the two registrars) matches on exception type and
+            // Why it matters: every predicate on the breaker (the two verdicts) matches on exception type and
             //   cause chain. A wrapper nobody expected would make a BulkheadFullException look like a backend
             //   fault and a benign 4xx look like an unknown error.
             //
@@ -319,6 +336,82 @@ class BlockingResilienceDecoratorTest {
         }
 
         @Test
+        fun `should guard a call with instances handed in directly, bypassing the registries`() {
+            // What is tested: the standalone shape - the three primitives built by hand and passed per call, so
+            //   nothing is looked up in the registries the decorator was constructed with.
+            // How success is judged: the call runs on a worker, the hand-built breaker counts its failure, and
+            //   the registry the decorator holds never materialised an instance under the name.
+            // Why it matters: a host bounding a blocking call of its own (a JDBC lookup, a legacy SDK) has no
+            //   `resilience4j.*.instances.<name>` entry and no registry bean; this overload is its entry point.
+            //
+            // Given
+            val registries = CircuitBreakerRegistry.ofDefaults()
+            val decorator = decorator(circuitBreakers = registries)
+            val breaker = CircuitBreaker.ofDefaults("ledger")
+            val limiter = TimeLimiter.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofMinutes(5)).build())
+            val bulkhead = Bulkhead.ofDefaults("ledger")
+
+            // When
+            val worker = decorator.decorate(breaker, limiter, bulkhead) { Thread.currentThread() }
+            val thrown = catchThrowable { decorator.decorate<String>(breaker, limiter, bulkhead) { throw IllegalStateException("ledger down") } }
+
+            // Then
+            assertThat(worker.isVirtual).isTrue()
+            assertThat(thrown).isInstanceOf(IllegalStateException::class.java)
+            assertThat(breaker.metrics.numberOfFailedCalls).isEqualTo(1)
+            assertThat(registries.find("ledger")).isEmpty()
+        }
+
+        @Test
+        fun `should name the failures a breaker must be told to ignore`() {
+            // What is tested: the contract a standalone user configures the breaker with - the three failures the
+            //   pipeline raises itself, which the breaker would otherwise charge to the backend.
+            // How success is judged: a breaker built with exactly SELF_INFLICTED_FAILURES as its ignore list does
+            //   not count a bulkhead rejection raised through the real pipeline, and still counts a genuine error.
+            // Why it matters: the list is the one thing this class cannot enforce on a config it does not own; if
+            //   it named the wrong types, every host following the KDoc would ship a breaker that opens on load
+            //   shedding.
+            //
+            // Given: a breaker ignoring the declared failures, a single-permit bulkhead held by a parked call
+            val breaker =
+                CircuitBreaker.of(
+                    "ledger",
+                    CircuitBreakerConfig.custom().ignoreExceptions(*BlockingResilienceDecorator.SELF_INFLICTED_FAILURES.toTypedArray()).build(),
+                )
+            val limiter = TimeLimiter.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofMinutes(5)).build())
+            val bulkhead = singlePermitBulkheads().bulkhead("ledger")
+            val decorator = decorator()
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val holding =
+                callers.submit<String> {
+                    decorator.decorate(breaker, limiter, bulkhead) {
+                        entered.countDown()
+                        release.await()
+                        "held"
+                    }
+                }
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+
+            try {
+                // When: a call succeeds, a second one is rejected by the held bulkhead, a third fails for a real reason
+                val spare = Bulkhead.ofDefaults("spare")
+                decorator.decorate(breaker, limiter, spare) { "fine" }
+                val rejection = catchThrowable { decorator.decorate(breaker, limiter, bulkhead) { "second" } }
+                val failure = catchThrowable { decorator.decorate<String>(breaker, limiter, spare) { throw IllegalStateException("ledger down") } }
+
+                // Then: the rejection is not held against the backend, the failure is
+                assertThat(rejection).isInstanceOf(BulkheadFullException::class.java)
+                assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+                assertThat(breaker.metrics.numberOfFailedCalls).isEqualTo(1)
+                assertThat(breaker.metrics.numberOfSuccessfulCalls).isEqualTo(1)
+            } finally {
+                release.countDown()
+                holding.get(5, TimeUnit.SECONDS)
+            }
+        }
+
+        @Test
         fun `should let an Error escape as itself`() {
             // Given / When / Then: an Error is not an exception the breaker records, and it must not be turned
             // into one on its way through the hand-off
@@ -326,6 +419,224 @@ class BlockingResilienceDecoratorTest {
             val error = AssertionError("invariant broken on the worker")
             val thrown = catchThrowable { decorator.decorate<String>(alias) { throw error } }
             assertThat(thrown).isSameAs(error)
+        }
+    }
+
+    @Nested
+    inner class `The asynchronous form` {
+        @Test
+        fun `should return at once and complete with the call's value once the worker is done`() {
+            // What is tested: decorateAsync does not block the caller - the future is handed back while the call
+            //   is still parked on the worker - and completes with the value when the call returns.
+            // How success is judged: the future is not done while the worker is parked; after the release it
+            //   completes with the value, and the call ran on a virtual thread other than the caller's.
+            // Why it matters: an asynchronous form that secretly blocked the caller until the hand-off completed
+            //   would pass a happy-path test and serialise every caller that composes futures.
+            //
+            // Given: a call parked on the worker
+            val decorator = decorator()
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val caller = Thread.currentThread()
+
+            // When
+            val future =
+                decorator.decorateAsync(alias) {
+                    entered.countDown()
+                    release.await()
+                    Thread.currentThread()
+                }
+
+            // Then: back on the caller before the call is over ...
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+            assertThat(future.isDone).isFalse()
+            // ... and complete once it is
+            release.countDown()
+            val worker = future.get(5, TimeUnit.SECONDS)
+            assertThat(worker).isNotSameAs(caller)
+            assertThat(worker.isVirtual).isTrue()
+        }
+
+        @Test
+        fun `should complete exceptionally with the call's own exception, unwrapped, and record it`() {
+            // What is tested: the failure contract of the future - the SAME throwable the blocking form throws,
+            //   not a wrapper, so a handler can match on type; and the breaker counted it on the way.
+            // How success is judged: `handle` sees the original instance; `get()` adds only the ExecutionException
+            //   every CompletableFuture adds; the breaker's failed-call counter reads one.
+            //
+            // Given
+            val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+            val decorator = decorator(circuitBreakers = circuitBreakers)
+            val failure = IllegalStateException("backend exploded")
+
+            // When
+            val future = decorator.decorateAsync<String>(alias) { throw failure }
+            val seenByHandler = future.handle { _, t -> t }.get(5, TimeUnit.SECONDS)
+            val thrownByGet = catchThrowable { future.get(5, TimeUnit.SECONDS) }
+
+            // Then
+            assertThat(seenByHandler).isSameAs(failure)
+            assertThat(thrownByGet).isInstanceOf(ExecutionException::class.java).hasCause(failure)
+            assertThat(circuitBreakers.circuitBreaker(alias).metrics.numberOfFailedCalls).isEqualTo(1)
+        }
+
+        @Test
+        fun `should carry the caller's MDC to the worker`() {
+            // Why it matters: the context is captured on the thread that calls decorateAsync, not on the waiter -
+            // a waiter starts with an empty MDC, and capturing there would lose the correlation id of every
+            // asynchronous call while the blocking form keeps it.
+            //
+            // Given
+            val decorator = decorator()
+            MDC.put("CORRELATION_ID", "Out:7cc0270abf0da42c")
+            try {
+                // When / Then
+                val seenOnWorker = decorator.decorateAsync(alias) { MDC.get("CORRELATION_ID") }.get(5, TimeUnit.SECONDS)
+                assertThat(seenOnWorker).isEqualTo("Out:7cc0270abf0da42c")
+            } finally {
+                MDC.clear()
+            }
+        }
+
+        @Test
+        fun `should release the future at the TimeLimiter budget with a TimeoutException and interrupt the worker`() {
+            // What is tested: the budget guarantee in the asynchronous shape - the future completes exceptionally
+            //   with a TimeoutException at the budget although the call has not returned, and the worker is
+            //   interrupted.
+            //
+            // Given: a 100 ms budget and a call that would park forever
+            val decorator = decorator(timeLimiter = Duration.ofMillis(100))
+            val release = CountDownLatch(1)
+            val workerInterrupted = CountDownLatch(1)
+
+            // When
+            val future =
+                decorator.decorateAsync(alias) {
+                    try {
+                        release.await()
+                    } catch (e: InterruptedException) {
+                        workerInterrupted.countDown()
+                        throw e
+                    }
+                    "never"
+                }
+
+            // Then
+            val outcome = future.handle { _, t -> t }.get(5, TimeUnit.SECONDS)
+            assertThat(outcome).isInstanceOf(TimeoutException::class.java)
+            assertThat(workerInterrupted.await(5, TimeUnit.SECONDS)).`as`("the abandoned worker must be interrupted").isTrue()
+        }
+
+        @Test
+        fun `should cancel the worker and free its bulkhead permit when the future is cancelled`() {
+            // What is tested: the cancellation contract - cancel() on the returned future interrupts the waiter,
+            //   the waiter cancels the worker (the blocking form's caller-interrupt path), and the permit the
+            //   worker held becomes available again.
+            // How success is judged: the worker's park ends in an InterruptedException; afterwards a second call
+            //   through the same single-permit bulkhead succeeds; the breaker, told to ignore the pipeline's own
+            //   failures, counted nothing.
+            // Why it matters: a plain CompletableFuture's cancel() does not interrupt anything by specification,
+            //   so a cancelled call would otherwise hold its permit and its connection until the budget - the
+            //   very leak the blocking form's hand-off was designed to avoid.
+            //
+            // Given: a single-permit bulkhead, a breaker ignoring the pipeline's own failures, a parked call
+            val breaker =
+                CircuitBreaker.of(
+                    "ledger",
+                    CircuitBreakerConfig.custom().ignoreExceptions(*BlockingResilienceDecorator.SELF_INFLICTED_FAILURES.toTypedArray()).build(),
+                )
+            val limiter = TimeLimiter.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofMinutes(5)).build())
+            val bulkhead = singlePermitBulkheads().bulkhead("ledger")
+            val decorator = decorator()
+            val entered = CountDownLatch(1)
+            val workerInterrupted = CountDownLatch(1)
+            val future =
+                decorator.decorateAsync(breaker, limiter, bulkhead) {
+                    entered.countDown()
+                    try {
+                        CountDownLatch(1).await()
+                    } catch (e: InterruptedException) {
+                        workerInterrupted.countDown()
+                        throw e
+                    }
+                    "never"
+                }
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+
+            // When
+            val cancelled = future.cancel(false)
+
+            // Then: the future is cancelled, the worker interrupted, the permit free, the breaker untouched
+            assertThat(cancelled).isTrue()
+            assertThat(future.isCancelled).isTrue()
+            assertThat(workerInterrupted.await(5, TimeUnit.SECONDS)).`as`("the worker must be cancelled with its future").isTrue()
+            assertThat(decorator.decorateAsync(breaker, limiter, bulkhead) { "after" }.get(5, TimeUnit.SECONDS)).isEqualTo("after")
+            assertThat(breaker.metrics.numberOfFailedCalls).isZero()
+        }
+
+        @Test
+        fun `should not cancel the call when only a derived stage is cancelled`() {
+            // What is tested: the override of cancel() stays on the future decorateAsync hands out; a stage derived
+            //   from it (thenApply, ...) is an ordinary CompletableFuture, as it would be anywhere else.
+            // Why it matters: one consumer cancelling its view of the result must not abandon a call another
+            //   consumer still waits for.
+            //
+            // Given
+            val decorator = decorator()
+            val release = CountDownLatch(1)
+            val future =
+                decorator.decorateAsync(alias) {
+                    release.await()
+                    "value"
+                }
+            val derived = future.thenApply { it.uppercase() }
+
+            // When
+            derived.cancel(true)
+            release.countDown()
+
+            // Then
+            assertThat(derived.isCancelled).isTrue()
+            assertThat(future.get(5, TimeUnit.SECONDS)).isEqualTo("value")
+        }
+
+        @Test
+        fun `should deliver an open breaker's rejection on the future without running the call`() {
+            // Given: a breaker forced open
+            val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+            val decorator = decorator(circuitBreakers = circuitBreakers)
+            circuitBreakers.circuitBreaker(alias).transitionToOpenState()
+            val ran = AtomicBoolean(false)
+
+            // When
+            val outcome =
+                decorator
+                    .decorateAsync(alias) {
+                        ran.set(true)
+                        "never"
+                    }.handle { _, t -> t }
+                    .get(5, TimeUnit.SECONDS)
+
+            // Then
+            assertThat(outcome).isInstanceOf(CallNotPermittedException::class.java)
+            assertThat(ran).isFalse()
+        }
+
+        @Test
+        fun `should deliver the refusal of a shut-down decorator on the future rather than throw it`() {
+            // Why it matters: an asynchronous caller reads every outcome off the future; a refusal thrown out of
+            // decorateAsync itself would be the one failure it has to handle in a second place.
+            //
+            // Given
+            val decorator = decorator()
+            decorator.shutdown()
+
+            // When
+            val future = decorator.decorateAsync(alias) { "too late" }
+
+            // Then
+            assertThat(future.isCompletedExceptionally).isTrue()
+            assertThat(future.handle { _, t -> t }.get()).isInstanceOf(RejectedExecutionException::class.java)
         }
     }
 
@@ -343,6 +654,7 @@ class BlockingResilienceDecoratorTest {
         bulkheads: BulkheadRegistry = BulkheadRegistry.ofDefaults(),
         timeLimiter: Duration = Duration.ofMinutes(5),
         observationRegistry: ObservationRegistry? = null,
+        workerNamePrefix: String = BlockingResilienceDecorator.DEFAULT_WORKER_NAME_PREFIX,
     ): BlockingResilienceDecorator =
         BlockingResilienceDecorator(
             circuitBreakers,
@@ -355,6 +667,7 @@ class BlockingResilienceDecoratorTest {
             ),
             bulkheads,
             observationRegistry,
+            workerNamePrefix,
         ).also { decorators += it }
 
     /** A registry whose bulkheads hold exactly one permit and reject the next caller without waiting. */

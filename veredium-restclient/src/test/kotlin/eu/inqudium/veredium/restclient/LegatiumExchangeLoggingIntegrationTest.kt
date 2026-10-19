@@ -18,6 +18,7 @@ import eu.inqudium.legatium.common.BodyLogMode
 import eu.inqudium.legatium.common.ClientLoggingProperties
 import eu.inqudium.legatium.restclient.logging.ClientLoggingAutoConfiguration
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import eu.inqudium.veredium.restclient.LegatiumExchangeLoggingIntegrationTest.Companion.SHIPPED_PREFIXES
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
@@ -225,7 +226,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                 TimeLimiterRegistry::class.java,
                 Supplier { TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(timeLimiter).build()) },
             ).withBean(BulkheadRegistry::class.java, Supplier { BulkheadRegistry.ofDefaults() })
-            .withBean(BlockingResilienceDecorator::class.java)
+            .withUserConfiguration(RestClientResilienceConfig::class.java)
             .withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
             .withBean(ResilientRestClientFactory::class.java)
             .withBean(RestClientObservationReport::class.java)

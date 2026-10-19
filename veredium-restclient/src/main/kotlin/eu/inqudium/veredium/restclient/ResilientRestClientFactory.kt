@@ -3,6 +3,7 @@ package eu.inqudium.veredium.restclient
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
+import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.observation.ObservationRegistry

@@ -2,7 +2,9 @@
 
 **Status:** Accepted  
 **Date:** 2026-10-19  
-**Deciders:** Dirk Haase (maintainer)
+**Last updated:** 2026-10-19 (ADR-0002 moves the blocking decorator into the core as well)  
+**Deciders:** Dirk Haase (maintainer)  
+**Related:** ADR-0002 (the blocking resilience decorator, the one stack-specific piece this ADR left in the blocking client, moves to the core too)
 
 ## Context
 
