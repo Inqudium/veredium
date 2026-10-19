@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One PR for every github/codeql-action step: CodeQL refuses a workflow
+    # whose init, analyze and upload-sarif steps run different versions
+    # ("Loaded a configuration file for version X, but running version Y"),
+    # so single-step bumps fail on their own.
+    groups:
+      codeql-action:
+        patterns:
+          - github/codeql-action*
+  # The hash-pinned documentation toolchain: pinning keeps a compromised
+  # release out, Dependabot keeps the pin from going stale.
+  - package-ecosystem: pip
+    directory: /.github
+    schedule:
+      interval: weekly

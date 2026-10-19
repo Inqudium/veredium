@@ -1,0 +1,65 @@
+name: Fuzz
+
+# Daily time-boxed fuzzing of the @FuzzTest targets (Jazzer's JUnit
+# integration, see CONTRIBUTING.md) on the project's own JDK - no OSS-Fuzz
+# containers, no second build system. In every regular `mvn verify` the same
+# tests run in cheap regression mode (checked-in inputs plus the empty
+# input); here JAZZER_FUZZ=1 switches them to real exploration, each capped
+# by its @FuzzTest maxDuration.
+
+on:
+  schedule:
+    - cron: "47 2 * * *"
+  # Manual runs for trying out new fuzz targets.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      # In fuzzing mode Jazzer executes only ONE @FuzzTest per JVM (the
+      # rest are skipped), so each target gets its own matrix job.
+      fail-fast: false
+      matrix:
+        target:
+          # No fuzz target yet: the scaffold carries no parser of caller- or
+          # peer-controlled data. The first one (a *FuzzTest.java under
+          # src/test/java, CONTRIBUTING.md "Fuzzing") replaces this entry;
+          # until then the job finds no test and passes (failIfNoSpecifiedTests
+          # is off below).
+          - VerediumFuzzTest
+    steps:
+      # Pinned to commit SHAs, not mutable tags - see ci.yml for the
+      # rationale.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+
+      # failIfNoSpecifiedTests=false lets the reactor modules that do not
+      # contain this target pass with zero tests instead of failing.
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          JAZZER_FUZZ: "1"
+        run: |
+          mvn --batch-mode --no-transfer-progress -Djacoco.skip=true \
+            -Dtest=${{ matrix.target }} -Dsurefire.failIfNoSpecifiedTests=false test
+
+      # A finding is written into the seed-corpus directory next to the test
+      # sources; committed, it becomes a permanent regression input.
+      - name: Upload finding (reproducing input)
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fuzz-finding-${{ matrix.target }}
+          path: |
+            **/src/test/resources/**/*Inputs/**
+            **/target/surefire-reports/**
+          if-no-files-found: warn

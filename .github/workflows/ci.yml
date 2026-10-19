@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Weekly, so a newly published advisory surfaces even when nothing was
+  # committed - a scan that only runs on changes cannot see the world
+  # changing around unchanged code.
+  schedule:
+    - cron: "17 4 * * 1"
+
+# Least privilege, stated explicitly rather than inherited from the
+# repository default (which an admin setting could widen for a workflow
+# that also runs on fork pull requests).
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned to commit SHAs, not to mutable tags: a retagged
+      # or compromised release would otherwise execute here with the
+      # workflow token. Dependabot (github-actions ecosystem) proposes the
+      # bumps and keeps the trailing version comment in sync.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+
+      - name: Build and test
+        run: mvn --batch-mode --no-transfer-progress verify
+
+      # The KDoc reference check as a PR gate. Dokka runs with failOnWarning, so
+      # an unresolvable [Symbol] link fails this step - here, in the pull
+      # request, instead of in the Docs workflow after the merge. The rendered
+      # site is discarded; only the verdict counts.
+      - name: Check the KDoc references (Dokka, failOnWarning)
+        run: mvn --batch-mode --no-transfer-progress -pl veredium-core dokka:dokka
+
+      # Dokka reads KDoc only: a `[Symbol]` link in a `//` line comment looks
+      # checked and is not - a rename leaves it standing with the authority of
+      # a verified link. Such a comment names the symbol in backticks or moves
+      # into the enclosing declaration's KDoc, where Dokka sees it.
+      - name: Check that no line comment carries a KDoc-style [Symbol] link
+        run: |
+          if grep -rnE '^\s*//.*\[[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)?\]' --include='*.kt' veredium-*/src/main; then
+            echo '::error::[Symbol] links in // line comments are not checked by Dokka - use backticks, or move the sentence into KDoc'
+            exit 1
+          fi
+
+      # A guide section cited by NUMBER drifts the moment a heading is inserted,
+      # and nothing turns red. Cite the heading instead - it is the Markdown
+      # anchor, and a rename shows up in a grep. RFC section numbers are stable
+      # and stay.
+      - name: Check that no production comment cites a guide section by number
+        run: |
+          if grep -rnE '§[0-9]|\bsection [0-9]' --include='*.kt' veredium-*/src/main | grep -v 'RFC '; then
+            echo '::error::cite the guide section by its heading, not its number - headings are the anchors, numbers move'
+            exit 1
+          fi
+
+      # Assessment reports under docs/assessment are dated snapshots (ADR
+      # README, "Evidence"); the ADR is the reference target a comment cites.
+      # A report path or a finding number in a comment is proof-keeping that
+      # ages with the next round. A bare date as a blame anchor is fine and
+      # passes.
+      - name: Check that no production comment cites an assessment report
+        run: |
+          if grep -rnE 'docs/assessment/|(analysis|review|audit|report) of 20[0-9]{2}-|\bfinding [0-9]' --include='*.kt' veredium-*/src/main; then
+            echo '::error::cite the ADR (or keep only the date), not the assessment report or its finding number'
+            exit 1
+          fi
+
+      # Repo-local script instead of a third-party reporting action (this
+      # workflow pins actions to SHAs; a summary needs no new supply-chain
+      # surface). Runs on failure too, so a red build still shows which
+      # classes failed without digging through the log.
+      - name: Publish test summary
+        if: always()
+        run: python3 .github/scripts/surefire-summary.py
+
+  dependency-scan:
+    name: Dependency vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+
+      # An SBOM of the RESOLVED graph, not a scan of pom.xml: most versions
+      # here are managed by the Spring Boot BOM and never appear in pom.xml,
+      # so only the resolved graph states what actually ships. The aggregate
+      # goal folds every module into one root target/bom.json; test-scoped
+      # dependencies are excluded (they reach no consumer).
+      - name: Generate CycloneDX SBOM of the resolved dependencies
+        run: mvn --batch-mode --no-transfer-progress -DskipTests cyclonedx:makeAggregateBom
+
+      # Fails the job when a dependency is affected by a known advisory.
+      # No API key needed (OSV.dev aggregates GHSA, CVE and friends). If an
+      # advisory is ever unfixable and provably not exploitable here, record
+      # it with a dated rationale in osv-scanner.toml rather than removing
+      # this gate - see CONTRIBUTING.md.
+      - name: Scan the SBOM against the OSV database
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          scan-args: |-
+            --lockfile=./target/bom.json
+
+      # Kept regardless of the scan result, so a red run leaves behind the
+      # exact dependency set it judged.
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: sbom-cyclonedx
+          path: target/bom.json
+          if-no-files-found: error

@@ -1,0 +1,83 @@
+name: CodeQL
+
+# Static analysis of THIS project's own code - the gap the dependency scan
+# in ci.yml explicitly does not cover (that one matches published
+# advisories in dependencies). Kept as its own workflow because it needs
+# security-events: write to upload results, which ci.yml deliberately does
+# not grant, and because a CodeQL run is minutes rather than seconds.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Weekly: the query packs improve over time, so unchanged code is worth
+  # re-analysing.
+  schedule:
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Upload the SARIF results to the repository's Security tab.
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The shipped library modules. Kotlin is extracted by hooking the
+          # Kotlin compiler, so a real build is required - autobuild is
+          # replaced by an explicit compile to keep it deterministic and fast.
+          - language: java-kotlin
+            build-mode: manual
+          # The workflows themselves (token permissions, script injection,
+          # untrusted checkout patterns). No build needed.
+          - language: actions
+            build-mode: none
+    steps:
+      # Pinned to commit SHAs, not mutable tags - see ci.yml for the
+      # rationale; this workflow additionally holds security-events: write.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up JDK 25
+        if: matrix.build-mode == 'manual'
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # Main sources only: tests do not ship, and skipping them keeps the
+      # extraction to the code an attacker could actually reach.
+      #
+      # TEMPORARY (added 2026-09-14): the extraction compiles with Kotlin
+      # 2.4.10 instead of the POM's 2.4.20. CodeQL hooks the Kotlin compiler
+      # and the newest bundle (2.27.0) rejects 2.4.20 with "Kotlin version
+      # 2.4.20 is too recent"; support is announced for CodeQL 2.27.1
+      # (github/codeql#22381). The sources are identical, so the analysis
+      # still covers the shipped code - only the compiler doing the
+      # extraction is one patch level older. Drop the -Dkotlin.version
+      # override once the bundle the init step logs is >= 2.27.1.
+      - name: Compile (CodeQL extraction)
+        if: matrix.build-mode == 'manual'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -DskipTests
+          -Dkotlin.version=2.4.10 compile
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          category: "/language:${{ matrix.language }}"

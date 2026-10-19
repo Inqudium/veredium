@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a defect in the client
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: >
+        What did you observe, and what did you expect instead?
+        Include the relevant log lines if any - redact sensitive values before posting.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The relevant veredium.* properties from your application.yml/properties.
+      render: yaml
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Veredium version
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: "JDK, Spring Boot version, and the HTTP engine in use."
+    validations:
+      required: false
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal steps or a small sample project, if possible.
+    validations:
+      required: false

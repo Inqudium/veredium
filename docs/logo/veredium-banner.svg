@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 168" role="img" aria-label="Veredium — the mount that carries the envoy">
+  <style>
+    :root { --ink:#26221c; --road:#1f7a6d; --muted:#8a6f3c; }
+    @media (prefers-color-scheme: dark) { :root { --ink:#e6e1d6; --road:#3fb59f; --muted:#b09763; } }
+    .serif { font-family: Georgia, 'Iowan Old Style', 'Times New Roman', serif; fill: var(--ink); }
+    .tagline { font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace; fill: var(--muted); }
+  </style>
+
+  <!-- the post road across the whole banner, with the stations the veredus is changed at -->
+  <rect x="0" y="128" width="720" height="5" fill="var(--road)"/>
+  <rect x="50" y="122" width="5" height="17" rx="1" fill="var(--road)"/>
+  <rect x="113" y="122" width="5" height="17" rx="1" fill="var(--road)"/>
+  <rect x="690" y="122" width="5" height="17" rx="1" fill="var(--road)"/>
+
+  <!-- element tile (symbol only; the banner road is its road) -->
+  <g transform="translate(20 35.5)">
+    <rect x="10" y="10" width="108" height="108" rx="10" fill="none" stroke="var(--ink)" stroke-width="6"/>
+    <text x="64" y="78" class="serif" font-size="48" font-weight="700" text-anchor="middle">Vr</text>
+  </g>
+
+  <!-- wordmark: Roman spaced capitals, like the siblings' -->
+  <text x="190" y="98" class="serif" font-size="58" font-weight="700" letter-spacing="7">VEREDIUM</text>
+
+  <!-- tagline -->
+  <text x="193" y="121" class="tagline" font-size="14.5">the mount that carries the envoy — a web client</text>
+</svg>

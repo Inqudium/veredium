@@ -1,0 +1,121 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      # The test-evidence page is generated from EVERY module's tests.
+      - veredium-core/**
+      - pom.xml
+      - .github/workflows/docs.yml
+      - .github/scripts/**
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to commit SHAs, not mutable tags - this workflow runs with
+      # pages: write and id-token: write, so a retagged action release
+      # would be a direct supply-chain path. Dependabot proposes bumps.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Installed from a fully resolved, hash-pinned requirements file:
+      # a compromised or yanked release cannot silently enter the docs
+      # build, and the published site is reproducible. Regenerate after
+      # changing the doc toolchain with:
+      #   pip-compile --generate-hashes --strip-extras \
+      #     --output-file=.github/docs-requirements.txt <(echo mkdocs-material)
+      # Dependabot keeps the pins current (pip ecosystem, /.github).
+      - name: Install MkDocs Material
+        run: pip install --require-hashes -r .github/docs-requirements.txt
+
+      # Runs the suite so the published test evidence and coverage always
+      # describe the commit being deployed - the site never shows numbers
+      # a human typed. A red suite blocks the docs deploy on purpose:
+      # stale docs beat docs that certify a broken build.
+      - name: Run the test suite (Surefire results + JaCoCo report)
+        run: mvn --batch-mode --no-transfer-progress verify
+
+      - name: Generate the test-evidence page
+        run: python3 .github/scripts/generate-test-catalog.py
+
+      # Copies the module guides (which live next to their module
+      # sources) into the docs_dir with rewritten links, so the site
+      # renders them instead of linking to GitHub.
+      - name: Generate the guide pages
+        run: python3 .github/scripts/generate-guide-pages.py
+
+      - name: Build site
+        run: mkdocs build --strict
+
+      # --strict does not fail when a nav entry points at an EXCLUDED file - MkDocs only logs an
+      # INFO line and drops the page. The generated pages are asserted by path.
+      - name: Assert the generated pages made it into the site
+        run: |
+          for page in guides/veredium-core/GUIDE tests/test-evidence; do
+            test -f "site/$page/index.html" || { echo "::error::missing page: $page"; exit 1; }
+          done
+
+      # Per module: the Dokka Maven plugin has no aggregate mode, so each
+      # module renders its own API reference under /api/<module>/.
+      - name: Build API reference (Dokka)
+        run: mvn --batch-mode --no-transfer-progress -pl veredium-core dokka:dokka
+
+      - name: Add API references to site
+        run: |
+          mkdir -p site/api
+          cp -r veredium-core/target/dokka site/api/veredium-core
+
+      # One JaCoCo report per module plus the combined badge; the small
+      # index page keeps /coverage/ (badge link target) from 404ing.
+      - name: Add coverage reports and badge to site
+        run: |
+          mkdir -p site/coverage
+          cp -r veredium-core/target/site/jacoco site/coverage/veredium-core
+          python3 .github/scripts/generate-coverage-badge.py site/coverage/badge.svg
+          cat > site/coverage/index.html <<'EOT'
+          <!DOCTYPE html>
+          <html lang="en"><head><meta charset="utf-8"><title>Veredium coverage</title></head>
+          <body><h1>Veredium coverage reports</h1><ul>
+          <li><a href="veredium-core/">veredium-core</a></li>
+          </ul><p>The badge aggregates instruction coverage across the modules listed above.</p></body></html>
+          EOT
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
