@@ -69,6 +69,8 @@ jobs:
             -DskipTests -Djacoco.skip=true package cyclonedx:makeAggregateBom
           mkdir -p target/release-assets
           cp veredium-core/target/veredium-core-"$VERSION".jar \
+             veredium-restclient/target/veredium-restclient-"$VERSION".jar \
+             veredium-webclient/target/veredium-webclient-"$VERSION".jar \
              target/bom.json target/release-assets/
 
       - name: Upload assets to the release

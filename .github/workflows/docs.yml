@@ -8,6 +8,8 @@ on:
       - mkdocs.yml
       # The test-evidence page is generated from EVERY module's tests.
       - veredium-core/**
+      - veredium-restclient/**
+      - veredium-webclient/**
       - pom.xml
       - .github/workflows/docs.yml
       - .github/scripts/**
@@ -75,32 +77,38 @@ jobs:
       # INFO line and drops the page. The generated pages are asserted by path.
       - name: Assert the generated pages made it into the site
         run: |
-          for page in guides/veredium-core/GUIDE tests/test-evidence; do
+          for page in guides/veredium-core/GUIDE guides/veredium-restclient/GUIDE guides/veredium-webclient/GUIDE tests/test-evidence; do
             test -f "site/$page/index.html" || { echo "::error::missing page: $page"; exit 1; }
           done
 
       # Per module: the Dokka Maven plugin has no aggregate mode, so each
       # module renders its own API reference under /api/<module>/.
       - name: Build API reference (Dokka)
-        run: mvn --batch-mode --no-transfer-progress -pl veredium-core dokka:dokka
+        run: mvn --batch-mode --no-transfer-progress -pl veredium-core,veredium-restclient,veredium-webclient dokka:dokka
 
       - name: Add API references to site
         run: |
           mkdir -p site/api
-          cp -r veredium-core/target/dokka site/api/veredium-core
+          for module in veredium-core veredium-restclient veredium-webclient; do
+            cp -r "$module"/target/dokka "site/api/$module"
+          done
 
       # One JaCoCo report per module plus the combined badge; the small
       # index page keeps /coverage/ (badge link target) from 404ing.
       - name: Add coverage reports and badge to site
         run: |
           mkdir -p site/coverage
-          cp -r veredium-core/target/site/jacoco site/coverage/veredium-core
+          for module in veredium-core veredium-restclient veredium-webclient; do
+            cp -r "$module"/target/site/jacoco "site/coverage/$module"
+          done
           python3 .github/scripts/generate-coverage-badge.py site/coverage/badge.svg
           cat > site/coverage/index.html <<'EOT'
           <!DOCTYPE html>
           <html lang="en"><head><meta charset="utf-8"><title>Veredium coverage</title></head>
           <body><h1>Veredium coverage reports</h1><ul>
           <li><a href="veredium-core/">veredium-core</a></li>
+          <li><a href="veredium-restclient/">veredium-restclient</a></li>
+          <li><a href="veredium-webclient/">veredium-webclient</a></li>
           </ul><p>The badge aggregates instruction coverage across the modules listed above.</p></body></html>
           EOT
 

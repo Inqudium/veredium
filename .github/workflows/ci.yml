@@ -42,7 +42,7 @@ jobs:
       # request, instead of in the Docs workflow after the merge. The rendered
       # site is discarded; only the verdict counts.
       - name: Check the KDoc references (Dokka, failOnWarning)
-        run: mvn --batch-mode --no-transfer-progress -pl veredium-core dokka:dokka
+        run: mvn --batch-mode --no-transfer-progress -pl veredium-core,veredium-restclient,veredium-webclient dokka:dokka
 
       # Dokka reads KDoc only: a `[Symbol]` link in a `//` line comment looks
       # checked and is not - a rename leaves it standing with the authority of

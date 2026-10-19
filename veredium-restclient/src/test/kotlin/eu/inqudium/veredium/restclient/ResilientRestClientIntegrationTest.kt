@@ -1,0 +1,1292 @@
+package eu.inqudium.veredium.restclient
+
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.AppenderBase
+import com.github.tomakehurst.wiremock.WireMockServer
+import com.github.tomakehurst.wiremock.client.WireMock.aResponse
+import com.github.tomakehurst.wiremock.client.WireMock.equalTo
+import com.github.tomakehurst.wiremock.client.WireMock.equalToJson
+import com.github.tomakehurst.wiremock.client.WireMock.get
+import com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor
+import com.github.tomakehurst.wiremock.client.WireMock.okJson
+import com.github.tomakehurst.wiremock.client.WireMock.post
+import com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor
+import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
+import com.github.tomakehurst.wiremock.core.Options
+import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
+import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
+import eu.inqudium.veredium.restclient.mesh.MeshProperties
+import eu.inqudium.veredium.restclient.resilience.CustomizedRegistries
+import io.github.resilience4j.bulkhead.BulkheadConfig
+import io.github.resilience4j.bulkhead.BulkheadRegistry
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException
+import io.github.resilience4j.circuitbreaker.CircuitBreaker
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
+import io.github.resilience4j.timelimiter.TimeLimiterConfig
+import io.github.resilience4j.timelimiter.TimeLimiterRegistry
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import io.micrometer.observation.Observation
+import io.micrometer.observation.ObservationHandler
+import io.micrometer.observation.ObservationRegistry
+import jakarta.validation.ConstraintViolationException
+import jakarta.validation.Validation
+import jakarta.validation.ValidatorFactory
+import jakarta.validation.constraints.Size
+import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatCode
+import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.assertj.core.api.Assertions.catchThrowable
+import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.slf4j.LoggerFactory
+import org.springframework.http.MediaType
+import org.springframework.util.unit.DataSize
+import org.springframework.web.client.HttpClientErrorException
+import org.springframework.web.client.HttpServerErrorException
+import org.springframework.web.client.ResourceAccessException
+import org.springframework.web.client.RestClient
+import org.springframework.web.client.RestClientResponseException
+import tools.jackson.databind.ObjectMapper
+import tools.jackson.databind.json.JsonMapper
+import java.net.SocketTimeoutException
+import java.time.Duration
+import java.util.concurrent.CancellationException
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.LockSupport
+
+/**
+ * End-to-end tests for the per-call pipeline of [ResilientRestClient] and the assembly/caching in
+ * [ResilientRestClientFactory], driven against a real (WireMock) HTTP backend over the loopback transport.
+ *
+ * These cover the behaviour that only emerges when the whole chain runs together: response deserialisation,
+ * request-body serialisation happening exactly once and reaching the wire, error surfacing from the exchange,
+ * the bounded body read, and the three Resilience4j primitives (time limiter, circuit breaker, bulkhead)
+ * decorating the call across the decorator's thread hand-off. The Resilience4j registries are built
+ * programmatically per test so each scenario configures its own budget and window without an `application.yml`.
+ *
+ * The client uses a Jackson 3 [ObjectMapper] without the Kotlin module on the classpath, so the test
+ * payload types ([Greeting], [LookupRequest]) are written to (de)serialise via the no-arg constructor and
+ * bean accessors rather than a Kotlin primary constructor.
+ */
+class ResilientRestClientIntegrationTest {
+    companion object {
+        /** Message prefixes the log assertions key on, including [CapturingAppender]'s terminal marker. */
+        private const val ERROR_PREFIX = "Error during request"
+
+        /**
+         * The client's closing line, written in `execute`'s `finally` - the LAST one any call produces, whatever
+         * its outcome, and hence the terminal marker whenever the client logger is capturing at DEBUG.
+         */
+        private const val COMPLETED_PREFIX = "Completed request"
+
+        /** The factory's drain line: marker within the message, and the prefix it starts with. */
+        private const val DRAIN_MARKER = "did not drain"
+        private const val DRAIN_PREFIX = "Connection pool"
+
+        private lateinit var wireMock: WireMockServer
+
+        @JvmStatic
+        @BeforeAll
+        fun startWireMock() {
+            // Dynamic port keeps this test independent of any other WireMock instance, so it can run in the
+            // default build alongside everything else. Responses carry a Content-Length rather than being
+            // chunked, the shape a JSON API answers in - and the shape the buffer-limit line reads the header from.
+            wireMock =
+                WireMockServer(wireMockConfig().dynamicPort().useChunkedTransferEncoding(Options.ChunkedEncodingPolicy.NEVER))
+                    .apply { start() }
+        }
+
+        @JvmStatic
+        @AfterAll
+        fun stopWireMock() {
+            wireMock.stop()
+        }
+    }
+
+    private val objectMapper: ObjectMapper = JsonMapper.builder().build()
+
+    /** Factories built during a test; their shared connection pool is closed in [tearDown]. */
+    private val factories = mutableListOf<ResilientRestClientFactory>()
+
+    /** Decorators built during a test; their worker executors are shut down in [tearDown]. */
+    private val decorators = mutableListOf<BlockingResilienceDecorator>()
+
+    /** Runs the calls a test needs to interrupt from a thread other than the test's. */
+    private val callers: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
+
+    @BeforeEach
+    fun resetStubs() {
+        wireMock.resetAll()
+    }
+
+    @AfterEach
+    fun tearDown() {
+        callers.shutdownNow()
+        factories.forEach { it.shutdown() }
+        factories.clear()
+        decorators.forEach { it.shutdown() }
+        decorators.clear()
+        if (validatorFactoryHolder.isInitialized()) validatorFactoryHolder.value.close()
+    }
+
+    @Test
+    fun `should deserialise a successful GET response into the requested type`() {
+        // Given
+        wireMock.stubFor(get(urlEqualTo("/hello")).willReturn(okJson("""{"message":"hi there"}""")))
+        val client = newClient("greet")
+
+        // When
+        val result = client.get(Greeting::class.java) { it.uri("/hello") }
+
+        // Then
+        assertThat(result.message).isEqualTo("hi there")
+        wireMock.verify(getRequestedFor(urlEqualTo("/hello")))
+    }
+
+    @Test
+    fun `should send the Host header derived from the triplet`() {
+        // What is tested: the header the factory puts on every request of a client that an adapter never
+        //   sees - the Host header that routes the sidecar to the upstream.
+        // How success is judged: WireMock, listening on localhost, receives a request whose Host header names the
+        //   triplet's host, not localhost, and which carries the configured static header.
+        // Why this case is important: Apache HttpClient derives a Host header from the request URI on its own;
+        //   whether an explicit one survives that is a property of the transport, not of this module's code, and
+        //   the sidecar routes on nothing else. A transport change that dropped it would break every backend
+        //   with a 404 from the sidecar and no error on this side.
+        //
+        // Given: an endpoint whose triplet names a foreign host, served by the local WireMock
+        wireMock.stubFor(get(urlEqualTo("/hosted")).willReturn(okJson("""{"message":"hi"}""")))
+        val meshProperties =
+            MeshProperties(
+                defaults =
+                    MeshProperties.Defaults(
+                        individualRequestTimeoutMs = 1000,
+                        transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl()),
+                    ),
+                endpoints = listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/api.example.com/GET/hosted", alias = "hosted")),
+            )
+        val client = newFactory("hosted", meshProperties = meshProperties).create("hosted")
+
+        // When
+        client.get(Greeting::class.java) { it.uri("/hosted") }
+
+        // Then
+        wireMock.verify(
+            getRequestedFor(urlEqualTo("/hosted"))
+                .withHeader("Host", equalTo("api.example.com"))
+                .withHeader("Accept", equalTo(MediaType.APPLICATION_JSON_VALUE)),
+        )
+    }
+
+    @Test
+    fun `should open an http client observation per request when observation is enabled`() {
+        // What is tested: the standalone observation toggle - with it ON, the factory keeps the (recording)
+        //   ObservationRegistry that arrived on the injected builder, so each outbound call opens Spring
+        //   RestClient's native `http.client.requests` observation. Proves the pass-through without a tracing
+        //   bridge.
+        // Success criterion: exactly one `http.client.requests` observation is recorded for one GET.
+        val handler = RecordingObservationHandler()
+        val registry = ObservationRegistry.create().apply { observationConfig().observationHandler(handler) }
+        wireMock.stubFor(get(urlEqualTo("/hello")).willReturn(okJson("""{"message":"hi"}""")))
+
+        // Given a factory-built client with observation ENABLED / When a request is made
+        val client = newObservingClient("greet-obs", registry, enabled = true)
+        client.get(Greeting::class.java) { it.uri("/hello") }
+
+        // Then one http.client.requests observation was opened against our registry
+        assertThat(handler.started.map { it.name }).containsExactly("http.client.requests")
+    }
+
+    @Test
+    fun `should NOT open an http client observation when observation is disabled`() {
+        // Given a factory-built client with observation OFF (registry on the builder, replaced by NOOP) / When a request runs
+        val handler = RecordingObservationHandler()
+        val registry = ObservationRegistry.create().apply { observationConfig().observationHandler(handler) }
+        wireMock.stubFor(get(urlEqualTo("/hello")).willReturn(okJson("""{"message":"hi"}""")))
+
+        val client = newObservingClient("greet-noobs", registry, enabled = false)
+        client.get(Greeting::class.java) { it.uri("/hello") }
+
+        // Then no observation was recorded - the factory replaced the registry with NOOP, so the client emits no span
+        assertThat(handler.started).isEmpty()
+    }
+
+    @Test
+    fun `should nest the http client observation under an active parent observation across the thread hand-off`() {
+        // 1. What is tested: with observation ON, an ambient parent observation (the stand-in for an inbound
+        //    `http.server.requests` server span) is carried across the decorator's thread hand-off - so the
+        //    outbound `http.client.requests` observation, which Spring opens on the WORKER thread, nests as its
+        //    CHILD instead of starting a fresh root.
+        // 2. Success criterion: the recorded `http.client.requests` context's parent is the parent observation
+        //    (`inbound.server`) - the outbound half of the trace reconciliation: server span -> client span, one
+        //    trace.
+        // 3. Why it matters: the hand-off puts the HTTP call on a thread that has no current observation of its
+        //    own. Without the decorator reopening the caller's scope there, every client span would be a detached
+        //    root and the outbound call would not join the caller's trace. This is the regression guard for that
+        //    propagation, proven over a real HTTP call.
+        val handler = RecordingObservationHandler()
+        val registry = ObservationRegistry.create().apply { observationConfig().observationHandler(handler) }
+        wireMock.stubFor(get(urlEqualTo("/hello")).willReturn(okJson("""{"message":"hi"}""")))
+        val client = newObservingClient("greet-nest", registry, enabled = true)
+
+        // Given an ACTIVE parent observation / When the request runs inside its open scope
+        val parent = Observation.start("inbound.server", registry)
+        parent.openScope().use {
+            client.get(Greeting::class.java) { it.uri("/hello") }
+        }
+        parent.stop()
+
+        // Then the client observation is a CHILD of the parent
+        val clientContext = handler.started.single { it.name == "http.client.requests" }
+        assertThat(clientContext.parentObservation).isNotNull()
+        assertThat(clientContext.parentObservation!!.contextView.name).isEqualTo("inbound.server")
+    }
+
+    @Test
+    fun `should serialise the POST body once, send it on the wire, and deserialise the response`() {
+        // What is tested: that post() serialises the body itself, the JSON reaches the backend verbatim, and the
+        // response is deserialised. Why it matters: the production code serialises exactly once and hands the
+        // string to the wire - verifying the received body proves the wire request is correct and was not,
+        // e.g., re-serialised into a JSON string literal by a converter.
+        //
+        // Given
+        wireMock.stubFor(post(urlEqualTo("/lookup")).willReturn(okJson("""{"message":"found"}""")))
+        val client = newClient("lookup")
+
+        // When
+        val result =
+            client.post(Greeting::class.java, LookupRequest("X-100")) {
+                it.uri("/lookup").contentType(MediaType.APPLICATION_JSON)
+            }
+
+        // Then
+        assertThat(result.message).isEqualTo("found")
+        wireMock.verify(
+            postRequestedFor(urlEqualTo("/lookup"))
+                .withRequestBody(equalToJson("""{"id":"X-100"}""")),
+        )
+    }
+
+    @Test
+    fun `should fail a POST whose body cannot be serialised before anything reaches the wire`() {
+        // What is tested: that a body Jackson cannot serialise fails the call BEFORE an exchange exists.
+        // How success is judged: post(...) throws with the Jackson failure as its root cause, and WireMock
+        //   received nothing.
+        // Why it matters: the serialisation sits outside the exchange on purpose, so legatium's interceptor never
+        //   sees the request and no phantom exchange event is written for a call that never went out. In a
+        //   blocking contract that is simply an exception out of the method - which is what a caller expects.
+        //
+        // Given: a body whose accessor blows up during serialisation
+        wireMock.stubFor(post(urlEqualTo("/lookup")).willReturn(okJson("""{"message":"found"}""")))
+        val client = newClient("unserialisable")
+
+        // When / Then
+        assertThatThrownBy { client.post(Greeting::class.java, Unserialisable()) { it.uri("/lookup") } }
+            .hasRootCauseInstanceOf(IllegalStateException::class.java)
+        wireMock.verify(0, postRequestedFor(urlEqualTo("/lookup")))
+    }
+
+    @Test
+    fun `should nest the http client observation under an active parent observation for a POST`() {
+        // The POST counterpart of the nesting test above: the request is built and executed by a different path,
+        // and the propagation must hold for it just the same.
+        val handler = RecordingObservationHandler()
+        val registry = ObservationRegistry.create().apply { observationConfig().observationHandler(handler) }
+        wireMock.stubFor(post(urlEqualTo("/lookup")).willReturn(okJson("""{"message":"hi"}""")))
+        val client = newObservingClient("post-nest", registry, enabled = true)
+
+        // Given an ACTIVE parent observation / When the POST runs inside its open scope
+        val parent = Observation.start("inbound.server", registry)
+        parent.openScope().use {
+            client.post(Greeting::class.java, LookupRequest("X-1")) {
+                it.uri("/lookup").contentType(MediaType.APPLICATION_JSON)
+            }
+        }
+        parent.stop()
+
+        // Then the client observation is a CHILD of the parent
+        val clientContext = handler.started.single { it.name == "http.client.requests" }
+        assertThat(clientContext.parentObservation).isNotNull()
+        assertThat(clientContext.parentObservation!!.contextView.name).isEqualTo("inbound.server")
+    }
+
+    @Test
+    fun `should record the decoded response body size so the buffer limit can be sized from evidence`() {
+        // What is tested: that every response that FITS the buffer contributes its decoded size to
+        //   `restclient.response.body.size`, tagged with the adapter - the same value the log lines carry as
+        //   `adapter_name`.
+        // How success is judged: one call returning a body containing MULTI-BYTE characters produces exactly
+        //   one sample whose maximum is the UTF-8 BYTE size - strictly greater than the UTF-16 length, which
+        //   is what makes the assertion about the unit rather than about the number. The meter carries the
+        //   `adapter` tag and the `bytes` base unit.
+        //
+        // Given: a registry wired into the factory and a response of a known, non-trivial size
+        val registry = SimpleMeterRegistry()
+        // Umlauts on purpose: two UTF-8 bytes each, so byte size and String.length cannot coincide.
+        val body = """{"message":"${"ä".repeat(200)}${"y".repeat(300)}"}"""
+        wireMock.stubFor(get(urlEqualTo("/sized")).willReturn(okJson(body)))
+        val client = newClient("sized", meterRegistry = registry)
+
+        // When
+        client.get(Greeting::class.java) { it.uri("/sized") }
+
+        // Then
+        val summary =
+            registry
+                .find(RestClientMetrics.RESPONSE_BODY_SIZE)
+                .tag(RestClientMetrics.ADAPTER_TAG, "sized")
+                .summary()
+        assertThat(summary).isNotNull()
+        assertThat(summary!!.count()).isEqualTo(1)
+        assertThat(summary.max()).isEqualTo(body.toByteArray(Charsets.UTF_8).size.toDouble())
+        assertThat(summary.max()).isGreaterThan(body.length.toDouble())
+        assertThat(summary.id.baseUnit).isEqualTo(RestClientMetrics.RESPONSE_BODY_BASE_UNIT)
+    }
+
+    @Test
+    fun `should bind the pool's meters to the host registry under the pool name`() {
+        // What is tested: the counterpart of the reactive twin's `.metrics(true)` on the pool - Apache's pool
+        //   stats reach the host's MeterRegistry under this module's prefix, tagged with its pool name.
+        // How success is judged: the three gauges Apache's ConnPoolMeters binds (leased, available, pending)
+        //   exist under `restclient.pool.*`, all carrying the DEFAULT pool name as `pool`, and nothing else is bound.
+        // Why it matters: pool exhaustion is the one transport condition the bulkheads are sized against, and
+        //   this is the only place it becomes visible.
+        //
+        // Given
+        val registry = SimpleMeterRegistry()
+        wireMock.stubFor(get(urlEqualTo("/pooled")).willReturn(okJson("""{"message":"ok"}""")))
+        val client = newClient("pooled", meterRegistry = registry)
+
+        // When
+        client.get(Greeting::class.java) { it.uri("/pooled") }
+
+        // Then
+        val poolMeters = registry.meters.filter { it.id.name.startsWith("${RestClientMetrics.POOL_METER_PREFIX}.pool.") }
+        assertThat(poolMeters.map { it.id.name })
+            .containsExactlyInAnyOrder("restclient.pool.leased", "restclient.pool.available", "restclient.pool.pending")
+        assertThat(poolMeters.map { it.id.getTag(RestClientMetrics.POOL_TAG) }).containsOnly(RestClientMetrics.POOL_NAME)
+        assertThat(RestClientMetrics.POOL_NAME).isEqualTo("restclient-pool")
+    }
+
+    @Test
+    fun `should leave the response-size meter unregistered when the host wired no registry`() {
+        // What is tested: that the meter is optional in the same sense the validator and the observation
+        //   registry are - absent host wiring means absent meter, not a failure and not a global-registry
+        //   fallback.
+        //
+        // Given
+        val registry = SimpleMeterRegistry()
+        wireMock.stubFor(get(urlEqualTo("/unmetered")).willReturn(okJson("""{"message":"ok"}""")))
+        val client = newClient("unmetered")
+
+        // When
+        client.get(Greeting::class.java) { it.uri("/unmetered") }
+
+        // Then
+        assertThat(registry.find(RestClientMetrics.RESPONSE_BODY_SIZE).summary()).isNull()
+    }
+
+    @Test
+    fun `should not count a response exceeding the buffer limit against the circuit breaker`() {
+        // What is tested: that a response too large for maxInMemorySize does not open the circuit - through the
+        //   REAL pipeline, so the exception is the one the client actually produces rather than one written by
+        //   hand in a test.
+        // How success is judged: five oversized responses in a row all fail for the caller with the limit
+        //   exception, while the breaker records zero failures and stays closed.
+        // Why it matters: the backend is blameless here: it answered correctly, with a 200, and this client
+        //   declined to buffer the answer. Counting that would open the circuit against a healthy backend.
+        //
+        // Given: a breaker that would open readily, a tight buffer limit, and a response well past it
+        val circuitBreakerRegistry =
+            CircuitBreakerRegistry.of(
+                CircuitBreakerConfig
+                    .custom()
+                    .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+                    .slidingWindowSize(5)
+                    .minimumNumberOfCalls(5)
+                    .failureRateThreshold(50f)
+                    .build(),
+            )
+        val backendName = "oversized"
+        wireMock.stubFor(get(urlEqualTo("/big")).willReturn(okJson("""{"message":"${"X".repeat(4000)}"}""")))
+        val meshProperties = meshFor(backendName)
+        val client =
+            newFactory(
+                backendName,
+                circuitBreakers = circuitBreakerRegistry,
+                maxInMemorySize = DataSize.ofBytes(200),
+                meshProperties = meshProperties,
+            ).create(backendName)
+        // The rule lives in the per-alias customizer, so it has to have been applied - as it is at startup.
+        CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, meshProperties)
+
+        // When: five calls all trip the buffer limit
+        repeat(5) {
+            val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/big") } }
+            // Assert the REASON, not merely that it failed: if the call ever fails for another reason - a
+            // timeout, say - that is a different scenario and the counter assertion below would no longer mean
+            // what it claims.
+            assertThat(failure)
+                .`as`("the call must fail on the buffer limit, not for some other reason")
+                .isInstanceOf(ResponseBodyLimitExceededException::class.java)
+        }
+
+        // Then: the breaker held none of it against the backend
+        val breaker = circuitBreakerRegistry.circuitBreaker(backendName)
+        assertThat(breaker.metrics.numberOfFailedCalls).isZero()
+        assertThat(breaker.state).isEqualTo(CircuitBreaker.State.CLOSED)
+    }
+
+    @Test
+    fun `should name the limit and the declared Content-Length on the buffer-limit line`() {
+        // What is tested: the one line that carries the two numbers an operator needs - the configured limit and
+        //   the wire size the peer declared - for a response the size meter cannot sample.
+        // How success is judged: after an oversized answer, the client logger holds a WARN line naming
+        //   `limit=200 bytes` and the body's Content-Length.
+        //
+        // Given: a client that declines compression, so the response arrives with the Content-Length the peer
+        // declared. Under the default `Accept-Encoding: gzip` Apache decodes the body and STRIPS the header, and
+        // the line then reads `Content-Length=unknown` - the documented lower-bound caveat, not a defect.
+        val body = """{"message":"${"X".repeat(4000)}"}"""
+        wireMock.stubFor(get(urlEqualTo("/big")).willReturn(okJson(body)))
+        val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
+        val appender = CapturingAppender("backend 'limit-line'", COMPLETED_PREFIX).apply { start() }
+        val previousLevel = clientLogger.level
+        clientLogger.level = Level.DEBUG
+        clientLogger.addAppender(appender)
+        try {
+            val client =
+                newFactory(
+                    "limit-line",
+                    maxInMemorySize = DataSize.ofBytes(200),
+                    restClientBuilder = RestClient.builder().defaultHeader("Accept-Encoding", "identity"),
+                ).create("limit-line")
+
+            // When
+            runCatching { client.get(Greeting::class.java) { it.uri("/big") } }
+
+            // Then
+            val limitLine = appender.awaitEvents().single { it.formattedMessage.startsWith("Response body exceeded the buffer limit") }
+            assertThat(limitLine.level).isEqualTo(Level.WARN)
+            assertThat(limitLine.formattedMessage)
+                .contains("limit=200 bytes")
+                .contains("Content-Length=${body.toByteArray().size}")
+                .contains("app.restclient.max-in-memory-size")
+        } finally {
+            clientLogger.detachAppender(appender)
+            clientLogger.level = previousLevel
+        }
+    }
+
+    @Test
+    fun `should surface a non-2xx response as Spring's status exception carrying the status and the body`() {
+        // Given: the exchange raises for every 4xx/5xx the way Spring's default status handler would, so the
+        // caller sees a typed exception with the error body on it, not an empty value.
+        wireMock.stubFor(get(urlEqualTo("/missing")).willReturn(aResponse().withStatus(404).withBody("nope")))
+        val client = newClient("err")
+
+        // When / Then
+        assertThatThrownBy { client.get(Greeting::class.java) { it.uri("/missing") } }
+            .isInstanceOf(HttpClientErrorException.NotFound::class.java)
+            .isInstanceOfSatisfying(RestClientResponseException::class.java) { ex ->
+                assertThat(ex.statusCode.value()).isEqualTo(404)
+                assertThat(ex.responseBodyAsString).isEqualTo("nope")
+                // Spring's own message shape: status, reason phrase, and the body quoted
+                assertThat(ex.message).startsWith("404 Not Found: \"nope\"")
+            }
+    }
+
+    @Test
+    fun `should keep a 5xx a server error even when its error body exceeds the buffer limit`() {
+        // What is tested: the boundary between the two readings of the limit - an oversized ERROR body is
+        //   truncated, not rejected, so the breaker still sees a genuine 5xx.
+        // How success is judged: the exception is the server-error type, its body is cut at the limit, and no
+        //   limit exception sits anywhere in its cause chain.
+        //
+        // Given: a 500 with a body far past a tight limit
+        wireMock.stubFor(get(urlEqualTo("/broken")).willReturn(aResponse().withStatus(500).withBody("E".repeat(4000))))
+        val client = newClient("big-error", maxInMemorySize = DataSize.ofBytes(200))
+
+        // When
+        val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/broken") } }
+
+        // Then
+        assertThat(failure).isInstanceOf(HttpServerErrorException.InternalServerError::class.java)
+        assertThat((failure as RestClientResponseException).responseBodyAsByteArray).hasSize(200)
+        assertThat(ClientSideFailurePolicy.isClientSideFailure(failure)).isFalse()
+    }
+
+    @Test
+    fun `should fail a call that exceeds the time-limiter budget on a slow backend`() {
+        // What is tested: that the resilience timeout wiring actually releases the caller on a stalled call. Why
+        // the assertion is broad: the transport's responseTimeout (the ladder rung below the budget) is a tighter
+        // guard than the TimeLimiter and may fire first, so either a TimeoutException or a transport
+        // ResourceAccessException is a correct outcome - what matters is that the call does NOT hang or return a
+        // value once the budget is blown.
+        //
+        // Given: a 3s backend delay against a 300ms budget.
+        wireMock.stubFor(
+            get(urlEqualTo("/slow")).willReturn(okJson("""{"message":"late"}""").withFixedDelay(3_000)),
+        )
+        val client =
+            newClient(
+                "slow",
+                timeLimiter =
+                    TimeLimiterConfig
+                        .custom()
+                        .timeoutDuration(Duration.ofMillis(300))
+                        .cancelRunningFuture(true)
+                        .build(),
+            )
+
+        // When / Then
+        assertThatThrownBy { client.get(Greeting::class.java) { it.uri("/slow") } }
+            .isInstanceOfAny(TimeoutException::class.java, ResourceAccessException::class.java)
+    }
+
+    @Test
+    fun `should fail with the transport's own timeout when the response timeout is the tighter bound`() {
+        // What is tested: the ladder's normal case - the per-endpoint responseTimeout sits BELOW the TimeLimiter
+        //   budget and trips first, so the failure is the transport's (a SocketTimeoutException under Spring's
+        //   ResourceAccessException), which the breaker records and legatium classifies as `timeout`.
+        // How success is judged: with a 300ms anchor (responseTimeout 700ms) and a generous 30s budget, a 3s
+        //   backend fails with a ResourceAccessException caused by a SocketTimeoutException, and the breaker
+        //   counts one failure.
+        // Why it matters: this is the path that releases the WORKER as well as the caller. The TimeLimiter alone
+        //   would leave the worker waiting for the whole 3s; the transport timeout is what frees the connection
+        //   and the bulkhead permit.
+        //
+        // Given
+        wireMock.stubFor(get(urlEqualTo("/stalled")).willReturn(okJson("{}").withFixedDelay(3_000)))
+        val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+        val client =
+            newFactory(
+                "stalled",
+                circuitBreakers = circuitBreakers,
+                timeLimiter = TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build(),
+                meshProperties = meshFor("stalled", individualRequestTimeoutMs = 300),
+            ).create("stalled")
+        assertThat(client.responseTimeout).isEqualTo(Duration.ofMillis(700))
+
+        // When
+        val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/stalled") } }
+
+        // Then
+        assertThat(failure)
+            .isInstanceOf(ResourceAccessException::class.java)
+            .hasCauseInstanceOf(SocketTimeoutException::class.java)
+        assertThat(circuitBreakers.circuitBreaker("stalled").metrics.numberOfFailedCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun `should open the circuit and short-circuit further calls after the failure threshold is reached`() {
+        // What is tested: that the circuit breaker observes the decorated calls and opens once the failure
+        // rate is exceeded, then rejects the next call locally. Why it matters: this proves the breaker is
+        // actually in the call path and records HTTP failures, which is the whole point of the decoration.
+        //
+        // Given: a window of 5 calls, opening at a 50% failure rate, against an always-500 backend.
+        wireMock.stubFor(get(urlEqualTo("/flaky")).willReturn(aResponse().withStatus(500)))
+        val client =
+            newClient(
+                "cb",
+                circuitBreaker =
+                    CircuitBreakerConfig
+                        .custom()
+                        .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+                        .slidingWindowSize(5)
+                        .minimumNumberOfCalls(5)
+                        .failureRateThreshold(50f)
+                        .waitDurationInOpenState(Duration.ofSeconds(10))
+                        .build(),
+            )
+
+        // When: five calls fail (100% failure rate) and trip the breaker.
+        repeat(5) {
+            runCatching { client.get(Greeting::class.java) { it.uri("/flaky") } }
+        }
+
+        // Then: the sixth call is rejected by the open breaker before it ever reaches the backend.
+        assertThatThrownBy { client.get(Greeting::class.java) { it.uri("/flaky") } }
+            .isInstanceOf(CallNotPermittedException::class.java)
+        wireMock.verify(5, getRequestedFor(urlEqualTo("/flaky")))
+    }
+
+    @Test
+    fun `should expose the time-limiter timeout as the request budget`() {
+        // Given
+        val client =
+            newClient(
+                "budget",
+                timeLimiter = TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(7)).build(),
+            )
+
+        // When
+        val budget = client.timeLimiterTimeout
+
+        // Then
+        assertThat(budget).isEqualTo(Duration.ofSeconds(7))
+    }
+
+    @Test
+    fun `should return the same cached client instance for repeated create calls`() {
+        // Given
+        val factory = newFactory("product-agreements")
+
+        // When
+        val first = factory.create("product-agreements")
+        val second = factory.create("product-agreements")
+
+        // Then
+        assertThat(first).isSameAs(second)
+    }
+
+    @Test
+    fun `should stamp the backend name onto every request as the adapter-name attribute`() {
+        // What is tested: that a client of the factory carries its backend name in the request attribute
+        //   ClientRequestLoggingInterceptor.ADAPTER_NAME_ATTRIBUTE - the key legatium's client logging reads the
+        //   adapter name from - on a GET and on a POST alike, without the adapter doing anything for it.
+        // How success is judged: an interceptor placed on the builder BEFORE the factory clones it (where a host
+        //   customizer would sit) sees the attribute with the backend name on each request it observes. The
+        //   interceptor is the only vantage point: an attribute never reaches the wire, so WireMock cannot see
+        //   it, and that invisibility is precisely why it is an attribute and not a header.
+        // Why this case is important: behind the sidecar every request goes to the same host, so the URI no
+        //   longer tells backends apart. The attribute is what keeps the backend name on the exchange for an
+        //   observer that is not this module - a silent regression here would merge all backends into one.
+        //
+        // Given: a builder carrying an interceptor that records the attribute, and a client of the factory built on it
+        val seen = CopyOnWriteArrayList<Any?>()
+        val recording =
+            RestClient.builder().requestInterceptor { request, body, execution ->
+                seen += request.attributes[ClientRequestLoggingInterceptor.ADAPTER_NAME_ATTRIBUTE]
+                execution.execute(request, body)
+            }
+        wireMock.stubFor(get(urlEqualTo("/named")).willReturn(okJson("""{"message":"hi"}""")))
+        wireMock.stubFor(post(urlEqualTo("/named")).willReturn(okJson("""{"message":"hi"}""")))
+        val client = newFactory("named", restClientBuilder = recording).create("named")
+
+        // When: one GET and one POST
+        client.get(Greeting::class.java) { it.uri("/named") }
+        client.post(Greeting::class.java, LookupRequest("named")) { it.uri("/named") }
+
+        // Then: both requests carried the backend name under the attribute key
+        assertThat(seen).containsExactly("named", "named")
+    }
+
+    @Test
+    fun `should fail fast when creating a client for an unconfigured target`() {
+        // Given: a factory that only knows about "configured".
+        val factory = newFactory("configured")
+
+        // When / Then
+        assertThatThrownBy { factory.create("unknown-target") }
+            .isInstanceOf(IllegalStateException::class.java)
+            .hasMessageContaining("unknown-target")
+    }
+
+    @Test
+    fun `should keep an interrupted call at DEBUG, leaving the operator signal to the exchange event`() {
+        // What is tested: where a cancellation is reported on THIS side. The per-call line must be DEBUG - not
+        //   merely absent from WARN, because an accidental drop to TRACE or a removal would pass that weaker
+        //   assertion.
+        // How success is judged: a caller interrupted while waiting gets an InterruptedException, and the single
+        //   "Cancelled request" line from ResilientRestClient is at DEBUG.
+        // Why this case is important: it pins a TRADE, not a removal. A cancellation is the caller going away
+        //   (its budget expired, its scope cancelled) - normal, correlated with load, and therefore arriving in
+        //   floods on WARN, the level operators alert on, exactly when the lines that matter are needed. The
+        //   cancelled worker's exchange still ends in legatium's event, as a `failure` - the other half of the
+        //   trade, pinned in LegatiumExchangeLoggingIntegrationTest.
+        //
+        // Given: a backend that does not answer within the test's window, and the client logger capturing
+        wireMock.stubFor(get(urlEqualTo("/never")).willReturn(okJson("{}").withFixedDelay(30_000)))
+        val inFlight = CountDownLatch(1)
+        wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/never") inFlight.countDown() }
+        val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
+        val clientEvents = CapturingAppender("backend 'cancelled'", COMPLETED_PREFIX).apply { start() }
+        val previousClientLevel = clientLogger.level
+        clientLogger.level = Level.DEBUG
+        clientLogger.addAppender(clientEvents)
+        try {
+            val client = newClient("cancelled", timeLimiter = TimeLimiterConfig.custom().timeoutDuration(Duration.ofMinutes(5)).build())
+            val callerThread = AtomicReference<Thread>()
+            val started = CountDownLatch(1)
+            val outcome =
+                callers.submit<Throwable?> {
+                    callerThread.set(Thread.currentThread())
+                    started.countDown()
+                    catchThrowable { client.get(Greeting::class.java) { it.uri("/never") } }
+                }
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue()
+            assertThat(inFlight.await(5, TimeUnit.SECONDS)).`as`("the request must have reached the backend").isTrue()
+
+            // When: the caller walks away before the answer arrives
+            callerThread.get().interrupt()
+
+            // Then: the caller sees the interruption, and the per-call line is DEBUG
+            assertThat(outcome.get(5, TimeUnit.SECONDS)).isInstanceOf(InterruptedException::class.java)
+            val cancelLine = clientEvents.awaitEvents().single { it.formattedMessage.startsWith("Cancelled request") }
+            assertThat(cancelLine.level)
+                .`as`("a cancellation is the caller's business, not an operational fault")
+                .isEqualTo(Level.DEBUG)
+            assertThat(cancelLine.formattedMessage).containsPattern("duration so far: \\d+ms")
+        } finally {
+            clientLogger.detachAppender(clientEvents)
+            clientLogger.level = previousClientLevel
+        }
+    }
+
+    @Test
+    fun `should log a benign 4xx at DEBUG and without a stack trace`() {
+        // What is tested: the severity of the client's OWN error line - the second consumer of
+        //   HttpExchangeErrorPolicy. A benign 4xx (the documented "does not exist" answer) must be DEBUG, and it
+        //   must carry NO stack trace.
+        // How success is judged: the captured event is at DEBUG, its throwable proxy is absent, and the message
+        //   carries the `expected client error` marker that names the status for a reader.
+        // Why it matters: this is the line that would otherwise make every routine 404 look like an outage. The
+        //   two consumers derive from ONE predicate precisely so this line and the breaker cannot disagree; the
+        //   breaker end is pinned in ExpectedClientErrorCustomizerTest.
+
+        // When: the backend answers "not found"
+        val line = errorLineFor(status = 404, backendName = "benign-4xx")
+
+        // Then
+        assertThat(line.level).isEqualTo(Level.DEBUG)
+        assertThat(line.throwableProxy)
+            .`as`("a business-case rejection needs no stack trace - the exchange event already carries the status")
+            .isNull()
+        assertThat(line.formattedMessage).contains("expected client error")
+    }
+
+    @Test
+    fun `should log a 5xx at WARN and with the stack trace`() {
+        // The counterpart that keeps the test above honest: without it, a line that lost its severity AND its
+        // cause for every failure would satisfy the DEBUG/no-stack-trace assertions.
+
+        // When
+        val line = errorLineFor(status = 500, backendName = "server-error")
+
+        // Then
+        assertThat(line.level).isEqualTo(Level.WARN)
+        assertThat(line.throwableProxy?.className).isEqualTo(HttpServerErrorException.InternalServerError::class.java.name)
+        assertThat(line.formattedMessage).doesNotContain("expected client error")
+    }
+
+    @Test
+    fun `should carry the backend name and the URI template on a transport line under the library's field names`() {
+        // What is tested: the two structured fields every transport line of this client carries, and that
+        //   their NAMES are the exchange event's - `adapter_name` and `adapter_url_template` as legatium spells
+        //   them - so one dashboard field groups both loggers.
+        // How success is judged: the error line for a 500 carries both key-values with the backend alias and
+        //   the endpoint's template.
+        //
+        // When: the backend answers 500
+        val line = errorLineFor(status = 500, backendName = "joined")
+
+        // Then
+        val fields = line.keyValuePairs.associate { it.key to it.value }
+        assertThat(fields).containsEntry("adapter_name", "joined")
+        assertThat(fields).containsEntry("adapter_url_template", "/joined")
+        assertThat(fields).doesNotContainKey("adapter_target_name")
+    }
+
+    @Test
+    fun `should keep a 408 at WARN although it is a 4xx`() {
+        // What is tested: that the boundary INSIDE the 4xx range holds on this side too - 408 Request Timeout
+        //   is an operational signal, not a business case.
+        // How success is judged: the line is WARN with a stack trace, i.e. treated exactly like a 5xx, while the
+        //   404 above proves the same code path does demote a benign status.
+        // Why it matters: a demoted 408 would hide a backend timing out under load in DEBUG, the one level
+        //   nobody runs in production - and it would do so silently, because the exchange still "fails
+        //   correctly" from the caller's point of view. The same status set drives the circuit breaker's record
+        //   predicate, so a drift here would mean the logs and the breaker disagree about what an outage is.
+
+        // When
+        val line = errorLineFor(status = 408, backendName = "request-timeout")
+
+        // Then
+        assertThat(line.level).isEqualTo(Level.WARN)
+        assertThat(line.throwableProxy).isNotNull()
+        assertThat(line.formattedMessage).doesNotContain("expected client error")
+    }
+
+    @Test
+    fun `should report the elapsed time in the failure log from the call's own clock`() {
+        // What is tested: that the duration in the error line is measured by the call itself.
+        // How success is judged: the WARN line renders `duration so far: <n>ms` with digits. The assertion is
+        //   on the SHAPE, not on a value: a literal "null" in a field that announces a number is the defect this
+        //   guards against, and no timing knowledge is needed to catch it.
+        //
+        // Given: a failing backend and the client logger capturing
+        wireMock.stubFor(get(urlEqualTo("/boom")).willReturn(aResponse().withStatus(500)))
+        val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
+        // The client logger keeps its configured level here, so the DEBUG closing line is never emitted and
+        // cannot serve as the terminal marker - the WARN failure line itself is the last one.
+        val appender = CapturingAppender("backend 'own-clock-duration'", ERROR_PREFIX).apply { start() }
+        clientLogger.addAppender(appender)
+        try {
+            val client = newClient("own-clock-duration")
+
+            // When: the call fails
+            runCatching { client.get(Greeting::class.java) { it.uri("/boom") } }
+
+            // Then: the failure line carries a measured duration, not a null
+            val message = appender.awaitEvents().single { it.formattedMessage.startsWith(ERROR_PREFIX) }.formattedMessage
+            assertThat(message).containsPattern("duration so far: \\d+ms")
+        } finally {
+            clientLogger.detachAppender(appender)
+        }
+    }
+
+    @Test
+    fun `should fail the call on a schema violation when validation is enforced for the backend`() {
+        // What is tested: the validation step after deserialisation, in its enforcing posture - a response that
+        //   breaks its DTO's constraints fails the call with every violation named.
+        // How success is judged: a body whose `message` is longer than the DTO allows produces a
+        //   ConstraintViolationException naming the property; the backend's 200 was received and the breaker
+        //   saw a success (the violation sits outside the decoration).
+        // Why it matters: a violation is a contract problem, not an outage; it must reach the caller as a typed
+        //   failure and must NOT open the circuit against a backend that answered.
+        //
+        // Given: validation on and enforcing for this backend
+        val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+        wireMock.stubFor(get(urlEqualTo("/validated")).willReturn(okJson("""{"message":"far too long for the schema"}""")))
+        val client =
+            newFactory(
+                "validated",
+                circuitBreakers = circuitBreakers,
+                validation = RestClientProperties.Validation(enabled = true, failOnViolation = true),
+                validatorFactory = validatorFactory,
+            ).create("validated")
+
+        // When
+        val failure = catchThrowable { client.get(ConstrainedGreeting::class.java) { it.uri("/validated") } }
+
+        // Then
+        assertThat(failure)
+            .isInstanceOf(ConstraintViolationException::class.java)
+            .hasMessageContaining("violates its own schema")
+            .hasMessageContaining("message")
+        assertThat(circuitBreakers.circuitBreaker("validated").metrics.numberOfFailedCalls).isZero()
+        assertThat(circuitBreakers.circuitBreaker("validated").metrics.numberOfSuccessfulCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun `should return the response unchanged and log the violation at WARN in report-only mode`() {
+        // What is tested: the rollout posture - `fail-on-violation=false` reports and returns.
+        // How success is judged: the same violating body is returned to the caller, and the client logger holds
+        //   one WARN line naming the violation and the property that switches enforcement on.
+        //
+        // Given
+        wireMock.stubFor(get(urlEqualTo("/reported")).willReturn(okJson("""{"message":"far too long for the schema"}""")))
+        val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
+        val appender = CapturingAppender("backend 'reported'", COMPLETED_PREFIX).apply { start() }
+        val previousLevel = clientLogger.level
+        clientLogger.level = Level.DEBUG
+        clientLogger.addAppender(appender)
+        try {
+            val client =
+                newFactory(
+                    "reported",
+                    validation = RestClientProperties.Validation(enabled = true, failOnViolation = false),
+                    validatorFactory = validatorFactory,
+                ).create("reported")
+
+            // When
+            val result = client.get(ConstrainedGreeting::class.java) { it.uri("/reported") }
+
+            // Then
+            assertThat(result.message).isEqualTo("far too long for the schema")
+            val warning = appender.awaitEvents().single { it.level == Level.WARN }
+            assertThat(warning.formattedMessage)
+                .contains("violates its own schema")
+                .contains("reported only, not enforced")
+                .contains("app.restclient.validation.fail-on-violation=false")
+        } finally {
+            clientLogger.detachAppender(appender)
+            clientLogger.level = previousLevel
+        }
+    }
+
+    @Test
+    fun `should report a pool that does not drain within the deadline and close it anyway`() {
+        // What is tested: the deadline branch of shutdown() - a connection still leased when the drain window
+        //   has passed is reported as a WARN naming the pool, and the pool is closed regardless.
+        // How success is judged: with a worker parked in a slow exchange (the connection stays leased) and a
+        //   clock that is past the deadline on its next read, shutdown() returns, writes exactly one WARN
+        //   "did not drain within", and does not throw.
+        // Why this case is important: the branch is unreachable with a real clock short of holding a
+        //   connection open longer than the derived window - longer than any response timeout. Only an injected
+        //   clock makes it a deterministic test; without one, the one line a shutdown under load would write
+        //   had never been seen to work.
+        //
+        // Given: a slow backend, a factory on a leaping clock, and a call whose connection is leased
+        wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("""{"message":"late"}""").withFixedDelay(5_000)))
+        val meters = SimpleMeterRegistry()
+        val factory =
+            newFactory(
+                "undrained",
+                timeLimiter = TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build(),
+                meterRegistry = meters,
+                nanoTime = leapingClock(TimeUnit.HOURS.toNanos(1)),
+            )
+        val client = factory.create("undrained")
+        val inFlight = callers.submit<Throwable?> { catchThrowable { client.get(Greeting::class.java) { it.uri("/slow") } } }
+        awaitLeasedConnection(meters)
+
+        try {
+            capturingDrainLine { appender ->
+                // When: the context is torn down while the connection is still leased
+                val outcome = catchThrowable { factory.shutdown() }
+
+                // Then: no exception out of the destroy callback, and the outcome stated as a WARN
+                assertThat(outcome).isNull()
+                val warning = appender.awaitEvents().single()
+                assertThat(warning.level).isEqualTo(Level.WARN)
+                assertThat(warning.formattedMessage)
+                    .contains("did not drain within")
+                    .contains("connection(s) still leased")
+                    .contains(RestClientMetrics.POOL_NAME)
+            }
+        } finally {
+            // Closing the pool dropped the leased connection, so the parked worker fails rather than waiting 5 s
+            inFlight.get(10, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun `should stop waiting for the pool when the shutdown thread is interrupted`() {
+        // What is tested: the interrupt exit of the drain loop - shutdown() on a thread whose interrupt flag is
+        //   set does not wait for the deadline (and does not spin until it), reports the interrupt as the reason,
+        //   and leaves the flag set for the caller.
+        // How success is judged: with a connection leased and the derived drain window at least a second long,
+        //   shutdown() returns well inside that window, the WARN names the interrupt, and the flag is still set
+        //   afterwards.
+        // Why this case is important: parkNanos returns immediately on an interrupted thread and does NOT clear
+        //   the flag, so without an explicit exit the loop would burn a core for the whole window - during a
+        //   container shutdown, when that core is wanted for the drain of everything else.
+        //
+        // Given: a slow backend and a call whose connection is leased
+        wireMock.stubFor(get(urlEqualTo("/slower")).willReturn(okJson("""{"message":"late"}""").withFixedDelay(5_000)))
+        val meters = SimpleMeterRegistry()
+        val factory =
+            newFactory(
+                "interrupted-drain",
+                timeLimiter = TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build(),
+                meterRegistry = meters,
+            )
+        val client = factory.create("interrupted-drain")
+        val inFlight = callers.submit<Throwable?> { catchThrowable { client.get(Greeting::class.java) { it.uri("/slower") } } }
+        awaitLeasedConnection(meters)
+
+        try {
+            capturingDrainLine { appender ->
+                // When: shutdown runs on a thread that is already interrupted
+                val shutdown =
+                    callers.submit<Boolean> {
+                        Thread.currentThread().interrupt()
+                        factory.shutdown()
+                        Thread.currentThread().isInterrupted
+                    }
+
+                // Then: it returns well inside the derived window (which carries a full second of slack alone) ...
+                val flagStillSet = shutdown.get(1, TimeUnit.SECONDS)
+                // ... leaves the interrupt for the caller ...
+                assertThat(flagStillSet).`as`("the interrupt flag must survive shutdown()").isTrue()
+                // ... and says why it stopped waiting
+                val warning = appender.awaitEvents().single()
+                assertThat(warning.level).isEqualTo(Level.WARN)
+                assertThat(warning.formattedMessage).contains("because the shutdown thread was interrupted")
+            }
+        } finally {
+            inFlight.get(10, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun `should close the pool on shutdown without raising out of the destroy callback`() {
+        // What is tested: that shutdown() completes normally when the pool holds a live keep-alive connection,
+        //   and that calling it twice is harmless.
+        // How success is judged: neither call throws, and the exchange that populated the pool did reach the
+        //   backend - so there genuinely was a connection to close rather than an empty pool.
+        // Why this case is important: shutdown() runs as a @PreDestroy, where Spring can only catch what it
+        //   throws and log it as a destroy method that failed. The drain deadline is an outcome, reported as a
+        //   WARN naming the pool; that branch is covered by the two cases above, on an injected clock.
+        //
+        // Given: one completed exchange, which leaves its connection in the pool (keep-alive is on)
+        wireMock.stubFor(get(urlEqualTo("/bye")).willReturn(okJson("""{"message":"bye"}""")))
+        val factory = newFactory("drain")
+        val client = factory.create("drain")
+        client.get(Greeting::class.java) { it.uri("/bye") }
+
+        // When: the context is torn down
+        val firstShutdown = catchThrowable { factory.shutdown() }
+        val secondShutdown = catchThrowable { factory.shutdown() }
+
+        // Then
+        assertThat(firstShutdown).`as`("closing a pool with a live connection must not raise").isNull()
+        assertThat(secondShutdown).`as`("shutdown must stay idempotent - Spring may call it once, tests twice").isNull()
+        wireMock.verify(getRequestedFor(urlEqualTo("/bye")))
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
+    /**
+     * One validator factory for the validation cases; Hibernate Validator is on the test classpath. Built on
+     * first use and closed in [tearDown] when it was - a factory holds caches and a bean-metadata manager that
+     * only `close` releases.
+     */
+    private val validatorFactoryHolder = lazy { Validation.buildDefaultValidatorFactory() }
+    private val validatorFactory: ValidatorFactory by validatorFactoryHolder
+
+    /** A single-endpoint mesh for [backendName] against WireMock. */
+    private fun meshFor(
+        backendName: String,
+        individualRequestTimeoutMs: Long = 1000,
+    ): MeshProperties =
+        MeshProperties(
+            defaults =
+                MeshProperties.Defaults(
+                    individualRequestTimeoutMs = individualRequestTimeoutMs,
+                    transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl()),
+                ),
+            endpoints = listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/$backendName", alias = backendName)),
+        )
+
+    private fun newFactory(
+        backendName: String,
+        timeLimiter: TimeLimiterConfig = TimeLimiterConfig.ofDefaults(),
+        circuitBreaker: CircuitBreakerConfig = CircuitBreakerConfig.ofDefaults(),
+        bulkhead: BulkheadConfig = BulkheadConfig.ofDefaults(),
+        circuitBreakers: CircuitBreakerRegistry = CircuitBreakerRegistry.of(circuitBreaker),
+        maxInMemorySize: DataSize = RestClientProperties().maxInMemorySize,
+        meterRegistry: MeterRegistry? = null,
+        meshProperties: MeshProperties = meshFor(backendName),
+        validation: RestClientProperties.Validation = RestClientProperties.Validation(),
+        validatorFactory: ValidatorFactory? = null,
+        // Deliberately no Spring context here: a bare builder stands in for Boot's bean. A test that needs to
+        // observe what the factory puts on its clients passes a builder carrying an interceptor of its own.
+        restClientBuilder: RestClient.Builder = RestClient.builder(),
+        nanoTime: () -> Long = System::nanoTime,
+    ): ResilientRestClientFactory {
+        val resilience =
+            BlockingResilienceDecorator(
+                circuitBreakers,
+                TimeLimiterRegistry.of(timeLimiter),
+                BulkheadRegistry.of(bulkhead),
+            ).also { decorators += it }
+        return ResilientRestClientFactory(
+            RestClientProperties(maxInMemorySize = maxInMemorySize, validation = validation),
+            meshProperties,
+            resilience,
+            objectMapper,
+            validatorFactory = validatorFactory,
+            meterRegistry = meterRegistry,
+            restClientBuilder = restClientBuilder,
+            nanoTime = nanoTime,
+        ).also { factories += it }
+    }
+
+    /**
+     * Blocks until [meters] reports at least one leased connection on the factory's pool, or fails after a
+     * bounded wait. The pool's `leased` gauge is the only observable the transport offers for "a worker is on
+     * the wire"; a latch inside the call would fire before the connection is actually taken.
+     */
+    private fun awaitLeasedConnection(meters: MeterRegistry) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (leased(meters) < 1) {
+            assertThat(System.nanoTime()).`as`("a connection must be leased within 5 s").isLessThan(deadline)
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10))
+        }
+    }
+
+    private fun leased(meters: MeterRegistry): Double =
+        meters
+            .find("${RestClientMetrics.POOL_METER_PREFIX}.pool.leased")
+            .gauge()
+            ?.value() ?: 0.0
+
+    /** A monotonic clock that leaps by [stepNanos] on every read, so a deadline computed from it is past by the next read. */
+    private fun leapingClock(stepNanos: Long): () -> Long {
+        val now = AtomicLong()
+        return { now.addAndGet(stepNanos) }
+    }
+
+    /** Attaches a capture of the factory's drain line for the duration of [block]. */
+    private fun capturingDrainLine(block: (CapturingAppender) -> Unit) {
+        val factoryLogger = LoggerFactory.getLogger(ResilientRestClientFactory::class.java) as Logger
+        val appender = CapturingAppender(DRAIN_MARKER, DRAIN_PREFIX).apply { start() }
+        factoryLogger.addAppender(appender)
+        try {
+            block(appender)
+        } finally {
+            factoryLogger.detachAppender(appender)
+        }
+    }
+
+    /**
+     * Drives one exchange that the backend answers with [status], and returns the client's own error line as a
+     * captured event.
+     *
+     * The logger is raised to DEBUG for the duration on purpose: the benign-4xx line is emitted at exactly that
+     * level, so at the default level the event would never be created and every assertion on it would pass
+     * vacuously. Restored in the `finally`, since the level is global to the logger.
+     */
+    private fun errorLineFor(
+        status: Int,
+        backendName: String,
+    ): ILoggingEvent {
+        val path = "/status-$status"
+        wireMock.stubFor(get(urlEqualTo(path)).willReturn(aResponse().withStatus(status)))
+        val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
+        val appender = CapturingAppender("backend '$backendName'", COMPLETED_PREFIX).apply { start() }
+        val previousLevel = clientLogger.level
+        clientLogger.level = Level.DEBUG
+        clientLogger.addAppender(appender)
+        try {
+            val client = newClient(backendName)
+            runCatching { client.get(Greeting::class.java) { it.uri(path) } }
+            return appender.awaitEvents().single { it.formattedMessage.startsWith(ERROR_PREFIX) }
+        } finally {
+            clientLogger.detachAppender(appender)
+            clientLogger.level = previousLevel
+        }
+    }
+
+    private fun newClient(
+        backendName: String,
+        timeLimiter: TimeLimiterConfig = TimeLimiterConfig.ofDefaults(),
+        circuitBreaker: CircuitBreakerConfig = CircuitBreakerConfig.ofDefaults(),
+        bulkhead: BulkheadConfig = BulkheadConfig.ofDefaults(),
+        maxInMemorySize: DataSize = RestClientProperties().maxInMemorySize,
+        meterRegistry: MeterRegistry? = null,
+    ): ResilientRestClient =
+        newFactory(
+            backendName,
+            timeLimiter = timeLimiter,
+            circuitBreaker = circuitBreaker,
+            bulkhead = bulkhead,
+            maxInMemorySize = maxInMemorySize,
+            meterRegistry = meterRegistry,
+        ).create(backendName)
+
+    /**
+     * A client whose factory received a builder carrying [registry] - the stand-in for what Boot's
+     * `ObservationRestClientCustomizer` puts on the auto-configured builder - gated by [enabled]. The decorator
+     * receives the same registry, as it would from the context, so the caller's observation can cross the
+     * hand-off.
+     */
+    private fun newObservingClient(
+        backendName: String,
+        registry: ObservationRegistry,
+        enabled: Boolean,
+    ): ResilientRestClient {
+        val resilience =
+            BlockingResilienceDecorator(
+                CircuitBreakerRegistry.of(CircuitBreakerConfig.ofDefaults()),
+                // Deliberately generous: the DEFAULT 1s budget makes this test timing-dependent, because a
+                // slow call under load would fail with a TimeoutException instead.
+                TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build()),
+                BulkheadRegistry.of(BulkheadConfig.ofDefaults()),
+                observationRegistry = registry,
+            ).also { decorators += it }
+        val properties =
+            RestClientProperties(observability = RestClientProperties.Observability(httpObservationEnabled = enabled))
+        return ResilientRestClientFactory(
+            properties,
+            meshFor(backendName),
+            resilience,
+            objectMapper,
+            // No Spring context here: the registry is placed on the builder by hand, as Boot's customizer would.
+            restClientBuilder = RestClient.builder().observationRegistry(registry),
+        ).also { factories += it }
+            .create(backendName)
+    }
+
+    /**
+     * Captures log events for reading from a thread OTHER than the one that logged them, which some assertions
+     * in this class need: the client's own lines are written on the calling thread, but a call driven from a
+     * helper thread (the interruption case) logs there.
+     *
+     * [marker] scopes the capture to one call: the logger is a shared, process-wide one, so a lingering call
+     * from an earlier test (an abandoned worker, a late timeout) would otherwise be captured as well. Every
+     * message of interest names its backend (`... backend '<name>' ...`), and backend names are unique per test.
+     * [awaitEvents] waits for the line matching [terminalPrefix] - the last one the call can produce - so the
+     * capture is not merely safe to read but COMPLETE.
+     */
+    private class CapturingAppender(
+        private val marker: String,
+        private val terminalPrefix: String,
+    ) : AppenderBase<ILoggingEvent>() {
+        private val captured = CopyOnWriteArrayList<ILoggingEvent>()
+        private val terminated = CountDownLatch(1)
+
+        override fun append(eventObject: ILoggingEvent) {
+            val message = eventObject.formattedMessage
+            if (!message.contains(marker)) return
+            // Snapshot the MDC (and other thread-bound data) NOW, while the emitting thread still carries it:
+            // Logback captures the MDC property map LAZILY, on first read.
+            eventObject.prepareForDeferredProcessing()
+            captured += eventObject
+            if (message.startsWith(terminalPrefix)) terminated.countDown()
+        }
+
+        /** Everything captured for this call, once its terminal line has actually been logged. */
+        fun awaitEvents(): List<ILoggingEvent> {
+            assertThat(terminated.await(5, TimeUnit.SECONDS))
+                .`as`("no '$terminalPrefix' line for '$marker' was logged within 5s")
+                .isTrue()
+            return captured.toList()
+        }
+    }
+
+    private class RecordingObservationHandler : ObservationHandler<Observation.Context> {
+        val started = CopyOnWriteArrayList<Observation.Context>()
+
+        override fun supportsContext(context: Observation.Context): Boolean = true
+
+        override fun onStart(context: Observation.Context) {
+            started.add(context)
+        }
+    }
+}
+
+/**
+ * Response payload for the tests. A plain class with a no-arg constructor and a mutable property so the
+ * Kotlin-module-less Jackson 3 mapper can deserialise it via the bean setter.
+ */
+class Greeting {
+    var message: String? = null
+}
+
+/** [Greeting] with a constraint the validation cases can violate; the mapper reads it the same way. */
+class ConstrainedGreeting {
+    @field:Size(max = 5)
+    var message: String? = null
+}
+
+/** A body Jackson cannot serialise: the accessor it must call to read the value throws. */
+class Unserialisable {
+    val value: String get() = throw IllegalStateException("this body cannot be serialised")
+}
+
+/** Request payload for the POST test; serialises to `{"id":...}` via its bean getter. */
+class LookupRequest(
+    var id: String? = null,
+)

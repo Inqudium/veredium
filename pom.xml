@@ -74,6 +74,8 @@
 
     <modules>
         <module>veredium-core</module>
+        <module>veredium-restclient</module>
+        <module>veredium-webclient</module>
     </modules>
 
     <properties>
@@ -110,6 +112,14 @@
              methods run as regression tests in every verify and fuzz for
              real in the scheduled Fuzz workflow (JAZZER_FUZZ=1). -->
         <jazzer.version>0.30.0</jazzer.version>
+        <!-- Resilience4j: the BOM below aligns every resilience4j-* artifact; the Boot 4 starter is managed
+             explicitly because the BOM of this version does not list it. -->
+        <resilience4j.version>2.4.0</resilience4j.version>
+        <!-- eu.inqudium legatium: outbound HTTP exchange logging, one twin per client stack. One property, so both
+             modules carry the same version; there is no BOM. -->
+        <legatium.version>1.2.0</legatium.version>
+        <!-- WireMock (test scope of both client modules). -->
+        <wiremock.version>3.13.2</wiremock.version>
 
         <!-- Plugin Versions -->
         <flatten-maven-plugin.version>1.8.0</flatten-maven-plugin.version>
@@ -153,6 +163,23 @@
                 <artifactId>jazzer-junit</artifactId>
                 <version>${jazzer.version}</version>
                 <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.github.resilience4j</groupId>
+                <artifactId>resilience4j-bom</artifactId>
+                <version>${resilience4j.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.github.resilience4j</groupId>
+                <artifactId>resilience4j-spring-boot4</artifactId>
+                <version>${resilience4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.wiremock</groupId>
+                <artifactId>wiremock-standalone</artifactId>
+                <version>${wiremock.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
