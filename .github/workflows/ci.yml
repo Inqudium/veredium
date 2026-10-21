@@ -42,7 +42,10 @@ jobs:
       # request, instead of in the Docs workflow after the merge. The rendered
       # site is discarded; only the verdict counts.
       - name: Check the KDoc references (Dokka, failOnWarning)
-        run: mvn --batch-mode --no-transfer-progress -pl veredium-core,veredium-restclient,veredium-webclient dokka:dokka
+        # `package` before the goal: a bare `dokka:dokka` runs no lifecycle, so the
+        # reactor has no veredium-core jar to hand the client modules, and a fresh
+        # runner has none in its local repository either.
+        run: mvn --batch-mode --no-transfer-progress -pl veredium-core,veredium-restclient,veredium-webclient -DskipTests -Djacoco.skip=true package dokka:dokka
 
       # Dokka reads KDoc only: a `[Symbol]` link in a `//` line comment looks
       # checked and is not - a rename leaves it standing with the authority of
