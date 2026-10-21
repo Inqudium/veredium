@@ -41,16 +41,20 @@ The one meter this module registers itself (the reactive twin registers its sibl
 and this is what to choose it from: the distribution of bodies that work. Read `max` and the upper percentiles
 per adapter, and keep the ceiling a comfortable factor above them.
 
-**What it cannot tell you.** Only bodies that fit are sampled — a response past the limit never becomes a
-`String`, so it leaves no sample. For those, the one WARN line `Response body exceeded the buffer limit on
+**What it cannot tell you.** Only bodies that fit are sampled — a response past the limit is never decoded,
+so it leaves no sample. For those, the one WARN line `Response body exceeded the buffer limit on
 backend '<alias>': limit=N bytes, Content-Length=M` carries the two numbers instead. `Content-Length` there is a
 **lower bound**: Apache strips the header after decompressing a gzip body, so under the default
 `Accept-Encoding` the line reads `Content-Length=unknown` and only the limit is certain.
 
 **Why bytes after decompression, and why UTF-8.** The bounded reader counts what Apache hands it, which is the
-inflated body — the same bytes the limit bounds. The sample is taken with `RestClientMetrics.utf8Size`, not
+inflated body — the same bytes the limit bounds. For a UTF-8 body (JSON's default, and what a body without a
+declared charset is read as) the sample is simply the number of bytes read: Jackson parses those bytes
+directly, and no `String` copy of the body is made. A body in another declared charset is decoded with it and
+sampled with `ResponseBodyMetrics.utf8Size` (`veredium-core`), so every sample is in UTF-8 bytes, never in
 `String.length`: a UTF-16 count would under-state multi-byte content by up to a factor of three, in exactly
-the direction that sizes a ceiling too small. `RestClientMetricsTest` pins the counter against the JDK encoder.
+the direction that sizes a ceiling too small. `ResponseBodyMetricsTest` and its fuzz target pin the counter
+against the JDK encoder; `ResilientRestClientIntegrationTest` pins both paths.
 
 **The tag value is the mesh endpoint alias, not an adapter class.** `InvolvedPartyAdapter` owns two aliases
 (`apis-example-com-POST-v5-involved-parties-lookup`, `apis-example-com-GET-v6-involved-parties`), so a filter on
@@ -75,7 +79,8 @@ the names are Apache's shape under this module's prefix rather than Micrometer's
 
 **How to read `pending` next to the bulkheads.** The bulkheads (§4) are sized so that
 `sum(max-concurrent-calls) <= app.mesh.defaults.transport.max-connections` — `ResilienceConfigContractTest`
-enforces it. Under that invariant the bulkheads shed load *before* the pool runs out, and `pending` stays at
+enforces it for the module's reference configuration, and `MeshResilienceStartupGuard` (`veredium-core`) logs a
+WARN naming both numbers and every alias when a host's configuration breaks it. Under that invariant the bulkheads shed load *before* the pool runs out, and `pending` stays at
 zero; a non-zero `pending` therefore means the invariant was broken by configuration, or a second consumer of
 the pool exists. Raising `max-connections` without raising the bulkheads moves nothing; raising the bulkheads
 without the pool moves the queueing into the pool, where it fails later and with a less obvious error.
@@ -100,8 +105,8 @@ binder exposes the three live counts only. A dashboard that wants the ratio read
 Spring's `RestClient` opens one `http.client.requests` observation per exchange when an `ObservationRegistry`
 sits on the builder. The factory does not wire that registry: Boot's `ObservationRestClientCustomizer` puts it
 on the `RestClient.Builder` bean the factory clones, and the module toggle
-`app.restclient.observability.http-observation-enabled` only decides whether the clone *keeps* it (shipped
-`true`; code default `false`, in which case the factory swaps in `ObservationRegistry.NOOP` for its clients
+`app.restclient.observability.http-observation-enabled` only decides whether the clone *keeps* it (`true` in
+the reference configuration; code default `false`, in which case the factory swaps in `ObservationRegistry.NOOP` for its clients
 only). With Boot's `DefaultMeterObservationHandler` behind the registry that becomes:
 
 | Metric | Type | Tags | Meaning |
@@ -204,7 +209,7 @@ are documented in `legatium/docs/GUIDE.md` §7.4, not here. The ones worth knowi
 | `adapter.logging.events` | `outcome` | Exchange events actually emitted; the reconciliation base for the log index. A **cancelled** call counts as `failure` here (there is no `cancelled` on the blocking stack). |
 | `adapter.logging.failopen` | `stage` | The logging gave up on an exchange. Independent of every meter above. |
 | `adapter.logging.correlation.id` | `source=trace\|header\|generated` | A rising `generated` share means the host stopped propagating `traceparent` — or, for this module, that §3's observation is off. |
-| `adapter.request.body.size`, `adapter.response.body.size`, `adapter.response.body.read` | `uri`, `host`, `name` | Opt-in (`measure-*-body-size`, shipped `true`). `name` is the same alias as §1's `adapter` tag. The response size here is what the library's tee saw, **not** the decoded size §1 records; the two disagree under compression by exactly the compression ratio. |
+| `adapter.request.body.size`, `adapter.response.body.size`, `adapter.response.body.read` | `uri`, `host`, `name` | Opt-in (`measure-*-body-size`, `true` in the reference configuration). `name` is the same alias as §1's `adapter` tag. The response size here is what the library's tee saw, **not** the decoded size §1 records; the two disagree under compression by exactly the compression ratio. |
 
 ---
 

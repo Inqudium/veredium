@@ -21,14 +21,16 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 /**
  * Boots Resilience4j's own Boot auto-configuration on the `resilience4j.*` and `app.mesh.*` blocks of this
  * module's reference configuration (`src/test/resources/application.yml`) with THIS stack's wiring
- * ([WebClientConfiguration], which imports the core's mesh configuration) - the one proof that the shipped
- * blocks, the derived aliases, the reactive stack's verdicts and the core's guard agree.
+ * ([WebClientConfiguration], which imports the core's mesh configuration) - the one proof that the reference
+ * blocks, the derived aliases, the reactive stack's verdicts and the core's guard agree. The file is a test
+ * resource, not shipped (a library ships no `application.yml`); the class keeps its historical name because
+ * veredium-core, the ADRs and the blocking twin refer to it by that name.
  *
  * What is tested: that the context starts, and that every instance the file declares shows the customizer's
  * effect with the verdicts this module ships: a 404 in the shape `WebClient` throws it is not recorded, the
  * codec's limit exception is ignored even behind its 200-reporting wrapper, the derived budget is on every
  * TimeLimiter.
- * How it is deemed successful: the context has not failed and every endpoint's instances pass the probes.
+ * Success criteria: the context has not failed and every endpoint's instances pass the probes.
  * Why it matters: the mechanism - customizer beans, the guard, both directions of failure - is pinned once in
  * the core (`MeshResilienceContextTest`) with a stand-in stack. This file once declared a single TimeLimiter
  * instance while mesh derives four; under the customizer mechanism three endpoints would then have run on the
@@ -38,9 +40,18 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
  */
 class MeshResilienceShippedConfigTest {
     @Test
-    fun `should start on the shipped configuration with every mesh endpoint customized`() {
-        // Given / When: the context starts on the shipped resilience4j + app.mesh blocks
-        shippedContext().run { context ->
+    fun `should start on the reference configuration with every mesh endpoint customized`() {
+        // What is tested: Resilience4j's own Boot auto-configuration plus this stack's wiring, booted on the
+        //   reference configuration's resilience4j and app.mesh blocks.
+        // Success criteria: the context starts (the core's startup guard did not refuse it); for each of the
+        //   four endpoints the TimeLimiter carries the derived budget, and the CircuitBreaker ignores the
+        //   codec limit behind its 200 wrapper and does not record a 404 in WebClient's shape.
+        // Why it matters: it is the only test where the customizer mechanism meets the real auto-configuration
+        //   AND this stack's exception vocabulary on the configuration the module documents - the static
+        //   contract (ResilienceConfigContractTest) cannot see whether the customizers actually land.
+        //
+        // Given / When: the context starts on the reference resilience4j + app.mesh blocks
+        referenceContext().run { context ->
             assertThat(context).hasNotFailed()
             assertThat(context).hasSingleBean(MeshResilienceStartupGuard::class.java)
             val endpoints = context.getBean(MeshProperties::class.java).resolveAll().values
@@ -66,11 +77,11 @@ class MeshResilienceShippedConfigTest {
         }
     }
 
-    /** Resilience4j's three auto-configurations on the shipped keys, plus this stack's verdicts configuration. */
-    private fun shippedContext(): ApplicationContextRunner =
+    /** Resilience4j's three auto-configurations on the reference keys, plus this stack's verdicts configuration. */
+    private fun referenceContext(): ApplicationContextRunner =
         ApplicationContextRunner()
             .withInitializer { context ->
-                context.environment.propertySources.addFirst(MapPropertySource("shipped-application-yml", shippedProperties()))
+                context.environment.propertySources.addFirst(MapPropertySource("reference-application-yml", referenceProperties()))
             }.withConfiguration(
                 AutoConfigurations.of(
                     TimeLimiterAutoConfiguration::class.java,
@@ -79,10 +90,10 @@ class MeshResilienceShippedConfigTest {
                 ),
             ).withUserConfiguration(WebClientConfiguration::class.java)
 
-    /** The `resilience4j.*` and `app.mesh.*` keys of the shipped file, flattened the way Boot would load them. */
-    private fun shippedProperties(): Map<String, Any> =
+    /** The `resilience4j.*` and `app.mesh.*` keys of the reference file, flattened the way Boot would load them. */
+    private fun referenceProperties(): Map<String, Any> =
         YamlPropertySourceLoader()
-            .load(SHIPPED, ClassPathResource(SHIPPED))
+            .load(REFERENCE, ClassPathResource(REFERENCE))
             .filterIsInstance<EnumerablePropertySource<*>>()
             .flatMap { source ->
                 source.propertyNames
@@ -97,6 +108,6 @@ class MeshResilienceShippedConfigTest {
             .initCause(DataBufferLimitException("Exceeded limit on max bytes to buffer : 8192"))
 
     private companion object {
-        const val SHIPPED = "application.yml"
+        const val REFERENCE = "application.yml"
     }
 }

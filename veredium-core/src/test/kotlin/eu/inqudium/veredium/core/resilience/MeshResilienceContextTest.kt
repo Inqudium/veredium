@@ -21,6 +21,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner
 import org.springframework.core.env.EnumerablePropertySource
 import org.springframework.core.env.MapPropertySource
 import org.springframework.core.io.ClassPathResource
+import java.io.IOException
 import java.util.function.Supplier
 
 /**
@@ -48,6 +49,15 @@ import java.util.function.Supplier
 class MeshResilienceContextTest {
     @Test
     fun `should start on the fixture with every mesh endpoint customized`() {
+        // What is tested: the real Spring wiring on the test fixture - Resilience4j's Boot auto-configurations
+        //   plus the mesh registrar - and what it leaves on every endpoint's TimeLimiter and CircuitBreaker.
+        // Success criteria: the context starts; for each of the four endpoints there is a circuit-breaker and a
+        //   time-limiter customizer bean named after the alias, the TimeLimiter carries the derived budget with
+        //   cancelRunningFuture kept, and the breaker ignores client-side failures, does not record a 404 and
+        //   keeps the YAML's failure-rate threshold of 50.
+        // Why it matters: the unit tests prove each customizer in isolation; only a real context shows that
+        //   Resilience4j actually consults them by bean name and that the YAML's own policy survives them.
+
         // Given / When: the context starts on the fixture's resilience4j + app.mesh blocks
         fixtureContext().run { context ->
             assertThat(context).hasNotFailed()
@@ -92,12 +102,43 @@ class MeshResilienceContextTest {
     }
 
     @Test
+    fun `should start and keep a benign 4xx unrecorded when an instance lists a superclass of it in record-exceptions`() {
+        // What is tested: the record verdict in the real wiring against an operator's record-exceptions class
+        //   list - the fixture plus `record-exceptions: [java.lang.RuntimeException]` on one breaker instance, a
+        //   superclass of the stack's 4xx exception.
+        // Success criteria: the context STARTS (the guard finds the verdict in place); the instance does not
+        //   record the benign 404, does record a listed 503, and does not record an IOException - which the
+        //   registry default would, so that assertion is also the proof the list reached the instance.
+        // Why it matters: Resilience4j's Boot configuration sets the list on the builder and its build() OR-s it
+        //   back in past any predicate a customizer sets. Before the customizer cleared the list, this exact
+        //   configuration failed the start with a diagnosis blaming a hand-built registry - only a real context
+        //   shows that the property binding, the customizer and build() now compose the way the KDoc says.
+        //
+        // Given: the fixture, one breaker instance carrying a record-exceptions list
+        val alias = firstAlias()
+        val properties = fixtureProperties() + ("resilience4j.circuitbreaker.instances.$alias.record-exceptions[0]" to "java.lang.RuntimeException")
+
+        // When
+        fixtureContext(properties).run { context ->
+            // Then
+            assertThat(context).hasNotFailed()
+            val config = context.getBean(CircuitBreakerRegistry::class.java).circuitBreaker(alias).circuitBreakerConfig
+            assertThat(config.recordExceptionPredicate.test(TestResponseException(404))).`as`("benign 404").isFalse()
+            assertThat(config.recordExceptionPredicate.test(TestResponseException(503))).`as`("listed 503").isTrue()
+            assertThat(config.recordExceptionPredicate.test(IOException("outside the list"))).`as`("the list is in force").isFalse()
+            assertThat(config.ignoreExceptionPredicate.test(TestVerdicts.bulkheadRejection())).isTrue()
+        }
+    }
+
+    @Test
     fun `should refuse to start when an endpoint's time limiter is not declared`() {
         // What is tested: the silent case the guard exists for, in the real wiring - the fixture minus one
         //   TimeLimiter instance, as the reactive stack's configuration once shipped. Resilience4j still creates
         //   the instance for the customizer (on the registry default, not on lap-backend), so nothing else
         //   would notice.
-        // How success is judged: the context fails, and the failure names the key that is missing - and only it.
+        // Success criteria: the context fails, and the failure names the key that is missing - and only it.
+        // Why it matters: an undeclared instance runs on the registry default instead of the lap-backend policy,
+        //   with no error anywhere; refusing the start is the only point at which that drift is visible.
         //
         // Given: the fixture properties without one endpoint's time-limiter instance
         val missing = firstAlias()
@@ -118,7 +159,9 @@ class MeshResilienceContextTest {
         // What is tested: the second silent case - a TimeLimiterRegistry bean a host built by hand. Every alias is
         //   declared and present on it, so the declaration check passes, but Resilience4j's Boot configuration
         //   never ran on that registry and the customizer beans were never consulted.
-        // How success is judged: the context fails naming the time limiter as not reached.
+        // Success criteria: the context fails naming the time limiter as not reached.
+        // Why it matters: a hand-built registry hands out instances without the derived budget, so every call
+        //   would run on Resilience4j's default timeout while the declaration check reports all is well.
         //
         // Given: the fixture properties, the CB and bulkhead auto-configurations, and for the time limiter a
         // hand-made registry next to hand-filled properties that declare every alias

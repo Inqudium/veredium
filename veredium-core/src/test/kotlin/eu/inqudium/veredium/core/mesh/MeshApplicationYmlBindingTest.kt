@@ -33,15 +33,26 @@ class MeshApplicationYmlBindingTest {
 
     @Test
     fun `binds exactly the four mesh endpoints declared in the test fixture, in declaration order`() {
-        // Given the fixture application-test.yml, When bound into MeshProperties,
-        // Then the endpoint triplets are exactly those declared, in order.
+        // What is tested: that binding the fixture's `app.mesh.endpoints` list through Spring Boot's
+        //   `YamlPropertySourceLoader` + `Binder` yields exactly the declared endpoint triplets.
+        // Success criteria: the bound triplets equal the four expected ones element by element, in the
+        //   fixture's declaration order - no endpoint dropped, added or reordered.
+        // Why it matters: the triplet is the endpoint's identity (alias, host, path and ladder derive from it);
+        //   an endpoint lost in binding would leave its client without a ladder and fail only at the call site.
+
+        // Given: the fixture application-test.yml, bound into MeshProperties
+        // When / Then: the endpoint triplets are exactly those declared, in order
         assertThat(mesh.endpoints.map { it.triplet })
             .containsExactlyElementsOf(EXPECTED.map { it.triplet })
     }
 
     @Test
     fun `binds each endpoint's individual request timeout and leaves every other endpoint field unset`() {
-        // What/why: the file sets ONLY the triplet + the measured anchor per endpoint; everything else must
+        // What is tested: that each bound endpoint carries the fixture's `individual-request-timeout-ms` and
+        //   nothing else - alias, max-retries, margins, base-url, headers and both backend toggles stay unset.
+        // Success criteria: every endpoint's anchor equals the expected value and every other endpoint-level
+        //   field is null (headers empty).
+        // Why it matters: the file sets ONLY the triplet + the measured anchor per endpoint; everything else must
         //   fall through to the defaults/derivation. Asserting the other fields are unset proves the file did
         //   not silently pin an alias, retries, base-url or a backend toggle.
         // Given / When: the bound endpoints
@@ -64,11 +75,14 @@ class MeshApplicationYmlBindingTest {
 
     @Test
     fun `omits the defaults block so the shared defaults fall back to the Kotlin defaults`() {
-        // What/why: the fixture, like the shipped file, deliberately omits `app.mesh.defaults` (every endpoint sets its own anchor;
-        //   the policy knobs default in Kotlin). A bound `defaults` equal to a fresh Defaults() is the direct
-        //   evidence that no defaults leaked in - important because a stray default would silently reshape
-        //   every endpoint's derived ladder.
-        // Given / When: the bound defaults, Then they equal the code defaults.
+        // What is tested: that the fixture, like the shipped file, deliberately omits `app.mesh.defaults` (every
+        //   endpoint sets its own anchor; the policy knobs default in Kotlin), so the bound defaults are the code's.
+        // Success criteria: the bound `defaults` equals a fresh `MeshProperties.Defaults()`; the load-bearing
+        //   values (4000ms anchor, 0 retries, TimeLimiter on, breaker off, sidecar URL) are spelled out.
+        // Why it matters: a bound `defaults` equal to a fresh Defaults() is the direct evidence that no defaults
+        //   leaked in - important because a stray default would silently reshape every endpoint's derived ladder.
+        // Given / When: the bound defaults
+        // Then: they equal the code defaults
         assertThat(mesh.defaults).isEqualTo(MeshProperties.Defaults())
         // Spell out the load-bearing ones for a readable failure.
         assertThat(mesh.defaults.individualRequestTimeoutMs).isEqualTo(4000)
@@ -80,10 +94,13 @@ class MeshApplicationYmlBindingTest {
 
     @Test
     fun `derives a unique, non-colliding alias from every endpoint triplet`() {
-        // What/why: the derived alias is the R4j instance name / metric label and the adapters' ALIAS contract;
-        //   MeshProperties.init throws on a collision, so a fresh bind already fails on duplicates - here we
-        //   additionally pin the exact derived value per endpoint so a triplet edit that renames a label is caught.
-        // Given / When: the derived aliases, Then each matches the expected label and all are distinct.
+        // What is tested: `effectiveAlias()` of every bound endpoint, derived from its triplet.
+        // Success criteria: the aliases equal the expected host-prefixed labels in order and contain no duplicate.
+        // Why it matters: the derived alias is the R4j instance name / metric label and the adapters' ALIAS
+        //   contract; MeshProperties.init throws on a collision, so a fresh bind already fails on duplicates - here
+        //   we additionally pin the exact derived value per endpoint so a triplet edit that renames a label is caught.
+        // Given / When: the derived aliases
+        // Then: each matches the expected label and all are distinct
         val aliases = mesh.endpoints.map { it.effectiveAlias() }
         assertThat(aliases).containsExactlyElementsOf(EXPECTED.map { it.alias })
         assertThat(aliases).doesNotHaveDuplicates()
@@ -91,6 +108,12 @@ class MeshApplicationYmlBindingTest {
 
     @Test
     fun `derives the host and the path template from every endpoint triplet`() {
+        // What is tested: `host()` and `pathTemplate()` of every bound endpoint, both parsed out of the triplet.
+        // Success criteria: each host equals the upstream host and each path template equals the path with its
+        //   `{var}` placeholders preserved, as the fixture declares them.
+        // Why it matters: the host selects the sidecar's upstream and the path template is the metric URI and the
+        //   request path; a parse that dropped or rewrote a `{var}` would route or label the call wrongly.
+
         // Given / When: the per-endpoint host + path template derived from the triplet,
         // Then: each matches the upstream host and the {var}-preserving path from the file.
         mesh.endpoints.forEachIndexed { i, endpoint ->
@@ -104,7 +127,11 @@ class MeshApplicationYmlBindingTest {
 
     @Test
     fun `resolves one ladder per triplet carrying the endpoint anchor and the shared default policy`() {
-        // What/why: resolveAll() is what the factory consumes; this pins that the file's anchor reaches the
+        // What is tested: `resolveAll()` over the bound fixture - one resolved ladder per triplet with the
+        //   endpoint's alias, host, path and anchor plus the shared default policy.
+        // Success criteria: the keys are exactly the declared triplets, and each ladder carries the expected
+        //   alias/host/path/anchor, 0 retries, the sidecar base URL, no headers, TimeLimiter on and breaker off.
+        // Why it matters: resolveAll() is what the factory consumes; this pins that the file's anchor reaches the
         //   resolved ladder unchanged and the omitted-defaults policy (retries 0, TimeLimiter on, CB off,
         //   sidecar base URL) is applied to every endpoint.
         // Given / When: the resolved map keyed by triplet,

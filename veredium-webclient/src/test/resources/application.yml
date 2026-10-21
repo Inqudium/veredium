@@ -1,19 +1,27 @@
+# REFERENCE configuration of veredium-webclient: the documented example a host copies from. It is a TEST
+# resource - a library ships no application.yml, so nothing here reaches a consumer of the artefact. The tests
+# pin it so the example stays true: ResilienceConfigContractTest (aliases declared, bulkheads within the pool),
+# MeshResilienceShippedConfigTest (Resilience4j's auto-configuration booted on it), and
+# LegatiumExchangeLoggingIntegrationTest / WebClientPropertiesTest (the adapter-logging and app.webclient
+# blocks). LoggingLevelContractTest reads the test-owned fixture application-test.yml instead;
+# ResilienceConfigContractTest checks both files.
 
 logging:
   level:
     # Framework noise off; this module's own classes stay verbose on purpose.
     root: INFO
-    com:
-      ing: DEBUG
+    eu:
+      inqudium:
+        veredium: DEBUG
     # The exchange stream: one event per outbound HTTP exchange, written by legatium-webclient-logging (see the
     # adapter-logging block below). INFO = every call; WARN = only failures, timeouts, cancellations, slow
     # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Unlike the module's former exchange diary, raising this level FILTERS
     # the stream instead of switching it off - severity and semantics are decoupled, dashboards key on
-    # adapter_outcome. Both names are pinned by LoggingLevelContractTest.
+    # adapter_outcome. Both names are pinned by LoggingLevelContractTest (in the fixture application-test.yml).
     adapter-http-exchange: INFO
     # The library's own logger: the immediate WARN breadcrumb when a call throws, and errors of the logging
     # itself (fail-open lines). Keep at WARN or lower - silencing it hides the breadcrumb. DEBUG adds the wiring
-    # report at context start - which builders got the filter, which properties bound (legatium 1.2.0).
+    # report at context start - which builders got the filter, which properties bound (since legatium 1.2.0).
     eu.inqudium.legatium.webclient.logging: WARN
 
 # =====================================================================================================
@@ -82,7 +90,7 @@ app:
     observability:
       # Whether Boot's ObservationRegistry stays on the cloned builder (client spans, the http.client.requests
       # timer, the outgoing traceparent) or is replaced by NOOP for these clients. The code default is OFF
-      # (opt-in, WebClientProperties.Observability); the module SHIPS it on, so a host that says nothing gets
+      # (opt-in, WebClientProperties.Observability); this reference configuration sets it on, so a host that copies it gets
       # observed calls and legatium's traced identity (trace id as request id) whenever the host has a tracer.
       # Effective only with a recording ObservationRegistry bean - the factory's startup line reports the
       # difference between "on" and "on, but nothing is observed". The chart sets the same key per stage.
@@ -118,7 +126,7 @@ app:
     # false to watch a newly-enabled backend against real traffic before enforcing. It is one posture for the
     # whole app, deliberately not per-endpoint - the per-alias choice is only WHICH backends validate.
     #
-    # SHIPPED: on everywhere, report only. The code default is off; the module ships the adoption posture
+    # REFERENCE: on everywhere, report only. The code default is off; this file shows the adoption posture
     # instead - every backend's response is checked, a violation is logged at WARN and the response returned
     # unchanged, so the generated constraints are measured against real traffic before any of them may fail a
     # call. To enforce, flip fail-on-violation (one posture for the whole app); to exempt a backend whose spec
@@ -130,8 +138,9 @@ app:
   # (baseUrl = the sidecar; the Host header is derived from the triplet host) AND the full timeout ladder
   # (connect / response / pending-acquire / max-connections + the per-endpoint TimeLimiter and slow-call).
   # No explicit alias: the logical backend name (R4j instance + metric label) is DERIVED from the triplet
-  # (host-METHOD-path), so it is the single source of the endpoint identity. The adapters' ALIAS constants
-  # must match that derived value (pinned by MeshAliasContractTest).
+  # (host-METHOD-path), so it is the single source of the endpoint identity. A host's adapters pass that derived
+  # value to ResilientWebClientFactory.create, and the resilience4j instance keys below must equal it
+  # (ResilienceConfigContractTest checks every derived alias against all three instance trees).
   #
   # Per-endpoint feature toggles live here too, tri-state (unset inherits app.mesh.defaults):
   #   time-limiter.enabled    (default true)  - whether mesh derives + overrides that endpoint's TimeLimiter budget
@@ -171,8 +180,7 @@ resilience4j:
   # the call path unconditionally (ReactiveResilienceDecorator applies all three, regardless of the app.mesh
   # toggles), so leaving one undeclared does not mean "off" - it means that backend silently runs on
   # Resilience4j's own defaults, at values nobody had chosen and nothing documented. The instance keys are the
-  # mesh-derived aliases and must stay in sync with the adapters' ALIAS constants (pinned by
-  # ResilienceConfigContractTest).
+  # mesh-derived aliases (ResilienceConfigContractTest checks that every alias is declared under all three).
   #
   # The TimeLimiter entries have a second job: Resilience4j's Boot configuration materialises exactly the
   # `instances.<name>` listed here, and the mesh customizer (veredium-core, MeshResilienceCustomizers) sets the
@@ -211,11 +219,15 @@ resilience4j:
         # four backends, 4 x 25 = 100 - the bulkheads shed load exactly as the pool runs out, rather than
         # letting callers pile up on pendingAcquire. Raising this without raising max-connections moves the
         # queueing into the pool, where pending-acquire-timeout-ms (200) fails them anyway, only later and
-        # with a less obvious error. ResilienceConfigContractTest enforces sum(max-concurrent-calls) <=
-        # max-connections.
+        # with a less obvious error - a FAILURE on the breaker of whichever backend is waiting.
+        # ResilienceConfigContractTest enforces sum(max-concurrent-calls) <= max-connections for this file; at
+        # runtime MeshResilienceStartupGuard (veredium-core) logs a WARN naming both numbers when a host's
+        # configuration exceeds it.
         max-concurrent-calls: 25
-        # Fail fast rather than queue: the same choice the mesh transport already makes for the pool. A
-        # waiting caller burns its TimeLimiter budget (1.1-1.6s per the derived ladder) doing nothing.
+        # Fail fast rather than queue: the same choice the mesh transport already makes for the pool. A waiting
+        # caller does not even spend its TimeLimiter budget on the wait - the reactive bulkhead acquires inside
+        # subscribe(), before the budget's timer starts - it blocks the subscribing thread for up to this long,
+        # unbounded by the ladder (pinned in ReactiveResilienceDecoratorTest).
         max-wait-duration: 0
         #
         # ROLE (ADR-006, D3): these bulkheads are a POOL PARTITION and a BACKSTOP - not a load-steering
@@ -228,8 +240,9 @@ resilience4j:
         # A BulkheadFullException from the backfill path is therefore a SIGNAL, not the design working: it says
         # that caller's own bound is mis-sized, or that a second caller (live relay, inbound listener - all
         # three share these bulkheads in one JVM) is consuming more of the alias than assumed. Raising this
-        # value is the wrong first response; sum(max-concurrent-calls) <= max-connections is enforced by
-        # ResilienceConfigContractTest and raising it here without raising the pool just moves the queueing.
+        # value is the wrong first response; sum(max-concurrent-calls) <= max-connections is enforced for this
+        # file by ResilienceConfigContractTest (and WARNed about at startup by MeshResilienceStartupGuard), and
+        # raising it here without raising the pool just moves the queueing.
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
         base-config: lap-backend

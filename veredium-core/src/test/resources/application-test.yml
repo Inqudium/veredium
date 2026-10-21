@@ -65,8 +65,10 @@ resilience4j:
         # with a less obvious error. A host should keep sum(max-concurrent-calls) <=
         # max-connections.
         max-concurrent-calls: 25
-        # Fail fast rather than queue: the same choice the mesh transport already makes for the pool. A
-        # waiting caller burns its TimeLimiter budget (1.1-1.6s per the derived ladder) doing nothing.
+        # Fail fast rather than queue: the same choice the mesh transport already makes for the pool. On the
+        # blocking stack a waiting caller burns its TimeLimiter budget (1.1-1.6s per the derived ladder) doing
+        # nothing; on the reactive stack it is worse - the permit is taken at subscription, before the
+        # TimeLimiter's timer starts, so the wait blocks the subscribing thread and no budget bounds it.
         max-wait-duration: 0
         #
         # ROLE: these bulkheads are a POOL PARTITION and a BACKSTOP - not a load-steering mechanism. They exist

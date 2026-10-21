@@ -10,7 +10,8 @@ does. It builds on the shared ladder of `veredium-core/docs/mesh-timeout.md` and
 of the reactive twin's `webclient-config-guide.md`, and it goes deeper where the blocking stack differs: the thread hand-off, the
 interrupt semantics, and the shutdown.
 
-The configuration values quoted are the shipped `application.yml` and the Kotlin defaults. The worked example
+The configuration values quoted are the module's reference configuration (`src/test/resources/application.yml`,
+a test resource - the library ships none) and the Kotlin defaults. The worked example
 throughout is the endpoint `GET /v6/involved-parties/{uuid}` with its anchor of 400 ms, and, where a rounder
 number helps, an endpoint with a 1 s anchor.
 
@@ -54,8 +55,9 @@ Three properties of this picture carry everything that follows:
   the only way a blocking call can have a hard deadline: the thread stuck in a socket read cannot notice one.
 - **The bulkhead permit is taken on the worker**, right before the exchange, so it counts calls that are
   genuinely in flight at the backend — not callers queued somewhere in front of it.
-- **Deserialisation and validation happen after the decoration**, on the caller's thread. A parse failure or a
-  schema violation is a client-side problem and must not reach the breaker.
+- **Deserialisation and validation happen after the decoration**, on the caller's thread. An empty body, a parse
+  failure or a schema violation is the backend ANSWERING with a success status - a client-side problem that must
+  not reach the breaker.
 
 ---
 
@@ -67,7 +69,7 @@ All per-endpoint timeouts derive from ONE measured number, the endpoint's `indiv
 | Rung | Formula | Owner | 400 ms anchor | 1 s anchor |
 |---|---|---|---|---|
 | `individual` | configured | sidecar, per attempt | 400 | 1000 |
-| `global` | `(1 + maxRetries) × individual + globalMarginMs` (200) | sidecar, whole call incl. its retries (`max-retries: 0` shipped) | 600 | 1200 |
+| `global` | `(1 + maxRetries) × individual + globalMarginMs` (200) | sidecar, whole call incl. its retries (`max-retries: 0` by default) | 600 | 1200 |
 | `responseTimeout` | `global + responseTimeoutMarginMs` (200) | **this module**, Apache `RequestConfig.responseTimeout` | 800 | 1400 |
 | `timeLimiterTimeout` | `responseTimeout + connect + pendingAcquire + 100` (= + 400) | **this module**, Resilience4j TimeLimiter | 1200 | 1800 |
 | `slowCall` | `min(p99 × (1 + healthyRetries), 0.8 × global)` | breaker's slow-call threshold, only if `circuit-breaker.enabled` | 200 | 800 |
@@ -81,8 +83,8 @@ The ordering `individual < global < responseTimeout < timeLimiterTimeout` holds 
   read of the body is bounded by it too. Its expiry is a `SocketTimeoutException`, wrapped by Spring into a
   `ResourceAccessException` — a **transport failure the breaker records** and legatium classifies as `timeout`.
   The two pre-response guards fail the same way for the breaker but not for the event: a connect timeout is a
-  `SocketTimeoutException` too (`timeout`), a pool-lease timeout is an `InterruptedIOException`, which legatium
-  reports as a plain `failure` (§7).
+  `SocketTimeoutException` too (`timeout`), a pool-lease timeout (`ConnectionRequestTimeoutException`) is classified as
+  `timeout` by name since legatium 1.2.1 (§7).
 - The **TimeLimiter** gives up last. Its margin of 400 ms over the response timeout is not a guess: it is
   exactly the two pre-response phases the response timeout does not cover — the pool lease (`pendingAcquire`,
   200 ms) and the connect (100 ms) — plus 100 ms of headroom. Under normal conditions it never fires; it is the
@@ -119,7 +121,7 @@ endpoint's `CloseableHttpClient` over the shared manager.
 
 Resilience4j's blocking TimeLimiter is `decorateFutureSupplier`: it takes a `Future`, calls
 `future.get(timeoutDuration)`, and on expiry throws `TimeoutException` after cancelling the future
-(`cancelRunningFuture`, `true` by default and pinned explicitly in the shipped YAML). The decorator feeds it the
+(`cancelRunningFuture`, `true` by default and pinned explicitly in the reference YAML). The decorator feeds it the
 future of the worker it submitted. Three things follow.
 
 **The caller is released at the budget, whatever the worker is doing.** This is the guarantee an adapter's
@@ -199,7 +201,7 @@ and the breaker's verdict (**ignored**, §7).
 **If an operator sets `cancel-running-future: false`** for an instance, the caller is still released at the
 budget, but the worker runs on until the transport's own timeout, holding its bulkhead permit and its pool
 connection for up to `responseTimeout` longer. That is a legitimate choice only for a call whose completion
-has side effects worth waiting for; for the lookups this module fronts, it is not, and the shipped
+has side effects worth waiting for; for the lookups this module fronts, it is not, and the reference
 configuration does not do it.
 
 ---
@@ -225,7 +227,10 @@ customizer (`veredium-core`, fed with `RestClientVerdicts`) installs the ignore 
 instance — in code, not in YAML, because it is a structural invariant of this pipeline, not a tunable.
 
 **Sizing — the invariant with the pool.** Four aliases × 25 permits = 100 = `app.mesh.defaults.transport.
-max-connections`. `ResilienceConfigContractTest` enforces `sum(max-concurrent-calls) <= max-connections`.
+max-connections`. `ResilienceConfigContractTest` enforces `sum(max-concurrent-calls) <= max-connections` for the
+reference configuration; for a host's own, `MeshResilienceStartupGuard` checks the same sum at startup over the
+merged instances and logs a WARN naming both numbers and every alias - a WARN, not a failed start, because an
+over-committed pool can be a deliberate choice for backends that are never busy at once.
 Under that invariant the bulkheads shed load *before* the pool runs out, so `restclient.pool.pending` stays at
 zero and `connectionRequestTimeout` never fires in practice. Raising a bulkhead without raising the pool moves
 the queueing into the pool — where it fails after 200 ms with a less obvious error — and raising the pool
@@ -257,7 +262,7 @@ caller's deadline frees the backend-side resources too — would be lost.
 
 **2. Queueing would silently spend the budget.** A `ThreadPoolBulkhead` admits a call by queueing it; the
 default queue holds 100 calls, and a queued call waits with its TimeLimiter already running. The ladder's
-accounting assumes the opposite: the shipped bulkheads have `max-wait-duration: 0`, the pool has a 200 ms
+accounting assumes the opposite: the reference bulkheads have `max-wait-duration: 0`, the pool has a 200 ms
 lease timeout, and the TimeLimiter's 400 ms margin covers exactly those pre-response phases. A queue in front
 of them is a third waiting room the margin does not cover, and a call would arrive at the socket with its
 budget partly gone — the `TimeoutException` then fires for a backend that was never slow. The semaphore with a
@@ -267,7 +272,7 @@ zero wait rejects at once, which is the behaviour the mesh ladder was derived fo
 semaphore counts calls in flight *at the backend* — the number the pool is sized against and the one `decisions.md`
 (D1) assigns to the bulkheads ("a pool partition and a backstop"). A `ThreadPoolBulkhead` exposes thread-pool and
 queue depth under `resilience4j.bulkhead.thread.pool.*`: how busy the pool threads are, which includes the
-queued calls that are not at the backend at all. Dashboards and the `ResilienceConfigContractTest` invariant
+queued calls that are not at the backend at all. Dashboards and the pool invariant
 `sum(permits) <= max-connections` are written against the first meaning.
 
 **4. Platform threads, and a pool to size.** The `ThreadPoolBulkhead` has no thread-factory setting; its
@@ -398,7 +403,7 @@ What each bound produces, for the caller, the breaker, the exchange event and th
 |---|---|---|---|---|
 | breaker open | `CallNotPermittedException`, no worker started | — (not a call) | none | `resilience4j.circuitbreaker.not.permitted.calls` |
 | bulkhead full | `BulkheadFullException` | **ignored** | none | `resilience4j.bulkhead.available.concurrent.calls == 0` |
-| pool exhausted for 200 ms | `ResourceAccessException` over `ConnectionRequestTimeoutException` | failure | `failure` (ERROR) — Apache's lease timeout is an `InterruptedIOException`, which legatium does not classify as a timeout | `restclient.pool.pending > 0` |
+| pool exhausted for 200 ms | `ResourceAccessException` over `ConnectionRequestTimeoutException` | failure | `timeout` (WARN) — matched by class name since legatium 1.2.1 (before: `failure` at ERROR, the type being a bare `InterruptedIOException`) | `restclient.pool.pending > 0` |
 | connect > 100 ms | `ResourceAccessException` over `ConnectTimeoutException` | failure | `timeout` (WARN) | `http.client.requests{exception=ResourceAccessException}` |
 | no response head within `responseTimeout` | `ResourceAccessException` over `SocketTimeoutException` | failure | `timeout` (WARN) | as above |
 | TimeLimiter budget expired | `TimeoutException` | failure | `failure` (ERROR), written by the cancelled worker | `resilience4j.timelimiter.calls{kind=timeout}` |
@@ -406,6 +411,7 @@ What each bound produces, for the caller, the breaker, the exchange event and th
 | 5xx, 408, 429 | `HttpServerErrorException.*` / `HttpClientErrorException.*` | failure | `failure` / `rejected` (WARN) | `http.client.requests{status}` |
 | benign 4xx | `HttpClientErrorException.*` | **success** | `rejected` (INFO) | as above |
 | 2xx, body past the limit | `ResponseBodyLimitExceededException` | **ignored** | `success` (INFO) | the WARN limit line; no size sample |
+| 2xx without a body (204, empty 200) | `EmptyResponseBodyException` (`veredium-core`), naming the backend and the expected type | not seen (outside the decoration) | `success` (INFO) | the WARN error line; size sample `0` |
 | 2xx, body does not fit the DTO / violates its schema | `DatabindException` / `ConstraintViolationException` | not seen (outside the decoration) | `success` (INFO) | `restclient.response.body.size` sampled |
 
 > **Note on the interrupted caller.** `CircuitBreaker.decorateCallable` catches `Exception`, and

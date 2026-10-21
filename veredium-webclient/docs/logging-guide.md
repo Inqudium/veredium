@@ -26,9 +26,12 @@ replaces it, and is honest about the trade-offs the new design carries.
 > **Read this before anything below.** As of ticket 30
 > (the ticket that introduced it in the origin project, dhaase/tool-box) the design in §4–§8
 > is **no longer in the tree**. `ExchangeDiaryLogging.kt` and `ExchangeDiary` were deleted; `ResilientWebClient`
-> creates no diary, captures no body and takes no MDC snapshot; `ResilientWebClientFactory` attaches no filter.
+> creates no diary and captures no body; `ResilientWebClientFactory` attaches no filter. (Since 2026-10-21
+> `ResilientWebClient` takes an MDC snapshot again, for its OWN transport lines only - the error, cancellation
+> and closing lines, written on the event loop under the caller's keys; see `webclient-config-guide.md` §4.1.
+> The exchange event does not use it.)
 > The exchange event is written by the library
-> [`legatium-webclient-logging`](https://github.com/Inqudium/legatium) (1.2.0), whose auto-configuration hangs
+> [`legatium-webclient-logging`](https://github.com/Inqudium/legatium) (1.2.1), whose auto-configuration hangs
 > its filter on Boot's `WebClient.Builder` bean — the bean the factory clones per backend since ticket 29.
 >
 > **What the library does that the diary did**, in the diary's own terms: one event per exchange (§6.1) on the

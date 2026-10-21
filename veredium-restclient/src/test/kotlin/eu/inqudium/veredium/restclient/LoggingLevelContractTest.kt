@@ -1,7 +1,7 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.restclient.ConfigurationFiles.FIXTURE
-import eu.inqudium.veredium.restclient.ConfigurationFiles.SHIPPED
+import eu.inqudium.veredium.restclient.ConfigurationFiles.REFERENCE
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -10,32 +10,39 @@ import org.junit.jupiter.params.provider.ValueSource
 
 /**
  * Contract test for the logging-related blocks of the configuration. Which file a case binds follows the rule
- * in [ConfigurationFiles]: the logger IDENTITIES in both the shipped `application.yml` and the fixture, the
+ * in [ConfigurationFiles]: the logger IDENTITIES in both the reference `application.yml` and the fixture, the
  * tunable `adapter-logging` VALUES in the fixture only.
  *
  * 1. What is tested: (both files) that the `logging.level` entry for the exchange stream addresses the SAME
  *    logger `adapter-logging.logger-name` makes the library write on, at INFO or below; that the library's own
- *    logger stays audible; that root is at INFO; that the library is switched on by an explicit entry.
+ *    logger stays audible; that this module's own classes are addressed under their real package
+ *    (`eu.inqudium.veredium`); that root is at INFO; that the library is switched on by an explicit entry.
  *    (fixture) the `adapter-logging` values the runbook relies on: headers logged and masked with an explicit
  *    plaintext allowlist, bodies on failure only, the 16 KB capture cap.
- * 2. How it is deemed successful: the bound `logging.level` map carries the logger name the `adapter-logging`
- *    block declares, with a permitted level, and the `adapter-logging` keys bind to the expected values.
+ * 2. Success criteria: the bound `logging.level` map carries the logger name the `adapter-logging` block
+ *    declares, with a permitted level, the `eu.inqudium.veredium` key and no key of the origin project's
+ *    package, and the `adapter-logging` keys bind to the expected values.
  * 3. Why it matters: the exchange logger's name is a literal in two places of the SAME file - the level key and
  *    the library property - and nothing but this test relates them. A mismatch leaves the level addressing
- *    nothing, silently: the stream then inherits whatever its parent logger says (here `eu.inqudium.veredium: DEBUG`), and
- *    the operational knob "WARN = only failures, timeouts and slow calls" filters nothing. The shipped file
- *    carried exactly that drift for a while (`adapter-http-exchange: INFO` next to
- *    `logger-name: adapter-http-exchange`), unseen because the test bound the fixture alone. And the
- *    `adapter-logging` values are what the runbook's queries assume - the Host header readable, the token a
- *    fingerprint, the error body present - so a drift there is a runbook that stops answering, not a build
- *    that fails.
+ *    nothing, silently: the stream then inherits the root level, and the operational knob "WARN = only
+ *    failures, timeouts and slow calls" filters nothing. The reference file carried exactly that drift for a
+ *    while (`adapter-http-exchange: INFO` next to `logger-name: adapter-http-exchange`), unseen because the test
+ *    bound the fixture alone; it also carried the origin project's `com.ing: DEBUG`, a level for classes that
+ *    do not exist here. And the `adapter-logging` values are what the runbook's queries assume - the Host header
+ *    readable, the token a fingerprint, the error body present - so a drift there is a runbook that stops
+ *    answering, not a build that fails.
  */
 class LoggingLevelContractTest {
     @Nested
     inner class `The logger identities, in both files` {
         @ParameterizedTest(name = "{0}")
-        @ValueSource(strings = [SHIPPED, FIXTURE])
+        @ValueSource(strings = [REFERENCE, FIXTURE])
         fun `should address the exchange stream's level at the logger the library writes on`(file: String) {
+            // What is tested: the pair "level key" / "adapter-logging.logger-name" inside one file.
+            // Success criteria: logging.level carries the declared logger name as a key, at INFO, DEBUG or TRACE.
+            // Why it matters: the two literals are related by nothing but this test; a mismatch makes the level
+            //   address a logger nobody writes on, and the stream silently follows root instead.
+            //
             // Given: the logger the adapter-logging block makes the library write on
             val loggerName = ConfigurationFiles.bindMap(file, "adapter-logging").getValue("logger-name")
             assertThat(loggerName).`as`("adapter-logging.logger-name in $file").isNotBlank()
@@ -53,27 +60,59 @@ class LoggingLevelContractTest {
         }
 
         @ParameterizedTest(name = "{0}")
-        @ValueSource(strings = [SHIPPED, FIXTURE])
+        @ValueSource(strings = [REFERENCE, FIXTURE])
         fun `should keep the library's own logger audible for its breadcrumb and fail-open lines`(file: String) {
-            // Given / When / Then: WARN or lower - silencing it would hide the immediate WARN breadcrumb when a
-            // call throws, and the lines that say the logging itself failed open.
+            // What is tested: the level of legatium's own logger, `eu.inqudium.legatium.restclient.logging`.
+            // Success criteria: the key is present at WARN or lower.
+            // Why it matters: silencing it would hide the immediate WARN breadcrumb when a call throws, and the
+            //   lines that say the logging itself failed open.
+            //
+            // Given / When
             val levels = ConfigurationFiles.bindMap(file, "logging.level")
+
+            // Then
             assertThat(levels).containsKey(LIBRARY_LOGGER)
             assertThat(levels.getValue(LIBRARY_LOGGER)).isIn("WARN", "INFO", "DEBUG", "TRACE")
         }
 
         @ParameterizedTest(name = "{0}")
-        @ValueSource(strings = [SHIPPED, FIXTURE])
+        @ValueSource(strings = [REFERENCE, FIXTURE])
+        fun `should address this module's own classes under their real package`(file: String) {
+            // What is tested: the level line for the module's own loggers - `eu.inqudium.veredium`, the package
+            //   ResilientRestClient and its factory log under.
+            // Success criteria: the key is present, and no key of the origin project's package (`com.ing`) is.
+            // Why it matters: the comment above the line promises "this module's own classes stay verbose"; a
+            //   key for a package that does not exist here keeps that promise for nobody, and a reader copying
+            //   the reference configuration copies a level that addresses nothing.
+            //
+            // Given / When
+            val levels = ConfigurationFiles.bindMap(file, "logging.level")
+
+            // Then
+            assertThat(levels).containsKey(MODULE_LOGGER)
+            assertThat(levels.keys).noneMatch { it.startsWith("com.ing") }
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @ValueSource(strings = [REFERENCE, FIXTURE])
         fun `should keep the root level free of framework debug noise`(file: String) {
-            // Given / When / Then: root at DEBUG turns on full framework logging in the shipped artefact.
+            // What is tested: the root level.
+            // Success criteria: root is INFO.
+            // Why it matters: root at DEBUG turns on full framework logging for every host that copies the file.
+            //
+            // Given / When / Then
             assertThat(ConfigurationFiles.bindMap(file, "logging.level")["root"]).isEqualTo("INFO")
         }
 
         @ParameterizedTest(name = "{0}")
-        @ValueSource(strings = [SHIPPED, FIXTURE])
+        @ValueSource(strings = [REFERENCE, FIXTURE])
         fun `should keep the library switched on by an explicit entry`(file: String) {
-            // Given / When / Then: explicit although it is the default - it is a context-start switch, so its
-            // presence in the file is what makes an intentional `false` reviewable.
+            // What is tested: `adapter-logging.enabled`.
+            // Success criteria: it is present and `true`.
+            // Why it matters: explicit although it is the default - it is a context-start switch, so its presence
+            //   in the file is what makes an intentional `false` reviewable.
+            //
+            // Given / When / Then
             assertThat(ConfigurationFiles.bindMap(file, "adapter-logging")).containsEntry("enabled", "true")
         }
     }
@@ -84,22 +123,30 @@ class LoggingLevelContractTest {
 
         @Test
         fun `should log every header, masked by default, with the Host header in plaintext`() {
-            // Given / When / Then: includes "*" on both directions, and Host on the request plaintext allowlist
-            // - the runbook reads the backend off it next to adapter_name.
+            // What is tested: the header selection and masking of the fixture's adapter-logging block.
+            // Success criteria: includes "*" on both directions, Host on the request plaintext allowlist, and no
+            //   X-Access-Token variant on it.
+            // Why it matters: the runbook reads the backend off the Host header next to adapter_name, and the
+            //   token must stay a fingerprint whatever else is allowed in plaintext.
+            //
+            // Given / When / Then
             assertThat(adapterLogging).containsEntry("request-headers.includes.0", "*")
             assertThat(adapterLogging).containsEntry("response-headers.includes.0", "*")
             assertThat(unmaskedRequestHeaders()).contains("Host")
-            // And the token stays a fingerprint: it must not be on the allowlist, whatever else is.
             assertThat(unmaskedRequestHeaders()).noneMatch { it.startsWith("X-Access-Token", ignoreCase = true) }
         }
 
         @Test
         fun `should log bodies on failure only, capped at 16 KB`() {
-            // Given / When / Then: logging every body of every call would put customer data on every line.
-            // `on-failure` keeps the error body the runbook needs and drops the rest; 16384 is the library
-            // default, written out so the cap is reviewable here. The SHIPPED file currently says `always` - a
-            // deliberate rollout posture, and a value an operator tunes, which is why it is not pinned there
-            // (LegatiumExchangeLoggingIntegrationTest reads the shipped mode as it is).
+            // What is tested: the body modes and the capture cap of the fixture.
+            // Success criteria: both directions `on-failure`, `max-body-bytes` 16384.
+            // Why it matters: logging every body of every call would put customer data on every line;
+            //   `on-failure` keeps the error body the runbook needs and drops the rest, and 16384 - the library
+            //   default - is written out so the cap is reviewable. The REFERENCE file currently says `always`, a
+            //   rollout posture and a value an operator tunes, which is why it is not pinned there
+            //   (LegatiumExchangeLoggingIntegrationTest reads the reference mode as it is).
+            //
+            // Given / When / Then
             assertThat(adapterLogging).containsEntry("log-request-body", "on-failure")
             assertThat(adapterLogging).containsEntry("log-response-body", "on-failure")
             assertThat(adapterLogging).containsEntry("max-body-bytes", "16384")
@@ -110,5 +157,6 @@ class LoggingLevelContractTest {
 
     private companion object {
         const val LIBRARY_LOGGER = "eu.inqudium.legatium.restclient.logging"
+        const val MODULE_LOGGER = "eu.inqudium.veredium"
     }
 }

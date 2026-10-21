@@ -92,8 +92,14 @@ def extract_rationales(module: Path) -> tuple[dict, dict]:
             m = fun_re.match(line)
             if not m:
                 continue
+            # A parameterized test can spread its parameter list over several
+            # lines; the body - and the rationale block at its top - starts
+            # after the line that opens it.
+            start = i
+            while not lines[start].rstrip().endswith("{") and start + 1 < len(lines):
+                start += 1
             comment = []
-            for follow in lines[i + 1:]:
+            for follow in lines[start + 1:]:
                 stripped = follow.strip()
                 if stripped.startswith("//"):
                     body = stripped[2:].strip()

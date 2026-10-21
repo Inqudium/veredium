@@ -103,6 +103,12 @@
             <artifactId>micrometer-tracing</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Jazzer's JUnit 5 integration for the @FuzzTest targets under src/test/java (CONTRIBUTING.md
+             "Fuzzing"); version and test scope managed in the parent. -->
+        <dependency>
+            <groupId>com.code-intelligence</groupId>
+            <artifactId>jazzer-junit</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
@@ -136,6 +142,13 @@
                         </goals>
                     </execution>
                 </executions>
+            </plugin>
+            <!-- The Jazzer @FuzzTest targets are Java sources under src/test/java (CONTRIBUTING.md "Fuzzing");
+                 the parent-managed execution adds that directory as a second test-source root next to
+                 src/test/kotlin. They call the Kotlin main classes only, which are compiled by then. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

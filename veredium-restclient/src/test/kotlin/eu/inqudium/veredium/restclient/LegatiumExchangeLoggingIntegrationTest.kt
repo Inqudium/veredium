@@ -19,7 +19,7 @@ import eu.inqudium.legatium.common.ClientLoggingProperties
 import eu.inqudium.legatium.restclient.logging.ClientLoggingAutoConfiguration
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
-import eu.inqudium.veredium.restclient.LegatiumExchangeLoggingIntegrationTest.Companion.SHIPPED_PREFIXES
+import eu.inqudium.veredium.restclient.LegatiumExchangeLoggingIntegrationTest.Companion.REFERENCE_PREFIXES
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
@@ -49,6 +49,7 @@ import org.springframework.core.env.MapPropertySource
 import org.springframework.core.io.ClassPathResource
 import org.springframework.http.MediaType
 import org.springframework.util.unit.DataSize
+import org.springframework.web.client.ResourceAccessException
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
@@ -66,14 +67,14 @@ import java.util.function.Supplier
  * factory's clients through Boot's `RestClient.Builder` bean and nothing else.
  *
  * 1. What is tested: the wiring end to end - a real context with Boot's RestClient auto-configuration, the
- *    library's auto-configuration and the module's shipped `application.yml` values, a client of
+ *    library's auto-configuration and the values of the module's reference `application.yml`, a client of
  *    [ResilientRestClientFactory], a local WireMock - and the SEMANTICS the library gives the blocking stack: a
  *    4xx is `rejected` with its status, a 5xx a WARN `failure`, the transport timeout a WARN `timeout`, and a
  *    CANCELLED call - the caller interrupted, or the TimeLimiter expired - an ERROR `failure` written promptly by
  *    the worker whose socket the cancellation closed; bodies capped; the backend name as `adapter_name`; the Host
  *    header in plaintext next to the token's fingerprint; and whether a value the CALLER put in its MDC reaches
  *    an event written on the worker.
- * 2. Success criterion: per case, the captured event on `adapter-http-exchange` carries the expected level,
+ * 2. Success criteria: per case, the captured event on `adapter-http-exchange` carries the expected level,
  *    outcome, status and fields.
  * 3. Why it matters: every runbook query and alert keys on this event's outcome vocabulary, and the blocking
  *    stack's vocabulary differs from the reactive twin's at exactly the point pinned here (no `cancelled`: a
@@ -81,35 +82,35 @@ import java.util.function.Supplier
  *    a test rather than rediscovered as a "bug" in production.
  *
  * Contexts run through an [ApplicationContextRunner] with the `adapter-logging` AND `app.restclient` blocks of
- * the shipped `application.yml` as a property source, so the configuration under test is the one that ships -
- * not a copy in this file. `RestClientProperties` is bound by its own [RestClientConfiguration] instead of being
+ * the reference `application.yml` ([ConfigurationFiles.REFERENCE], a test resource no consumer receives) as a
+ * property source, so the configuration under test is the one the docs recommend - not a copy in this file. `RestClientProperties` is bound by its own [RestClientConfiguration] instead of being
  * handed in as a code-default instance, so a key like `app.restclient.observability.http-observation-enabled`
  * reaches [ResilientRestClientFactory] here by exactly the route it takes in the running application.
  *
  * `app.mesh.*` is deliberately left out of that property source: the endpoints are hand-built per case (WireMock's
- * dynamic port, a per-case TimeLimiter budget), and the shipped triplets would point these tests at the real mesh.
+ * dynamic port, a per-case TimeLimiter budget), and the reference triplets would point these tests at a real mesh.
  * No mocks: WireMock, a real context, a Logback appender.
  */
 class LegatiumExchangeLoggingIntegrationTest {
     companion object {
         /**
-         * legatium's exchange logger as the shipped application.yml names it - the library default, which is
-         * also the name the shipped `logging.level` line addresses (the pair is pinned by LoggingLevelContractTest).
+         * legatium's exchange logger as the reference application.yml names it - the library default, which is
+         * also the name its `logging.level` line addresses (the pair is pinned by LoggingLevelContractTest).
          */
         private const val EXCHANGE_LOGGER = "adapter-http-exchange"
 
         /**
-         * The prefixes of the shipped `application.yml` this test binds. `adapter-logging.` configures the
+         * The prefixes of the reference `application.yml` this test binds. `adapter-logging.` configures the
          * library under test; `app.restclient.` configures [RestClientProperties], whose
-         * `observability.http-observation-enabled` is the one key whose shipped value (`true`) DIFFERS from the
+         * `observability.http-observation-enabled` is the one key whose reference value (`true`) DIFFERS from the
          * class's code default (`false`) - so loading it is what makes the two distinguishable here.
          *
          * `app.mesh.` is absent on purpose - see the class KDoc.
          */
-        private val SHIPPED_PREFIXES = listOf("adapter-logging.", "app.restclient.")
+        private val REFERENCE_PREFIXES = listOf("adapter-logging.", "app.restclient.")
 
-        /** Name of the property source the shipped keys are added under - for readable failure diagnostics. */
-        private const val SHIPPED_PROPERTY_SOURCE = "shipped-application-yml"
+        /** Name of the property source the reference keys are added under - for readable failure diagnostics. */
+        private const val REFERENCE_PROPERTY_SOURCE = "reference-application-yml"
 
         /** Spring's RestClient client observation - the meter the wired observation must produce. */
         private const val HTTP_CLIENT_OBSERVATION = "http.client.requests"
@@ -145,8 +146,8 @@ class LegatiumExchangeLoggingIntegrationTest {
     @BeforeEach
     fun setUp() {
         wireMock.resetAll()
-        // The runner does not initialise Boot's LoggingSystem, so the shipped `logging.level` block does not
-        // apply here; the level is set by hand to the value that block ships (INFO = every exchange).
+        // The runner does not initialise Boot's LoggingSystem, so the reference `logging.level` block does not
+        // apply here; the level is set by hand to the value that block recommends (INFO = every exchange).
         previousExchangeLevel = exchangeLogger.level
         exchangeLogger.level = Level.INFO
     }
@@ -161,7 +162,7 @@ class LegatiumExchangeLoggingIntegrationTest {
      * A context the way the host assembles it: Boot's RestClient auto-configuration (the builder bean and its
      * customizers), a fully wired OBSERVATION side (a recording `ObservationRegistry` plus Boot's
      * `ObservationRestClientCustomizer`, which is what puts the registry on the builder), the library's
-     * auto-configuration (its interceptor as a customizer), the shipped `application.yml` for the
+     * auto-configuration (its interceptor as a customizer), the reference `application.yml` for the
      * `adapter-logging` and `app.restclient` blocks, and the factory with its collaborators. One mesh endpoint,
      * `GET /things/{id}` against WireMock, carrying the token header so the masking can be observed.
      *
@@ -187,6 +188,7 @@ class LegatiumExchangeLoggingIntegrationTest {
         backend: String,
         timeLimiter: Duration = Duration.ofSeconds(30),
         tracer: Tracer? = null,
+        maxConnections: Int = MeshProperties.Transport().maxConnections,
     ): ApplicationContextRunner {
         val meters = SimpleMeterRegistry()
         val observations = ObservationRegistry.create().apply { observationConfig().observationHandler(DefaultMeterObservationHandler(meters)) }
@@ -195,7 +197,7 @@ class LegatiumExchangeLoggingIntegrationTest {
         val bulkheads = BulkheadRegistry.ofDefaults()
         return ApplicationContextRunner()
             .withInitializer { context ->
-                context.environment.propertySources.addFirst(MapPropertySource(SHIPPED_PROPERTY_SOURCE, shippedProperties()))
+                context.environment.propertySources.addFirst(MapPropertySource(REFERENCE_PROPERTY_SOURCE, referenceProperties()))
             }.withConfiguration(
                 AutoConfigurations.of(
                     RestClientAutoConfiguration::class.java,
@@ -207,7 +209,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             ).withBean(SimpleMeterRegistry::class.java, Supplier { meters })
             .withBean(ObservationRegistry::class.java, Supplier { observations })
             // The module's OWN @EnableConfigurationProperties binding, not a hand-made instance: binding from
-            // the Environment is part of what this context reproduces, so a shipped `app.restclient.*` value
+            // the Environment is part of what this context reproduces, so a reference `app.restclient.*` value
             // that never arrives fails a test here instead of silently degrading to the code default.
             .withUserConfiguration(BoundRestClientProperties::class.java)
             .withBean(
@@ -217,7 +219,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                         defaults =
                             MeshProperties.Defaults(
                                 individualRequestTimeoutMs = 1000,
-                                transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl()),
+                                transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl(), maxConnections = maxConnections),
                             ),
                         endpoints =
                             listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/things/{id}", alias = backend)),
@@ -242,35 +244,40 @@ class LegatiumExchangeLoggingIntegrationTest {
     class BoundRestClientProperties
 
     /**
-     * The [SHIPPED_PREFIXES] keys of the shipped `src/main/resources/application.yml`, flattened the way Boot
-     * would load them. Read from the real file rather than restated here: a copy would keep passing after the
-     * shipped value changed, which is the one thing these assertions exist to catch.
+     * The [REFERENCE_PREFIXES] keys of the reference `src/test/resources/application.yml`, flattened the way
+     * Boot would load them. Read from the real file rather than restated here: a copy would keep passing after
+     * the reference value changed, which is the one thing these assertions exist to catch.
      */
-    private fun shippedProperties(): Map<String, Any> =
+    private fun referenceProperties(): Map<String, Any> =
         YamlPropertySourceLoader()
-            .load("application.yml", ClassPathResource("application.yml"))
+            .load(ConfigurationFiles.REFERENCE, ClassPathResource(ConfigurationFiles.REFERENCE))
             .filterIsInstance<EnumerablePropertySource<*>>()
             .flatMap { source ->
                 source.propertyNames
-                    .filter { name -> SHIPPED_PREFIXES.any(name::startsWith) }
+                    .filter { name -> REFERENCE_PREFIXES.any(name::startsWith) }
                     .map { it to source.getProperty(it)!! }
             }.toMap()
             .also { loaded ->
                 // A prefix that silently matches nothing would turn every assertion below into a tautology
                 // about code defaults - exactly the failure this whole test guards against.
-                SHIPPED_PREFIXES.forEach { prefix ->
+                REFERENCE_PREFIXES.forEach { prefix ->
                     assertThat(loaded.keys)
-                        .`as`("shipped application.yml must carry '$prefix*' keys")
+                        .`as`("reference application.yml must carry '$prefix*' keys")
                         .anyMatch { it.startsWith(prefix) }
                 }
             }
 
-    /** Attaches a recording appender to the exchange logger for the duration of [block]. */
+    /**
+     * Attaches a recording appender to the exchange logger for the duration of [block], recording only the
+     * events of [backend] - the logger is process-wide, and a late event of an earlier test's abandoned worker
+     * must not be counted towards this one's.
+     */
     private fun capturing(
+        backend: String,
         expectedEvents: Int,
         block: (RecordingAppender) -> Unit,
     ) {
-        val appender = RecordingAppender(expectedEvents).apply { start() }
+        val appender = RecordingAppender(expectedEvents, adapterName = backend).apply { start() }
         exchangeLogger.addAppender(appender)
         try {
             block(appender)
@@ -317,10 +324,19 @@ class LegatiumExchangeLoggingIntegrationTest {
     inner class `One event per exchange` {
         @Test
         fun `should write exactly one event on the library's logger with the backend name and the template`() {
+            // What is tested: the wiring end to end for the plain case - one GET through a client of the factory
+            //   in a host-shaped context produces legatium's exchange event.
+            // Success criteria: the event is on `adapter-http-exchange`, INFO / success / 200, carries the backend
+            //   name as `adapter_name` and the mesh TEMPLATE as `adapter_url_template`, and was written on the
+            //   decorator's worker thread.
+            // Why it matters: the event reaches the factory's clients only through Boot's builder bean, and the
+            //   backend name only through a request attribute; either missing makes every exchange anonymous on
+            //   the dashboards the runbook is built on.
+            //
             // Given: a host context and a 200 answer
             wireMock.stubFor(get(urlEqualTo("/things/42")).willReturn(okJson("""{"message":"hi"}""")))
             hostContext("things").run { context ->
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "things", expectedEvents = 1) { appender ->
                     // When: one GET through a client of the factory
                     context.client("things").get(Greeting::class.java) { it.uri("/things/42") }
 
@@ -343,14 +359,16 @@ class LegatiumExchangeLoggingIntegrationTest {
         fun `should write no event for a request that never became an exchange`() {
             // What is tested: a serialisation failure produces NO exchange event, because it never reached the
             //   RestClient - and therefore never the library's interceptor.
-            // How success is judged: two calls, one failing while serialising, one real; exactly one event, the
+            // Success criteria: two calls, one failing while serialising, one real; exactly one event, the
             //   second. The successful call is the ordering fence: awaiting ITS event means anything the first
             //   call was going to emit has had its turn.
+            // Why it matters: a log whose consumers count real calls must not count a call that never went out -
+            //   a phantom exchange would inflate the request rate and, being a failure, the error rate.
             //
             // Given
             wireMock.stubFor(post(urlEqualTo("/things/42")).willReturn(okJson("""{"message":"ok"}""")))
             hostContext("phantom").run { context ->
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "phantom", expectedEvents = 1) { appender ->
                     val client = context.client("phantom")
 
                     // When: a call that fails during serialisation, then a well-formed one
@@ -372,15 +390,17 @@ class LegatiumExchangeLoggingIntegrationTest {
     inner class `Headers and the backend identity` {
         @Test
         fun `should show the Host header in plaintext and the token as a fingerprint`() {
-            // What is tested: the shipped `adapter-logging` header configuration - every header logged, masked
+            // What is tested: the reference `adapter-logging` header configuration - every header logged, masked
             //   by default, Host on the plaintext allowlist.
-            // How success is judged: the rendered request headers name the Host with its value and the token
+            // Success criteria: the rendered request headers name the Host with its value and the token
             //   header with a `<length>:<16 hex>` fingerprint, and the secret itself appears nowhere on the event.
+            // Why it matters: the token must never reach a log index, while the Host header is how an operator
+            //   reads the backend off a line; one configuration has to get both right.
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/things/1")).willReturn(okJson("""{"message":"hi"}""")))
             hostContext("masked").run { context ->
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "masked", expectedEvents = 1) { appender ->
                     // When
                     context.client("masked").get(Greeting::class.java) { it.uri("/things/1").header(TOKEN_HEADER, TOKEN_VALUE) }
 
@@ -401,15 +421,18 @@ class LegatiumExchangeLoggingIntegrationTest {
         @Test
         fun `should log a 404 as INFO rejected with its status and the error body`() {
             // What is tested: a 4xx answer is `rejected` for the library (the peer answered), carried by its
-            //   status code, and its body is logged - in the shipped `always` mode here, as it would be in
+            //   status code, and its body is logged - in the reference `always` mode here, as it would be in
             //   `on-failure` (a rejection is not a success).
+            // Success criteria: one INFO event with `adapter_outcome=rejected`, status 404 and the error body.
+            // Why it matters: a 404 is a business answer; logged as a failure it would page someone for every
+            //   routine "not found", and without its body nobody could tell which one it was.
             //
             // Given: a 404 with a JSON error body
             wireMock.stubFor(
                 get(urlEqualTo("/things/404")).willReturn(aResponse().withStatus(404).withBody("""{"error":"no such thing"}""")),
             )
             hostContext("benign").run { context ->
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "benign", expectedEvents = 1) { appender ->
                     // When
                     runCatching { context.client("benign").get(Greeting::class.java) { it.uri("/things/404") } }
 
@@ -428,13 +451,16 @@ class LegatiumExchangeLoggingIntegrationTest {
             // What is tested: the level half of the 4xx classification. A 401, 403, 408 or 429 is still
             //   `rejected` on the outcome, but at WARN. The 429 stands for the set; the set itself is pinned in
             //   the library.
+            // Success criteria: one WARN event, `adapter_outcome=rejected`, status 429.
+            // Why it matters: a throttled call is a 4xx the operator must see - the backend is shedding load -
+            //   and WARN is the level the alerts filter on.
             //
             // Given: a throttling answer
             wireMock.stubFor(
                 get(urlEqualTo("/things/throttled")).willReturn(aResponse().withStatus(429).withBody("""{"error":"slow down"}""")),
             )
             hostContext("throttled").run { context ->
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "throttled", expectedEvents = 1) { appender ->
                     // When
                     runCatching { context.client("throttled").get(Greeting::class.java) { it.uri("/things/throttled") } }
 
@@ -448,12 +474,19 @@ class LegatiumExchangeLoggingIntegrationTest {
         }
 
         @Test
-        fun `should log a 500 as WARN failure with the error body, and a 200 with its body in the shipped always mode`() {
+        fun `should log a 500 as WARN failure with the error body, and a 200 with its body in the reference always mode`() {
+            // What is tested: the two ends of the outcome vocabulary on one backend - a 500 and a 200 - under the
+            //   reference body mode `always`.
+            // Success criteria: the 500 is a WARN `failure` carrying its error body; the 200 is INFO and carries
+            //   its body too.
+            // Why it matters: `failure` is what the error-rate alert counts; and the body of a success in the log
+            //   is a deliberate rollout posture of the reference file, pinned so a change to it is a decision.
+            //
             // Given: a failing and a succeeding endpoint on one backend
             wireMock.stubFor(get(urlEqualTo("/things/500")).willReturn(aResponse().withStatus(500).withBody("""{"error":"boom"}""")))
             wireMock.stubFor(get(urlEqualTo("/things/200")).willReturn(okJson("""{"message":"fine"}""")))
             hostContext("server").run { context ->
-                capturing(expectedEvents = 2) { appender ->
+                capturing(backend = "server", expectedEvents = 2) { appender ->
                     val client = context.client("server")
 
                     // When
@@ -461,7 +494,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                     client.get(Greeting::class.java) { it.uri("/things/200") }
 
                     // Then: the 5xx is a WARN failure carrying its body; the 200 carries its body too, because
-                    // the shipped file logs bodies in `always` mode (the configuration case below pins that)
+                    // the reference file logs bodies in `always` mode (the configuration case below pins that)
                     val events = appender.awaitEvents()
                     val failure = events.single { it.field("adapter_response_status_code") == 500 }
                     assertThat(failure.level).isEqualTo(Level.WARN)
@@ -479,7 +512,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // What is tested: the one client-side disposition with its own outcome value - the per-endpoint
             //   responseTimeout expiring on the worker (1400 ms at the 1 s anchor), the ladder's normal case for
             //   a stalled backend.
-            // How success is judged: a backend slower than the response timeout yields one WARN event with
+            // Success criteria: a backend slower than the response timeout yields one WARN event with
             //   `adapter_outcome=timeout` and no status.
             // Why it matters: this is the outcome an alert on a slow backend has to key on; the two cancellation
             //   cases below produce a different one.
@@ -487,7 +520,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Given: a backend slower than the 1400 ms response timeout
             wireMock.stubFor(get(urlEqualTo("/things/slow")).willReturn(okJson("{}").withFixedDelay(3_000)))
             hostContext("transport-timeout").run { context ->
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "transport-timeout", expectedEvents = 1) { appender ->
                     // When
                     runCatching { context.client("transport-timeout").get(Greeting::class.java) { it.uri("/things/slow") } }
 
@@ -501,13 +534,52 @@ class LegatiumExchangeLoggingIntegrationTest {
         }
 
         @Test
+        fun `should log a pool-lease timeout as WARN timeout`() {
+            // What is tested: the third pre-response guard - no pooled connection becoming free within the
+            //   200 ms pending-acquire timeout. Apache raises ConnectionRequestTimeoutException, a bare
+            //   InterruptedIOException that no JDK timeout type covers; legatium 1.2.1 matches it by class name.
+            // Success criteria: with a pool of ONE connection held by a slow call, a second call fails within the
+            //   lease window, and its event is WARN `adapter_outcome=timeout` without a status - not the ERROR
+            //   `failure` legatium 1.2.0 wrote for it.
+            // Why it matters: pool exhaustion is a saturation signal, not a backend fault, and before 1.2.1 it
+            //   landed at the level alerting fires on (finding 16 of the 2026-10-21 defect analysis). This pins
+            //   the upgrade where veredium wires the pool, so a downgrade or a changed exception type shows up.
+            //
+            // Given: a pool of one connection, held by a call to a 3 s backend that is already on the wire
+            wireMock.stubFor(get(urlEqualTo("/things/hold")).willReturn(okJson("{}").withFixedDelay(3_000)))
+            val inFlight = CountDownLatch(1)
+            wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/things/hold") inFlight.countDown() }
+            hostContext("pool-lease", maxConnections = 1).run { context ->
+                capturing(backend = "pool-lease", expectedEvents = 1) { appender ->
+                    val client = context.client("pool-lease")
+                    val holder = callers.submit<Throwable?> { runCatching { client.get(Greeting::class.java) { it.uri("/things/hold") } }.exceptionOrNull() }
+                    assertThat(inFlight.await(5, TimeUnit.SECONDS)).`as`("the holding call must have the only connection").isTrue()
+
+                    // When: a second call needs a connection the pool cannot lend
+                    val failure = runCatching { client.get(Greeting::class.java) { it.uri("/things/1") } }.exceptionOrNull()
+
+                    // Then: the caller sees the lease timeout, and the first event - the lease one; the holder's
+                    // own event arrives only at its response timeout - is a WARN timeout
+                    assertThat(failure).isInstanceOf(ResourceAccessException::class.java)
+                    assertThat(generateSequence(failure) { it.cause }.map { it.javaClass.name }.toList())
+                        .contains("org.apache.hc.core5.http.ConnectionRequestTimeoutException")
+                    val event = appender.awaitEvents().first()
+                    assertThat(event.level).isEqualTo(Level.WARN)
+                    assertThat(event.field("adapter_outcome")).isEqualTo("timeout")
+                    assertThat(event.field("adapter_response_status_code")).isNull()
+                    holder.get(10, TimeUnit.SECONDS)
+                }
+            }
+        }
+
+        @Test
         fun `should log a TimeLimiter timeout as the cancelled worker's failure, not as a timeout`() {
             // What is tested: the resilience budget expiring BEFORE the transport gives up. The caller is
             //   released at 200 ms with a TimeoutException and the worker's future is cancelled; the interrupt
             //   closes the worker's socket, so the exchange ends at once with `Closed by interrupt` - which the
             //   library classifies as a `failure` at ERROR, not as a `timeout` and not as the reactive twin's
             //   `cancelled`.
-            // How success is judged: the caller's failure is the TimeLimiter's; the event is ERROR `failure`,
+            // Success criteria: the caller's failure is the TimeLimiter's; the event is ERROR `failure`,
             //   written on the worker thread, and its duration is well below the 1400 ms response timeout - the
             //   proof that the cancellation freed the worker rather than leaving it to the transport.
             // Why it matters: an alert on `adapter_outcome == "cancelled"` would never fire for this module, and
@@ -518,7 +590,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Given: a 200 ms budget against a 3 s backend
             wireMock.stubFor(get(urlEqualTo("/things/budget")).willReturn(okJson("{}").withFixedDelay(3_000)))
             hostContext("budget", timeLimiter = Duration.ofMillis(200)).run { context ->
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "budget", expectedEvents = 1) { appender ->
                     // When
                     val failure =
                         runCatching { context.client("budget").get(Greeting::class.java) { it.uri("/things/budget") } }
@@ -544,8 +616,11 @@ class LegatiumExchangeLoggingIntegrationTest {
             // What is tested: the blocking counterpart of the twin's "caller's cancel" case. The interrupt
             //   releases the caller and cancels the worker's future; the worker's socket is closed by that
             //   interrupt and the library sees the exchange end at once.
-            // How success is judged: the caller gets an InterruptedException; one ERROR `failure` event with no
+            // Success criteria: the caller gets an InterruptedException; one ERROR `failure` event with no
             //   status follows, written on the worker.
+            // Why it matters: the blocking stack has no `cancelled` outcome - a caller walking away surfaces as a
+            //   `failure` at ERROR. An alert keyed on `cancelled` would never fire here; this records the
+            //   difference to the reactive twin as a test instead of a surprise.
             //
             // Given: a backend that does not answer within the window, and a caller on its own thread; the
             // interrupt is sent only once the request is on the wire, otherwise the worker may be cancelled
@@ -554,7 +629,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             val inFlight = CountDownLatch(1)
             wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/things/never") inFlight.countDown() }
             hostContext("walked-away").run { context ->
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "walked-away", expectedEvents = 1) { appender ->
                     val client = context.client("walked-away")
                     val callerThread = AtomicReference<Thread>()
                     val started = CountDownLatch(1)
@@ -586,15 +661,20 @@ class LegatiumExchangeLoggingIntegrationTest {
     inner class `Body capture` {
         @Test
         fun `should cap a logged body at max-body-bytes and note the total`() {
-            // What is tested: the shipped 16 KB cap - the LOGGED body is truncated with the library's note, the
+            // What is tested: the reference 16 KB cap - the LOGGED body is truncated with the library's note, the
             //   wire body is untouched.
-            // Given: a POST whose body is well past the cap, answered with a 500 - logged in the shipped `always`
-            //   mode, and it would be in `on-failure` too
+            // Success criteria: the logged request body says `truncated` and how many bytes there were, is no
+            //   longer than the cap plus the note, and WireMock received the full 20 000-character value.
+            // Why it matters: the cap bounds what one log line costs; a cap that also cut the wire body would
+            //   corrupt the request, and one that did not apply would put megabytes on a line.
+            //
+            // Given: a POST whose body is well past the cap, answered with a 500 - logged in the reference
+            //   `always` mode, and it would be in `on-failure` too
             val longValue = "X".repeat(20_000)
             wireMock.stubFor(post(urlEqualTo("/things/42")).willReturn(aResponse().withStatus(500).withBody("{}")))
             hostContext("capped").run { context ->
                 val cap = context.getBean(ClientLoggingProperties::class.java).maxBodyBytes
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "capped", expectedEvents = 1) { appender ->
                     // When
                     runCatching {
                         context
@@ -620,10 +700,17 @@ class LegatiumExchangeLoggingIntegrationTest {
     }
 
     @Nested
-    inner class `The shipped configuration` {
+    inner class `The reference configuration` {
         @Test
-        fun `should bind the adapter-logging block of application yml as shipped`() {
-            // Given / When: the context bound the shipped file
+        fun `should bind the adapter-logging block of the reference application yml as written`() {
+            // What is tested: the `adapter-logging` block of the reference file, bound by the library's own
+            //   properties class in a host-shaped context.
+            // Success criteria: enabled, the library's default logger name, every header included, bodies in
+            //   `always` mode, the 16 KB cap.
+            // Why it matters: the runbook's queries assume these values; a key that does not bind (a typo, a
+            //   renamed property after a library upgrade) silently falls back to the library default.
+            //
+            // Given / When: the context bound the reference file
             hostContext("config").run { context ->
                 val properties = context.getBean(ClientLoggingProperties::class.java)
 
@@ -640,25 +727,28 @@ class LegatiumExchangeLoggingIntegrationTest {
 
         @Test
         fun `should bind the app-restclient block of application yml instead of falling back to code defaults`() {
-            // What is tested: that `app.restclient.*` of the shipped application.yml actually REACHES
+            // What is tested: that `app.restclient.*` of the reference application.yml actually REACHES
             //   RestClientProperties in a host-shaped context - binding through the module's own
-            //   RestClientConfiguration, not through an instance this test constructs.
-            // How success is judged: `observability.http-observation-enabled` is asserted against the code
-            //   default in the same test - it is the one key whose shipped value differs, so it is the only one
-            //   that can tell a real binding apart from a silent fallback.
+            //   `@EnableConfigurationProperties`, not through an instance this test constructs.
+            // Success criteria: `observability.http-observation-enabled` is asserted against the code
+            //   default in the same test - it is the one key whose reference value differs, so it is the only
+            //   one that can tell a real binding apart from a silent fallback - and the rest of the block binds
+            //   to the values the file states.
+            // Why it matters: a block that never binds leaves the host on code defaults while its file says
+            //   otherwise - observation off, validation off - and nothing reports the difference.
             //
-            // Given / When: the context bound the shipped file
+            // Given / When: the context bound the reference file
             hostContext("restclient-config").run { context ->
                 val properties = context.getBean(RestClientProperties::class.java)
 
-                // Then: the one key whose shipped value contradicts the code default
+                // Then: the one key whose reference value contradicts the code default
                 assertThat(properties.observability.httpObservationEnabled)
-                    .`as`("app.restclient.observability.http-observation-enabled, bound from the shipped application.yml")
+                    .`as`("app.restclient.observability.http-observation-enabled, bound from the reference application.yml")
                     .isTrue()
                 assertThat(RestClientProperties().observability.httpObservationEnabled)
                     .`as`("the code default the binding had to override for the assertion above to mean anything")
                     .isFalse()
-                // ... and the rest of the block, pinned so a drift in the shipped file is visible here too
+                // ... and the rest of the block, pinned so a drift in the reference file is visible here too
                 assertThat(properties.maxInMemorySize).isEqualTo(DataSize.ofKilobytes(256))
                 assertThat(properties.validation.enabled).isTrue()
                 assertThat(properties.validation.failOnViolation).isFalse()
@@ -667,7 +757,7 @@ class LegatiumExchangeLoggingIntegrationTest {
     }
 
     /**
-     * What the shipped `http-observation-enabled: true` actually produces once a context can act on it.
+     * What the reference `http-observation-enabled: true` actually produces once a context can act on it.
      *
      * By default this context is wired OBSERVED BUT NOT TRACED: `micrometer-tracing` is on the test classpath,
      * but no tracing auto-configuration is registered here, so the context holds no `io.micrometer.tracing.Tracer`
@@ -679,8 +769,14 @@ class LegatiumExchangeLoggingIntegrationTest {
     inner class `The observation wiring` {
         @Test
         fun `should report the toggle as plain on, with the library agreeing that the observation is wired`() {
-            // What is tested: that the shipped `http-observation-enabled: true` reaches a context which can ACT
+            // What is tested: that the reference `http-observation-enabled: true` reaches a context which can ACT
             //   on it, and that the two independent verdicts written at startup now tell the same story.
+            // Success criteria: the context's ObservationRegistry records (is not noop); the module's startup
+            //   line reports the toggle `on (Boot's registry stays on the builder)`; legatium's line reports that
+            //   it found Boot's client observation.
+            // Why it matters: the two lines are written by different code from different evidence; an operator
+            //   reads them side by side at startup, and a context in which they contradicted each other would
+            //   send that reading the wrong way.
             //
             // Given: recorders on both loggers, in place before the context refreshes
             val reportLogger = LoggerFactory.getLogger(RestClientObservationReport::class.java) as Logger
@@ -715,6 +811,10 @@ class LegatiumExchangeLoggingIntegrationTest {
             // What is tested: the toggle END TO END - a real call through a client of this factory OPENS the
             //   `http.client.requests` observation on the worker and it lands in the host's MeterRegistry, with
             //   its `uri` tag the mesh endpoint's low-cardinality TEMPLATE rather than the expanded path.
+            // Success criteria: no timer before the call; exactly one `http.client.requests` timer after it,
+            //   tagged `uri=/things/{id}`.
+            // Why it matters: an expanded path as the tag mints one series per id - a cardinality explosion in the
+            //   host's metrics backend; the template stamped on every request is the only guard.
             //
             // Given: a backend and a context with the observation fully wired
             wireMock.stubFor(get(urlEqualTo("/things/7")).willReturn(okJson("""{"message":"hi"}""")))
@@ -740,6 +840,10 @@ class LegatiumExchangeLoggingIntegrationTest {
             // What is tested: the OBSERVABLE consequence of legatium's "observed, not traced" verdict - the
             //   request WireMock received carries the library's configured correlation header with a generated
             //   value and NO `traceparent`.
+            // Success criteria: the premise holds (no Tracer bean), and WireMock received the correlation header
+            //   with a non-empty value and no `traceparent` header.
+            // Why it matters: without tracing, the correlation header is the only id that joins this call to the
+            //   peer's logs; its absence would leave the two sides of an incident unrelatable.
             //
             // Given: this context wires the observation but no tracer
             wireMock.resetRequests()
@@ -767,6 +871,11 @@ class LegatiumExchangeLoggingIntegrationTest {
             // What is tested: the OTHER branch of the same verdict, and what it is - and is not - evidence of.
             //   legatium chooses it by looking up a bean of type `io.micrometer.tracing.Tracer`, so the minimal
             //   [Tracer.NOOP] bean is enough to reach it; nothing else about the context changes.
+            // Success criteria: legatium's startup line flips to "with Micrometer Tracing wired" and says no
+            //   correlation header is generated - while the wire still carries the generated header and no
+            //   `traceparent`, because a NOOP tracer starts no span.
+            // Why it matters: it records what the verdict is evidence of - a bean, not a working trace - so an
+            //   operator reading "tracing wired" knows to check for an actual `traceparent` on the wire.
             //
             // Given: the same context as the untraced case, plus the smallest possible Tracer bean
             wireMock.resetRequests()
@@ -813,10 +922,17 @@ class LegatiumExchangeLoggingIntegrationTest {
     inner class `The caller's MDC` {
         @Test
         fun `should carry a caller's MDC value onto the event although it is written on the worker`() {
+            // What is tested: the decorator's MDC hand-off as legatium sees it - a key the caller put in its MDC
+            //   appears on the exchange event written on the worker thread.
+            // Success criteria: the event was written on a `restclient-call-` thread and its MDC holds the
+            //   caller's correlation key and value.
+            // Why it matters: correlation keys are how a log search finds every line of one request; an event
+            //   written on a fresh thread without them would fall out of every such search.
+            //
             // Given: a caller carrying a correlation id in its MDC, on a thread of its own
             wireMock.stubFor(get(urlEqualTo("/things/mdc")).willReturn(okJson("""{"message":"hi"}""")))
             hostContext("mdc-join").run { context ->
-                capturing(expectedEvents = 1) { appender ->
+                capturing(backend = "mdc-join", expectedEvents = 1) { appender ->
                     // When: the call runs on a dedicated thread, under that MDC
                     callers
                         .submit {
@@ -843,14 +959,22 @@ class LegatiumExchangeLoggingIntegrationTest {
      * because the library's emission scope holds its keys only for the duration of the log statement, and
      * Logback reads the MDC lazily. [awaitEvents] waits for [expected] events, so a capture is complete, not
      * merely safe to read.
+     *
+     * [adapterName] scopes an exchange-logger capture to one test's backend: the logger is shared by every
+     * test in the JVM, and an abandoned worker of an EARLIER test (its caller long released, its socket closed
+     * by an interrupt) may write its event while this test is capturing - counted, it would satisfy or break
+     * [expected] for the wrong reason. Backend names are unique per test. `null` records everything, for the
+     * startup-line loggers, whose lines carry no `adapter_name`.
      */
     private class RecordingAppender(
         private val expected: Int,
+        private val adapterName: String? = null,
     ) : AppenderBase<ILoggingEvent>() {
         private val captured = CopyOnWriteArrayList<ILoggingEvent>()
         private val arrived = CountDownLatch(expected)
 
         override fun append(eventObject: ILoggingEvent) {
+            if (adapterName != null && eventObject.keyValuePairs.orEmpty().none { it.key == "adapter_name" && it.value == adapterName }) return
             eventObject.prepareForDeferredProcessing()
             captured += eventObject
             arrived.countDown()

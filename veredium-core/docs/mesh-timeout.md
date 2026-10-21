@@ -96,7 +96,10 @@ binders then bind to: no second lifecycle, no remove + recreate, no re-binding. 
   a failure the client raises itself (a bulkhead rejection, the buffer limit; the blocking stack adds an
   interrupted caller and a shut-down worker) is **ignored**, and a benign 4xx (every 4xx except 408 and 429) is
   a **success**. Both are folded onto what YAML produced — the ignore predicate OR-ed, the record predicate
-  AND-ed — so an operator's own `ignore-exceptions` survive. The rules live in `HttpExchangeErrorPolicy` and
+  AND-ed — so an operator's own `ignore-exceptions` and `record-exceptions` survive. The customizer then empties
+  the builder's two class lists, whose effect is already inside the predicates it read: Resilience4j's `build()`
+  OR-s the lists back in on top of any predicate, so a `record-exceptions` entry naming a superclass of the
+  stack's 4xx exception would otherwise re-record the benign 404 past the verdict. The rules live in `HttpExchangeErrorPolicy` and
   `ClientSideFailurePolicy`; which exception carries a status and which types the client raises itself is
   what the stack's `BreakerVerdicts` contributes.
 
@@ -110,7 +113,21 @@ exists and, for every mesh endpoint, checks that all three layers **declare** th
 instance the registry serves (the predicates applied to probe exceptions, the derived numbers compared). Every
 problem is collected before anything is thrown, so one failed start names them all, with the key to add. A
 registry a host built by hand is the second silent case the guard catches: every alias present, no customizer
-ever consulted.
+ever consulted. A breaker that records the benign 4xx while it DOES ignore the client-side probe is reported
+differently - the customizer's client-side verdict is in place, so the message points at a record rule
+composed after it (`record-exceptions`, `record-exception-predicate`) rather than at the registry.
+
+**What the guard warns about.** Once every alias is wired, it adds up `max-concurrent-calls` of the mesh
+aliases' bulkheads (the merged values of the registry's instances) and compares the sum with
+`app.mesh.defaults.transport.max-connections`. The bulkheads are a partition of the shared pool: if together
+they admit more calls than it has connections, the excess queues for a connection instead of being shed with a
+named `BulkheadFullException`, and the pending-acquire timeout that follows is a **failure** on the breaker of
+whichever backend is waiting - not necessarily the one holding the connections. The guard logs a **WARN**
+naming the sum, the pool size and every alias with its permits, and does not fail the start: an over-committed
+pool can be a deliberate choice for backends that are never busy at once. The sum is over all mesh aliases,
+which is exact for the blocking stack (one Apache pool, its total cap shared by all routes) and conservative for
+the reactive one (Reactor Netty caps per remote address, so endpoints with their own `base-url` get their own
+pool).
 
 ## One endpoint per operation; the alias is the logical backend name
 

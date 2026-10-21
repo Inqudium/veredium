@@ -15,7 +15,9 @@ covers **every** knob the module reads, grouped by the four configuration surfac
 | `adapter-logging.*` / `logging.level` | `legatium-webclient-logging` / Spring | The outbound exchange log: one event per exchange, its headers, bodies and cap, and the level of its stream |
 | `management.observations.*` | Micrometer | The central observation disable-filter |
 
-Every value shown is the shipped default. The two module property classes validate at **binding time** — a value
+Every value shown is the code default unless it is marked as the **reference configuration**'s - the
+documented example `src/test/resources/application.yml` of this module, a test resource the contract tests pin
+(a library ships no `application.yml`; a host writes its own). The two module property classes validate at **binding time** — a value
 that cannot be meant is rejected where it is set, with a message naming the property key, because a wrong number
 here does not announce itself: it binds, the context starts, and the effect surfaces as a runtime symptom that
 points anywhere but at the configuration.
@@ -39,18 +41,19 @@ app:
       max-life-time: 5m
       evict-in-background: 30s
     observability:
-      http-observation-enabled: true   # shipped ON (code default false) - see §1.3
+      http-observation-enabled: true   # reference ON (code default false) - see §1.3
     validation:                      # response Bean Validation (see §1.4)
-      enabled: true                  # shipped ON, report only (code defaults: off / fail)
+      enabled: true                  # reference ON, report only (code defaults: off / fail)
       fail-on-violation: false
       endpoints: {}
     # user-agent: my-service/2.3     # the host's own token instead of veredium/<version> (see §1.5)
 ```
 
-> **Shipped versus code default.** Two keys above ship a value that contradicts their code default, and
-> `LegatiumExchangeLoggingIntegrationTest` pins both against the shipped `application.yml`: the observation
-> toggle ships **on** (§1.3), and response validation ships **on in report-only mode** (§1.4) - every backend
-> checked, violations logged at WARN, no call failed. Everything else shown is the code default.
+> **Reference versus code default.** Two keys above are set in the reference configuration to a value that
+> contradicts their code default, and `LegatiumExchangeLoggingIntegrationTest` pins both against it: the
+> observation toggle is **on** there (§1.3), and response validation is **on in report-only mode** (§1.4) -
+> every backend checked, violations logged at WARN, no call failed. A host that omits the keys gets the code
+> defaults. Everything else shown is the code default.
 
 ### 1.1 `max-in-memory-size` (`DataSize`, default `256KB`)
 
@@ -126,7 +129,9 @@ itself; this flag decides whether it *keeps* it.
   `Hooks.enableAutomaticContextPropagation()` so the active observation survives Reactor thread hops. This lives
   in its own `@Configuration` (not the factory constructor) precisely because the effect is process-wide and
   cannot be undone — it must be deliberate wiring, gated on this toggle, not a side effect of constructing a
-  factory (which a test may do repeatedly).
+  factory (which a test may do repeatedly). Both branches are pinned by
+  `WebClientReactorContextPropagationConfigTest` (a ThreadLocal carried across a thread hop with the toggle on,
+  nothing changed with it off).
 - Self-contained: it resolves from this module's own property and references nothing from sync-bridge.
 - See also §4.2 for the **central** disable-filter that can suppress the observation even when this is on.
 
@@ -233,7 +238,7 @@ Each endpoint is one **operation**, identified by a `triplet`:
 ### 2.2 The alias — the logical backend name
 
 The `alias` is the name adapters pass to `ResilientWebClientFactory.create(backendName)`; it is also the R4j
-instance key, the metric label, and the `validation.endpoints` map key (§1.4). The shipped config sets **no
+instance key, the metric label, and the `validation.endpoints` map key (§1.4). The reference configuration sets **no
 explicit alias** — it is **derived from the triplet**:
 
 > host (lowercased, dots → hyphens) · UPPERCASE method · static path segments in order (`{placeholders}`
@@ -244,8 +249,10 @@ Example: `/endpoint/api.example.com/GET/v5/access-profiles/by-involved-party/{id
 
 - The host prefix means the same method+path on different hosts cannot collide.
 - Aliases (and triplets) are **unique-checked at binding** (`MeshProperties.init`) — a duplicate fails fast.
-- The adapters' `ALIAS` constants must equal the derived values (pinned by `MeshAliasContractTest`), and the
-  `resilience4j.*.instances.<alias>` keys must match too (pinned by `ResilienceConfigContractTest`).
+- A host's adapters must pass the derived value to `ResilientWebClientFactory.create` (an unknown alias fails
+  there, §5), and the `resilience4j.*.instances.<alias>` keys must match it under all three layers - checked
+  for this module's reference configuration and test fixture by `ResilienceConfigContractTest`, and for a
+  host's configuration at startup by `MeshResilienceStartupGuard` (§3.2).
 - An explicit `alias:` is still supported and wins over the derivation — but changing an alias renames every
   metric label derived from it, so keep it stable.
 
@@ -387,7 +394,7 @@ timeout rather than a raw transport error.
 CircuitBreaker (outermost) → TimeLimiter → Bulkhead (innermost), Resilience4j's own default aspect order, so a
 bulkhead rejection travels outward and the breaker can see it (§3.3). The `app.mesh` toggles only decide whether
 mesh *derives* a knob, never whether the primitive is in the path. So an undeclared instance does **not** mean "off"; it means the backend silently runs
-on Resilience4j's own defaults. The shipped `application.yml` therefore declares every instance explicitly, at
+on Resilience4j's own defaults. The reference configuration therefore declares every instance explicitly, at
 the R4j default values written out **deliberately** so a library upgrade cannot change behaviour behind its back.
 Instance keys are the derived aliases (§2.2).
 
@@ -398,8 +405,8 @@ resilience4j:
   bulkhead:
     configs:
       lap-backend:
-        max-concurrent-calls: 25    # sum across backends <= transport.max-connections (100); enforced by contract test
-        max-wait-duration: 0        # fail fast rather than queue (a waiting caller burns its TimeLimiter budget)
+        max-concurrent-calls: 25    # sum across backends <= transport.max-connections (100); see below
+        max-wait-duration: 0        # fail fast rather than queue (a waiting caller blocks its subscribing thread)
     instances: { <alias>: { base-config: lap-backend }, ... }
   circuitbreaker:
     configs:
@@ -420,6 +427,20 @@ resilience4j:
         cancel-running-future: true
     instances: { <alias>: { base-config: lap-backend }, ... }   # EVERY alias, or the start fails
 ```
+
+- **The bulkheads partition the shared pool.** `sum(max-concurrent-calls)` over the mesh aliases must not exceed
+  `app.mesh.defaults.transport.max-connections`; otherwise the excess queues for a connection instead of being
+  shed with a named `BulkheadFullException`, and the pending-acquire timeout that follows is a **failure** on
+  the breaker of whichever backend is waiting. `ResilienceConfigContractTest` fails the build when the reference
+  configuration or the test fixture breaks the rule; for a host's own configuration `MeshResilienceStartupGuard`
+  (veredium-core) logs a **WARN** at startup naming the sum, the pool size and every alias - not a failed start,
+  since an over-committed pool can be deliberate. The sum is conservative on this stack: Reactor Netty caps
+  connections per remote address, so an endpoint with its own `base-url` has a sub-pool of its own.
+- **Why `max-wait-duration: 0`.** A bulkhead that waits for a permit does so inside `subscribe()`, on the
+  subscribing thread, *before* the TimeLimiter's timer starts (Resilience4j's reactive bulkhead acquires before it
+  passes its subscription on; Reactor's `timeout` starts counting on that subscription). A waiting caller
+  therefore does not spend its budget - it parks a thread, possibly an event loop, for up to the wait, which no
+  timeout of the ladder bounds. Pinned in `ReactiveResilienceDecoratorTest`, together with the operator order.
 
 ### 3.2 How mesh customizes the registries
 
@@ -455,6 +476,19 @@ faults the client causes **itself**, matched on the thrown exception **and its c
 
 Deserialisation failures and validation violations never reach the breaker at all — they run in the `.map`
 **after** the R4j decoration, so the breaker only ever sees the raw HTTP outcome.
+
+### 3.4 The response contract: no empty success
+
+The `Mono<T>` of `get`/`post` emits exactly one value or an error. A 2xx answer **without a body** — a 204, or a
+200 with an empty entity — fails with `EmptyResponseBodyException` (veredium-core) naming the backend and the
+expected type. Like a deserialisation failure it is raised **after** the decoration: the breaker records the
+exchange as the success it was, and the client's error line reports the exception at WARN.
+
+> **Behaviour change (2026-10-21).** Before, such an answer completed the `Mono` **empty**: no error line, and a
+> `NoSuchElementException` out of the caller's `awaitSingle()` that named neither the backend nor the cause —
+> while the blocking client failed the same answer with a Jackson parse error. A caller that relied on the empty
+> completion (`awaitSingleOrNull()`, `switchIfEmpty`) now receives the exception and has to handle it instead.
+> Pinned in `ResilientWebClientIntegrationTest` with a 204 and an empty 200.
 
 ---
 
@@ -515,6 +549,12 @@ logging:
   the host registered with Micrometer's context propagation (legatium ADR-0010). A coroutine `MDCContext` alone
   does not reach it — the host registers an accessor per key it wants on the event; the recipe is pinned in the
   same test.
+- **`ResilientWebClient`'s own transport lines** (the error, cancellation and closing lines, and the report-only
+  validation line) need no accessor: each subscription snapshots the caller's MDC on the subscribing thread and
+  writes those lines under it on the event loop, restoring the loop's own MDC afterwards
+  (`ClientCallLog.withMdc`). They carry the caller's correlation keys whatever the host configured — with or
+  without the propagation hook of §1.3. Pinned in `ResilientWebClientIntegrationTest` for a plain subscriber and
+  for a coroutine `MDCContext`.
 - Every other key and its default: the library's `docs/adapter-logging-reference.yml`.
 
 ### 4.2 The central observation disable-filter (`management.observations.*`)
@@ -548,7 +588,9 @@ The module refuses to start (or fails at first use) rather than run mis-configur
 | Colliding aliases or triplets | `MeshProperties.init` | binding fails, names the duplicates |
 | Ladder cannot form (see §2.7 guards) | `ResolvedTimeouts.init` | binding fails, prefixed with the triplet |
 | `create()` for an alias with no mesh endpoint | `ResilientWebClientFactory` | `IllegalStateException` at first use |
-| `sum(bulkhead max-concurrent-calls) > max-connections` | `ResilienceConfigContractTest` | test fails |
+| `sum(bulkhead max-concurrent-calls) > max-connections` in the reference configuration or the test fixture | `ResilienceConfigContractTest` | build fails |
+| `sum(bulkhead max-concurrent-calls) > max-connections` in a host's configuration | `MeshResilienceStartupGuard` (veredium-core) | **WARN** at startup naming both numbers; the context starts |
+| A mesh alias undeclared under one of the three `resilience4j.*.instances` | `MeshResilienceStartupGuard` (and `ResilienceConfigContractTest` for the reference) | context start fails, names the key |
 
 ---
 
@@ -560,7 +602,7 @@ logging:
     adapter-http-exchange: INFO                    # the exchange stream (§4.1); WARN keeps only the failures
     eu.inqudium.legatium.webclient.logging: WARN   # the library's own logger
 
-adapter-logging:                                   # §4.1 - shown here as shipped; every other key is the library default
+adapter-logging:                                   # §4.1 - the values explained there; every other key is the library default
   enabled: true
   request-headers:
     includes: ["*"]
@@ -581,8 +623,8 @@ app:
       max-life-time: 5m
       evict-in-background: 30s
     observability:
-      http-observation-enabled: true           # §1.3 shipped ON (also flips the JVM context-propagation hook)
-    validation:                                # §1.4 shipped ON, report only; exempt per alias
+      http-observation-enabled: true           # §1.3 reference ON (also flips the JVM context-propagation hook)
+    validation:                                # §1.4 reference ON, report only; exempt per alias
       enabled: true
       fail-on-violation: false
       endpoints: {}
@@ -600,7 +642,7 @@ app:
         individual-request-timeout-ms: 400
 
 resilience4j:                                  # §3 (instance keys = derived aliases; declared explicitly)
-  # bulkhead / circuitbreaker / timelimiter as in src/main/resources/application.yml
+  # bulkhead / circuitbreaker / timelimiter as in the reference configuration, src/test/resources/application.yml
 ```
 
 ---
@@ -612,4 +654,6 @@ resilience4j:                                  # §3 (instance keys = derived al
 - `legatium/docs/GUIDE.md` and `legatium-webclient-logging/docs/GUIDE.md` (outside this repository) — the library that writes the exchange event.
 - [metrics.md](metrics.md) — the emitted metrics and their cardinality.
 - `../../sync-bridge/docs/jvm-sidecar/timeout-leiter-mesh-call-muster.md` — the ladder rationale and the sidecar twin.
-- The shipped `src/main/resources/application.yml` is the authoritative live example.
+- The reference configuration `src/test/resources/application.yml` is the authoritative example: a test resource,
+  not part of the artefact, pinned by `ResilienceConfigContractTest`, `MeshResilienceShippedConfigTest`,
+  `LegatiumExchangeLoggingIntegrationTest` and `WebClientPropertiesTest`.

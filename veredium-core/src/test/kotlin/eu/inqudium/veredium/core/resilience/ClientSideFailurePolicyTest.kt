@@ -34,7 +34,7 @@ class ClientSideFailurePolicyTest {
         fun `should require the buffer-limit type to be one of the client-side failures`() {
             // What is tested: the one consistency rule the policy's constructor enforces - the type asked for by
             //   isBufferLimitFailure must also be discounted by isClientSideFailure.
-            // How success is judged: a policy whose limit type is missing from its list is rejected at construction.
+            // Success criteria: a policy whose limit type is missing from its list is rejected at construction.
             // Why it matters: a stack that named a limit type without listing it would log "raise the limit" for a
             //   failure its breaker still charges to the backend - two consumers of one policy disagreeing, which is
             //   exactly what the policy object exists to rule out.
@@ -49,12 +49,15 @@ class ClientSideFailurePolicyTest {
         fun `should tell the buffer-limit failure apart from the other client-side failures`() {
             // What is tested: the narrow sibling - isBufferLimitFailure matches the limit type (bare and as a cause)
             //   and nothing else on the list.
-            // How success is judged: the limit failure answers true on both predicates, a bulkhead rejection only on
+            // Success criteria: the limit failure answers true on both predicates, a bulkhead rejection only on
             //   the broad one.
             // Why it matters: only the limit failure warrants a line naming a configuration value; a bulkhead
             //   rejection says nothing about the response and must not trigger that line.
+            //
+            // Given: the shared test policy
             val policy = TestVerdicts.clientSideFailure
 
+            // When / Then
             assertThat(policy.isBufferLimitFailure(TestBufferLimitException())).isTrue()
             assertThat(policy.isBufferLimitFailure(IllegalStateException("wrapped", TestBufferLimitException()))).isTrue()
             assertThat(policy.isClientSideFailure(TestBufferLimitException())).isTrue()
@@ -68,7 +71,7 @@ class ClientSideFailurePolicyTest {
         @Test
         fun `should install the ignore even when the mesh circuit-breaker toggle is off`() {
             // What is tested: that the verdict is NOT gated on ResolvedTimeouts.circuitBreakerEnabled.
-            // How success is judged: with the toggle at its default (off), the resulting config still ignores a
+            // Success criteria: with the toggle at its default (off), the resulting config still ignores a
             //   BulkheadFullException.
             // Why it matters: the toggle governs only whether mesh DERIVES the slow-call knobs, while the breaker
             //   is in the call path unconditionally. Gating this on the toggle would leave the invariant unmet in
@@ -92,7 +95,7 @@ class ClientSideFailurePolicyTest {
             //   the builder holds - which is what the operator's `ignore-exceptions` became - so a naive
             //   customizer would silently drop it; the customizer reads the configured predicate first and ORs
             //   it back in.
-            // How success is judged: after the customizer the config ignores BOTH the operator's exception and
+            // Success criteria: after the customizer the config ignores BOTH the operator's exception and
             //   the bulkhead rejection, and still records an unrelated one.
             // Why it matters: the customizer shapes a config it does not own. Clobbering an operator's ignore
             //   list would silently re-arm the breaker against errors they had deliberately excluded - a
@@ -115,7 +118,9 @@ class ClientSideFailurePolicyTest {
         fun `should ignore a client-side failure bare and when it arrives wrapped`() {
             // What is tested: that a listed failure is discounted in the shape it is thrown AND in the shape a
             //   wrapper would give it.
-            // Why the second shape: both stacks wrap - the blocking client every IOException of an exchange, the
+            // Success criteria: the customized breaker ignores both the bare TestBufferLimitException and the
+            //   same instance two causes deep behind an IllegalStateException.
+            // Why it matters: both stacks wrap - the blocking client every IOException of an exchange, the
             //   reactive client a codec failure into a response exception reporting 200 - and the reactive stack
             //   saw exactly such a wrapping turn a class-based ignore into a silent no-op. Resilience4j's
             //   ignoreExceptions(Class...) matches the THROWN type only; only walking the cause chain survives a
@@ -136,6 +141,12 @@ class ClientSideFailurePolicyTest {
 
         @Test
         fun `should customize every configured mesh backend`() {
+            // What is tested: that `CustomizedRegistries.circuitBreakers` installs the client-side-failure ignore
+            //   for EVERY mesh endpoint, not only the first.
+            // Success criteria: with two endpoints, the breaker of each derived alias ignores a bulkhead rejection.
+            // Why it matters: one customizer is registered per alias; a loop that stopped early would leave a
+            //   backend whose breaker charges its own bulkhead's rejections to the backend and opens under load.
+
             // Given: two endpoints, so there is one customizer per alias rather than a single one
             val registry = CircuitBreakerRegistry.ofDefaults()
             val props =
@@ -161,7 +172,7 @@ class ClientSideFailurePolicyTest {
             // What is tested: that the verdict and the mesh derivation do not compete - they are ONE customizer
             //   per alias (Resilience4j admits exactly one per instance name), so there is no order in which one
             //   could undo the other.
-            // How success is judged: with the circuit-breaker derivation enabled, the config carries the derived
+            // Success criteria: with the circuit-breaker derivation enabled, the config carries the derived
             //   duration (800ms at individual 1000, maxRetries 0), the 100% pin of the inversion case, AND the
             //   ignore.
             // Why it matters: the former two-registrar design of the reactive stack needed order-independence
@@ -190,14 +201,20 @@ class ClientSideFailurePolicyTest {
 
         @Test
         fun `should still discount a client-side failure at the deepest position the walk reaches`() {
-            // The walk inspects MAX_CAUSE_DEPTH candidates, the thrown exception being the first. A root cause
-            // at exactly that last position must still be found - otherwise the effective depth is one less
-            // than the constant says, and nobody would notice.
+            // What is tested: the cause walk at its deepest reach - it inspects MAX_CAUSE_DEPTH candidates, the
+            //   thrown exception being the first, and the client-side failure sits at exactly that last position.
+            // Success criteria: a TestBufferLimitException behind MAX_CAUSE_DEPTH - 1 wrappers is ignored.
+            // Why it matters: a root cause at exactly that last position must still be found - otherwise the
+            //   effective depth is one less than the constant says, and nobody would notice.
+            //
+            // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
             CustomizedRegistries.circuitBreakers(registry, propsFor())
 
+            // When
             val atLimit = nested(ClientSideFailurePolicy.MAX_CAUSE_DEPTH - 1, TestBufferLimitException())
 
+            // Then
             assertThat(ignores(registry, alias, atLimit)).isTrue()
         }
 
@@ -205,32 +222,37 @@ class ClientSideFailurePolicyTest {
         fun `should stop looking one layer beyond the bound`() {
             // What is tested: that the bound is real - a client-side failure buried DEEPER than the walk goes is
             //   not found, and the failure is therefore recorded.
-            // How success is judged: the same chain as above with one more wrapper is NOT ignored.
+            // Success criteria: the same chain as above with one more wrapper is NOT ignored.
             // Why it matters: this documents the accepted limitation rather than leaving it to be discovered.
             //   Discounting is the exception to normal breaker behaviour, so falling back to "record it" past
             //   the bound is the safe direction - a breaker that counts a client-side failure trips slightly
             //   early, whereas an unbounded walk on a cyclic chain would hang the predicate inside the
             //   breaker's error hook, on a request-serving thread.
+            //
+            // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
             CustomizedRegistries.circuitBreakers(registry, propsFor())
 
+            // When
             val beyondLimit = nested(ClientSideFailurePolicy.MAX_CAUSE_DEPTH, TestBufferLimitException())
 
+            // Then
             assertThat(ignores(registry, alias, beyondLimit)).isFalse()
         }
 
         @Test
         @Timeout(value = 10, unit = TimeUnit.SECONDS)
         fun `should terminate on a cyclic cause chain`() {
-            // 1. What is tested: that a cause chain which loops back on itself does not spin the walk.
-            // 2. How success is judged: the predicate returns a verdict at all (false - no client-side failure
-            //    is in the cycle). A regression here would not fail the assertion but spin forever; the @Timeout
-            //    turns that spin into a test failure instead of a hung build.
-            // 3. Why it matters: the walk's own guard (`takeIf { it !== candidate }`) only catches a throwable
-            //    that is its OWN cause; a two-element A -> B -> A cycle passes straight through it and is
-            //    stopped by the depth bound alone. Since this predicate runs inside the circuit breaker's error
-            //    hook on a request-serving thread, a spin there would not be a slow test - it would wedge the
-            //    caller.
+            // What is tested: that a cause chain which loops back on itself does not spin the walk.
+            // Success criteria: the predicate returns a verdict at all (false - no client-side failure
+            //   is in the cycle). A regression here would not fail the assertion but spin forever; the @Timeout
+            //   turns that spin into a test failure instead of a hung build.
+            // Why it matters: the walk's own guard (`takeIf { it !== candidate }`) only catches a throwable
+            //   that is its OWN cause; a two-element A -> B -> A cycle passes straight through it and is
+            //   stopped by the depth bound alone. Since this predicate runs inside the circuit breaker's error
+            //   hook on a request-serving thread, a spin there would not be a slow test - it would wedge the
+            //   caller.
+            //
             val registry = CircuitBreakerRegistry.ofDefaults()
             CustomizedRegistries.circuitBreakers(registry, propsFor())
 
@@ -240,6 +262,7 @@ class ClientSideFailurePolicyTest {
             first.initCause(second)
             second.initCause(first)
 
+            // When / Then
             assertThat(ignores(registry, alias, first)).isFalse()
         }
 

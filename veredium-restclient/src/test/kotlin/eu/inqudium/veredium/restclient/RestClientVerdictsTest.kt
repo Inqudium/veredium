@@ -64,7 +64,7 @@ class RestClientVerdictsTest {
         fun `should not count a bulkhead rejection as a circuit-breaker failure`() {
             // What is tested: end to end through the real decorator - when the bulkhead rejects a call because
             //   its only permit is taken, the circuit breaker must not record that rejection as a failure.
-            // How success is judged: the second call fails with a BulkheadFullException (proving the rejection
+            // Success criteria: the second call fails with a BulkheadFullException (proving the rejection
             //   really happened, so the assertion below is not vacuous) while the breaker's failed-call counter
             //   stays at zero.
             // Why it matters: this is the escalation path. Counting the rejection means a transient concurrency
@@ -109,7 +109,7 @@ class RestClientVerdictsTest {
             // What is tested: the fourth client-side failure, through the real decorator - a call made after the
             //   decorator's executor was shut down (context teardown) is refused with a RejectedExecutionException,
             //   and the breaker must not record that refusal as a failure of the backend.
-            // How success is judged: the call ends in a RejectedExecutionException (so the assertion below is not
+            // Success criteria: the call ends in a RejectedExecutionException (so the assertion below is not
             //   vacuous) while the breaker's failed-call counter stays at zero.
             // Why it matters: the submission happens INSIDE the callable the breaker wraps (so a short-circuited
             //   call submits nothing), which puts the refusal on the breaker's path like a transport fault;
@@ -136,7 +136,7 @@ class RestClientVerdictsTest {
             // What is tested: the third client-side failure, through the real decorator - a caller that stops
             //   waiting (its own deadline, a cancelled scope) gets an InterruptedException, and the breaker must
             //   not record that as a failure of the backend.
-            // How success is judged: the interrupted caller's call ends in an InterruptedException (so the
+            // Success criteria: the interrupted caller's call ends in an InterruptedException (so the
             //   assertion below is not vacuous) while the breaker's failed-call counter stays at zero; the
             //   worker it abandoned is cancelled, as the decorator's own tests pin.
             // Why it matters: the reactive twin's breaker never sees a cancellation - a cancelled subscription
@@ -179,7 +179,7 @@ class RestClientVerdictsTest {
         fun `should still count a genuine backend error as a circuit-breaker failure`() {
             // What is tested: the counterpart that keeps the tests above honest - the customized config must ignore
             //   ONLY the client-side failures, not disable failure recording as such.
-            // How success is judged: a plain backend error through the same decorated pipeline advances the
+            // Success criteria: a plain backend error through the same decorated pipeline advances the
             //   failed-call counter to exactly one.
             // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
             //   it disables the protection silently - would satisfy the zero-failure assertion above.
@@ -207,6 +207,10 @@ class RestClientVerdictsTest {
             //   ignore into a silent no-op - present in the code, visible in review, doing nothing. Resilience4j's
             //   ignoreExceptions(Class...) matches the THROWN type only; only walking the cause chain survives a
             //   wrapper, so the walk is pinned here against the wrapper the client would use.
+            // Success criteria: the customized breaker ignores both the bare and the wrapped exception, and the
+            //   policy recognises the wrapped one as a buffer-limit failure.
+            // Why it matters: an ignore that matched the bare type only would charge the backend for this
+            //   client's own refusal the moment a wrapper appeared - and nothing would show it.
             //
             // Given
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
@@ -226,7 +230,7 @@ class RestClientVerdictsTest {
         fun `should still record a genuine backend failure that carries a large error body`() {
             // What is tested: the boundary of the cause walk - that discounting buffer failures does not leak
             //   into discounting real ones.
-            // How success is judged: a 5xx is recorded, including one whose error body is large. The client's
+            // Success criteria: a 5xx is recorded, including one whose error body is large. The client's
             //   reader TRUNCATES an error body rather than rejecting it (BoundedBodyReaderTest), so such a
             //   response yields a plain HttpServerErrorException with NO limit exception underneath.
             // Why it matters: this is the failure mode that would make the whole breaker useless - if a 5xx
@@ -258,13 +262,14 @@ class RestClientVerdictsTest {
             // What is tested: the one thing this stack supplies to the shared rule - the status reader - against
             //   the exact types the client throws: HttpClientErrorException.<Status> for a 4xx,
             //   HttpServerErrorException.<Status> for a 5xx, both subclasses of RestClientResponseException.
-            // How success is judged: a benign 4xx is expected, 408/429 and every 5xx are not, and a throwable
+            // Success criteria: a benign 4xx is expected, 408/429 and every 5xx are not, and a throwable
             //   that carries no status is not either.
             // Why it matters: a reader keyed on the wrong type would make every 4xx an operational fault again -
             //   the WARN-with-stack-trace noise and the breaker charging business cases to the backend that the
             //   policy exists to end.
+            //
+            // Given / When / Then: a truth table over the shapes the client throws
             val policy = RestClientVerdicts.httpExchangeError
-
             assertThat(policy.isExpectedClientError(response(404))).isTrue()
             assertThat(policy.isExpectedClientError(response(400))).isTrue()
             assertThat(policy.isExpectedClientError(response(408))).isFalse()
@@ -276,9 +281,14 @@ class RestClientVerdictsTest {
 
         @Test
         fun `should not count a 404 answer as a circuit-breaker failure`() {
-            // End to end through the real decorator rather than against the predicate: the breaker's error hook
-            // records every error and defers the record/ignore decision to the config, so this is what proves
-            // the verdict reaches the instance the decorator actually uses.
+            // What is tested: a 404 through the real decorator and the customized breaker, rather than against
+            //   the predicate alone.
+            // Success criteria: the caller still gets `HttpClientErrorException.NotFound`, and the breaker's
+            //   failed-call counter stays at zero.
+            // Why it matters: the breaker's error hook records every error and defers the record/ignore decision
+            //   to the config, so this is what proves the verdict reaches the instance the decorator actually
+            //   uses - a 404-heavy lookup must not open the circuit.
+            //
 
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
@@ -296,8 +306,11 @@ class RestClientVerdictsTest {
 
         @Test
         fun `should still count a 500 answer as a circuit-breaker failure`() {
-            // Without this, a breaker that recorded nothing at all - the far worse defect, since it disables the
-            // protection silently - would satisfy the zero-failure assertion above.
+            // What is tested: a 500 through the same decorator and customized breaker.
+            // Success criteria: the caller gets the server-error exception and the failed-call counter is one.
+            // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
+            //   it disables the protection silently - would satisfy the zero-failure assertion above.
+            //
 
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()

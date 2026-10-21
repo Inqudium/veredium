@@ -194,8 +194,11 @@ class ResilientRestClientFactory(
      * connections idle for longer than `maxIdleTime` and connections past their time-to-live are closed. One
      * schedule for the one pool - Apache's own `evictIdleConnections` would start a thread per HttpClient, i.e.
      * one per endpoint, for the same pool. `null` when the interval is zero, which is "off".
+     *
+     * `internal` so the factory's integration test can see that [shutdown] stops it: the scheduler runs on a
+     * virtual thread, which no thread listing shows.
      */
-    private val evictor: ScheduledExecutorService? =
+    internal val evictor: ScheduledExecutorService? =
         properties.pool.evictInBackground
             .takeUnless { it.isZero }
             ?.let { interval ->

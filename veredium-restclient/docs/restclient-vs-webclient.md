@@ -30,8 +30,6 @@ so the differences are decisions on record rather than surprises in production.
 | `BaseAdapter`                         | `BaseAdapter` (`eu.inqudium.veredium.core`) | **Shared, not copied.** The two budgets an adapter publishes, one contract for both stacks. |
 | legatium-webclient-logging            | legatium-restclient-logging            | Same `adapter-logging.*` surface, same `adapter_*` fields, same attribute constants. |
 | `WebClientMetrics`                    | `RestClientMetrics`                    | `restclient.response.body.size{adapter}`; no URI tagger (§4). |
-| `adapter.{Access,InvolvedParty,ProductAgreement}Adapter` | same names, same package | Same interfaces minus `suspend`; `@throws RestClientResponseException`. |
-| `adapter.{agreement,party,profile}` DTOs | copied verbatim, same package | Jackson annotations and Bean Validation constraints unchanged. |
 
 The `mesh` and `resilience` packages were copies at first - a self-contained twin, with "extract at the third
 stack" as the rule. That misread the Rule of Three: it guards against abstracting from one example, whereas here
@@ -39,11 +37,10 @@ two real, identical copies were maintained by one person and had started to dive
 They are one module now, `veredium-core`, and each stack keeps only its client, decorator, factory and its
 verdicts object ([ADR-0001](../../docs/adr/ADR-0001-one-stack-neutral-core-module.md)).
 
-The adapters and DTOs keep the twin's **package and class names** (`eu.inqudium.veredium`,
-`.agreement`, `.party`, `.profile`): they are the same API contract, and a consumer switches stacks by swapping
-the dependency and dropping `suspend` from its call sites. The consequence is deliberate and worth stating: the
-two modules are alternatives, not companions — both on one classpath would duplicate every adapter and DTO class
-and clash on bean names. Only the client infrastructure (`adapter.web` versus `adapter.rest`) is named per stack.
+The origin project's adapters and DTOs (`AccessProfileAdapter` and its siblings, the `agreement`/`party`/`profile`
+DTOs) did not come along: veredium is the client infrastructure only, and a host writes its adapters over
+`ResilientRestClient` or `ResilientWebClient` and implements `BaseAdapter`. The two client modules are
+alternatives, not companions - each brings its own factory and configuration, and a host picks one stack.
 
 ---
 
@@ -90,9 +87,11 @@ not a second pipeline - it is the core decorator's `decorateAsync` (ADR-0002), w
 virtual thread; deserialisation, validation and the log lines then run there, with the same verdicts. Every
 outcome arrives on the future, unwrapped - a serialisation failure included, which the blocking form throws out
 of `post` instead - and `cancel` on the future abandons the exchange exactly as interrupting a blocking caller
-does (worker interrupted, permit released, the `Cancelled request` line at DEBUG). The origin module's
-asynchronous API was dropped at the port for want of a consumer (architecture review 2026-10-19, finding 3);
-this one exists because the mechanism exists anyway and the client is the natural place to expose it.
+does (worker interrupted, permit released, the `Cancelled request` line at DEBUG). Only `cancel` does:
+`orTimeout`/`completeOnTimeout` complete that one future and leave the exchange running, permit and connection
+included, until it ends or the TimeLimiter budget expires - a caller wanting a shorter deadline cancels the
+future itself. The origin module's asynchronous API was dropped at the port for want of a consumer
+(architecture review 2026-10-19, finding 3); this one exists because the mechanism exists anyway and the client is the natural place to expose it.
 
 ---
 
@@ -185,9 +184,9 @@ app:
       max-life-time: 5m              # 0 = unbounded
       evict-in-background: 30s       # 0 = off
     observability:
-      http-observation-enabled: true # shipped ON (code default false)
+      http-observation-enabled: true # ON in the reference config (code default false)
     validation:
-      enabled: true                  # shipped ON, report only (code defaults: off / fail)
+      enabled: true                  # ON, report only, in the reference config (code defaults: off / fail)
       fail-on-violation: false
       endpoints: {}
     # user-agent: my-service/2.3     # the host's own token instead of veredium/<version>
@@ -213,7 +212,9 @@ module:
   unwrapping, bulkhead permit on the worker, TimeLimiter release + worker interrupt, caller interruption,
   short-circuit without a worker.
 - `BoundedBodyReaderTest` — both readings of the limit, the inclusive boundary, and that an oversized body is not
-  drained into memory.
+  drained into memory - each also through short and zero-length reads and across the reader's buffer growth;
+  `BoundedBodyReaderFuzzTest` (Jazzer, `src/test/java`) explores the same invariants with arbitrary bodies, limits,
+  declared lengths and read patterns.
 - `RestClientVerdictsTest` — the verdicts through the real decorator and against this stack's exception shapes
   (Spring's status-specific subclasses, the `ResourceAccessException` wrapper, the four client-side failures of
   the hand-off); `MeshResilienceShippedConfigTest` — this module's reference configuration booted with the
@@ -221,15 +222,19 @@ module:
   directions of its failure) is pinned once, in `veredium-core`'s test suite, with a stand-in stack; the
   reactive twin carries the same two classes (`WebClientVerdictsTest`, `MeshResilienceShippedConfigTest`).
 
-The adapter tests (`AdapterIntegrationTest`, `ResponseValidationTest`, `ResponseDeserialisationContractTest`,
-`MeshAliasContractTest`, `ResilienceConfigContractTest`, `LoggingLevelContractTest`) are ports with the
-coroutine wrappers removed and the thrown type changed to Spring's status-specific exceptions.
+The origin project's adapter tests did not come along: veredium ships no adapters, so there is nothing for an
+`AdapterIntegrationTest` to test. The response contract those tests pinned per adapter - deserialisation,
+validation in both postures, the empty body - is pinned once on the client, in `ResilientRestClientIntegrationTest`.
+What was ported are the configuration contract tests, bound to both the reference configuration and the fixture
+(`ConfigurationFiles`): `LoggingLevelContractTest` (the exchange logger's level line against its name) and
+`ResilienceConfigContractTest` (every mesh alias declared on all three Resilience4j layers, and
+`sum(max-concurrent-calls) <= max-connections`). That a host's own configuration keeps the second invariant is
+checked at startup instead, where both numbers are known: `MeshResilienceStartupGuard` WARNs when it does not.
 
-**No Helm twin test here.** The twin carries `HelmTwinConsistencyTest` with a vendored copy of the
+**No Helm consistency test.** The origin project carried a `HelmTwinConsistencyTest` with a vendored copy of the
 `helm-mesh-timeouts` chart, shelling out to the `helm` binary to compare the chart's derived sidecar `global`
-with the Kotlin ladder. This module does not: the proof concerns the one chart and the one derivation, both of
-which the twin already pins, and a vendored copy can only ever prove agreement with itself, never with the chart
-that is deployed. The derived numbers of the shared ladder are pinned by `veredium-core`'s `MeshPropertiesDerivationTest`.
+with the Kotlin ladder. Neither veredium module carries it: a vendored copy can only ever prove agreement with
+itself, never with the chart that is deployed. The derived numbers of the shared ladder are pinned by `veredium-core`'s `MeshPropertiesDerivationTest`.
 
 ---
 

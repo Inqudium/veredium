@@ -46,7 +46,8 @@ object RestClientVerdicts {
      * exchange into a `ResourceAccessException`; the limit exception is thrown bare today, but the predicate
      * must keep matching if a wrapper ever gets in between. A 5xx whose error body exceeds the buffer limit
      * yields a plain `HttpServerErrorException` - the reader TRUNCATES an error body instead of rejecting it -
-     * so it is still recorded; `ClientSideFailureCustomizerTest` pins exactly that.
+     * so it is still recorded; `RestClientVerdictsTest` pins exactly that, and `ResilientRestClientIntegrationTest`
+     * pins it against the real reader's output.
      */
     val clientSideFailure: ClientSideFailurePolicy =
         ClientSideFailurePolicy(

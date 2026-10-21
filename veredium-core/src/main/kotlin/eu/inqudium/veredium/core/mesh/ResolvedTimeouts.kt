@@ -93,22 +93,49 @@ data class ResolvedTimeouts(
     val timeLimiterTimeout: Duration = responseTimeout.plusMillis(transport.timeLimiterMargin)
 
     init {
-        require(individualRequestTimeoutMs >= 1) { "[$triplet] individualRequestTimeoutMs must be >= 1" }
-        require(maxRetries >= 0) { "[$triplet] maxRetries must be >= 0" }
-        require(responseTimeout.toMillis() > sidecarGlobalMs) { "[$triplet] responseTimeout must be > sidecar global" }
-        require(margins.p99MarginMs in 0 until individualRequestTimeoutMs) {
-            "[$triplet] p99MarginMs must be in 0..<individualRequestTimeoutMs (so the derived p99 single-attempt latency is >= 1)"
+        // Every message names the YAML key, the endpoint and the offending value: a ladder that cannot form is
+        // reported at the first resolveAll(), far from the file the value came from. A margin is the merged
+        // value - `app.mesh.defaults.margins` with this endpoint's partial `margins` override on top - so the
+        // message names both places it can come from.
+        require(individualRequestTimeoutMs >= 1) {
+            "[$triplet] individual-request-timeout-ms must be >= 1, but was $individualRequestTimeoutMs"
         }
-        require(margins.healthyRetries >= 0) { "[$triplet] healthyRetries must be >= 0" }
-        require(margins.slowCallBackoffMs >= 0) { "[$triplet] slowCallBackoffMs must be >= 0" }
+        require(maxRetries >= 0) { "[$triplet] max-retries must be >= 0, but was $maxRetries" }
+        // Rationale: a negative global margin passes every other guard and pulls the sidecar's `global` below the
+        // worst-case sequential run of its own attempts - the sidecar would cut off its last retry - and, far
+        // enough, drives the slow-call cap to zero or below, which Resilience4j then rejects in its builder with
+        // a message that names neither the key nor the endpoint.
+        require(margins.globalMarginMs >= 0) {
+            "[$triplet] margins.global-margin-ms must be >= 0, but was ${margins.globalMarginMs} ($MARGIN_SOURCES)"
+        }
+        // Invariant: responseTimeout > global, stated on the margin that produces it.
+        require(margins.responseTimeoutMarginMs >= 1) {
+            "[$triplet] margins.response-timeout-margin-ms must be >= 1 (the response timeout must sit above the " +
+                "sidecar's global), but was ${margins.responseTimeoutMarginMs} ($MARGIN_SOURCES)"
+        }
+        require(margins.p99MarginMs in 0 until individualRequestTimeoutMs) {
+            "[$triplet] margins.p99-margin-ms must be in 0..<individual-request-timeout-ms " +
+                "(so the derived p99 single-attempt latency is >= 1), but was ${margins.p99MarginMs} " +
+                "against individual-request-timeout-ms=$individualRequestTimeoutMs ($MARGIN_SOURCES)"
+        }
+        require(margins.healthyRetries >= 0) {
+            "[$triplet] margins.healthy-retries must be >= 0, but was ${margins.healthyRetries} ($MARGIN_SOURCES)"
+        }
+        require(margins.slowCallBackoffMs >= 0) {
+            "[$triplet] margins.slow-call-backoff-ms must be >= 0, but was ${margins.slowCallBackoffMs} ($MARGIN_SOURCES)"
+        }
         require(margins.slowCallCapFraction > 0.0 && margins.slowCallCapFraction < 1.0) {
-            "[$triplet] slowCallCapFraction must be in (0,1) (else the slowCall cap is <= 0 or >= global, making detection inert)"
+            "[$triplet] margins.slow-call-cap-fraction must be in (0,1) (else the slowCall cap is <= 0 or >= global, " +
+                "making detection inert), but was ${margins.slowCallCapFraction} ($MARGIN_SOURCES)"
         }
         // NOTE: the ladder invariant "timeLimiter margin > connect + pendingAcquire" (see the pattern doc, section
         // 1.2) needs no runtime check here: transport.timeLimiterMargin IS connect + pendingAcquire + a positive
         // headroom, so it can never race the responseTimeout regardless of how the transport caps are configured.
     }
 }
+
+/** Where a margin of [ResolvedTimeouts] comes from - named in every margin guard's message. */
+private const val MARGIN_SOURCES = "app.mesh.defaults.margins, overridden per endpoint by app.mesh.endpoints[].margins"
 
 /**
  * Logs the fully derived per-endpoint mesh timeout ladder once, on application startup.
