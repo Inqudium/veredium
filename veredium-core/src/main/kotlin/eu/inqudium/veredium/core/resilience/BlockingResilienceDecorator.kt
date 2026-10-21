@@ -76,7 +76,7 @@ import java.util.concurrent.atomic.AtomicReference
  *    would be a second hand-off next to the one the TimeLimiter already needs. The semaphore with a zero wait
  *    rejects at once, the virtual worker is interruptible, and the only concurrency limits in the call path stay
  *    the configured, named and metered ones. The long form is `veredium-restclient/docs/timeouts-bulkheads-threads.md`,
- *    section 4.1.
+ *    "Why a semaphore bulkhead over an unbounded executor, and not a `ThreadPoolBulkhead`".
  * 2. **The caller's context.** The worker starts with an empty MDC and no current observation, so everything
  *    logged there would lose the caller's correlation keys, and an observation opened on the worker would start
  *    a detached root instead of nesting under the caller's span. [propagate] carries both across: the caller's

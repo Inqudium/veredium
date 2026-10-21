@@ -75,7 +75,7 @@ class ResilientRestClientFactory(
     // Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; Spring injects
     // the auto-configured factory when a Bean Validation provider is on the classpath. Absent -> validation
     // cannot run for ANY backend, whatever the properties say, which the startup line reports rather than
-    // leaving it to be discovered. See [ResponseValidation] for why the FACTORY rather than a Validator.
+    // leaving it to be discovered. See `ResponseValidation` for why the FACTORY rather than a Validator.
     validatorFactory: ValidatorFactory? = null,
     // Nullable like the two above: an optional dependency, so a direct (test) construction and a minimal
     // context both work without one. Absent -> neither the pool meters nor the response-size summary are
