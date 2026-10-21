@@ -43,7 +43,7 @@ class WebClientVerdictsTest {
         fun `should not count a bulkhead rejection as a circuit-breaker failure`() {
             // What is tested: end to end through the real decorator - when the bulkhead rejects a call because
             //   its only permit is taken, the circuit breaker must not record that rejection as a failure.
-            // How success is judged: the second call fails with a BulkheadFullException (proving the rejection
+            // Success criteria: the second call fails with a BulkheadFullException (proving the rejection
             //   really happened, so the assertion below is not vacuous) while the breaker's failed-call counter
             //   stays at zero.
             // Why it matters: this is the escalation path. Counting the rejection means a transient concurrency
@@ -78,7 +78,7 @@ class WebClientVerdictsTest {
         fun `should still count a genuine backend error as a circuit-breaker failure`() {
             // What is tested: the counterpart that keeps the test above honest - the customized config must ignore
             //   ONLY the client-side failures, not disable failure recording as such.
-            // How success is judged: a plain backend error through the same decorated pipeline advances the
+            // Success criteria: a plain backend error through the same decorated pipeline advances the
             //   failed-call counter to exactly one.
             // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
             //   it disables the protection silently - would satisfy the zero-failure assertion above.
@@ -103,7 +103,7 @@ class WebClientVerdictsTest {
         @Test
         fun `should ignore a codec buffer-limit failure even though it arrives wrapped as a 200 response`() {
             // What is tested: that the buffer-limit failure is discounted in the shape it ACTUALLY arrives in.
-            // How success is judged: a WebClientResponseException carrying a DataBufferLimitException as its
+            // Success criteria: a WebClientResponseException carrying a DataBufferLimitException as its
             //   CAUSE is ignored - not only the bare exception, which is not what the pipeline ever sees.
             // Why it matters: Spring wraps a codec failure on an otherwise successful response into a
             //   WebClientResponseException reporting 200 OK, with the real cause underneath. Resilience4j's
@@ -133,7 +133,7 @@ class WebClientVerdictsTest {
         fun `should still record a genuine backend failure that carries a large error body`() {
             // What is tested: the boundary of the cause walk - that discounting buffer failures does not leak
             //   into discounting real ones.
-            // How success is judged: a 5xx is recorded, including one whose error body is large. Measured
+            // Success criteria: a 5xx is recorded, including one whose error body is large. Measured
             //   beforehand: such a response yields a plain WebClientResponseException with NO
             //   DataBufferLimitException underneath, because Spring does not fail on an oversized error body.
             // Why it matters: this is the failure mode that would make the whole breaker useless - if a 5xx
@@ -157,13 +157,16 @@ class WebClientVerdictsTest {
         fun `should read a WebClientResponseException as the client error it reports`() {
             // What is tested: the one thing this stack supplies to the shared rule - the status reader - against
             //   the exact type WebClient raises for a non-2xx answer.
-            // How success is judged: a benign 4xx is expected, 408/429 and every 5xx are not, and a throwable
+            // Success criteria: a benign 4xx is expected, 408/429 and every 5xx are not, and a throwable
             //   that carries no status is not either.
             // Why it matters: a reader keyed on the wrong type would make every 4xx an operational fault again -
             //   the WARN-with-stack-trace noise and the breaker charging business cases to the backend that the
             //   policy exists to end.
+            //
+            // Given
             val policy = WebClientVerdicts.httpExchangeError
 
+            // When / Then
             assertThat(policy.isExpectedClientError(response(404))).isTrue()
             assertThat(policy.isExpectedClientError(response(400))).isTrue()
             assertThat(policy.isExpectedClientError(response(408))).isFalse()
@@ -174,9 +177,14 @@ class WebClientVerdictsTest {
 
         @Test
         fun `should not count a 404 answer as a circuit-breaker failure`() {
-            // End to end through the real decorator rather than against the predicate: the breaker's error hook
-            // records every error and defers the record/ignore decision to the config, so this is what proves
-            // the verdict reaches the instance the decorator actually uses.
+            // What is tested: the benign-4xx verdict end to end through the real decorator rather than against
+            //   the predicate.
+            // Success criteria: a 404 in WebClient's shape still fails the call for the caller, while the
+            //   breaker's failed-call counter stays at zero.
+            // Why it matters: the breaker's error hook records every error and defers the record/ignore decision
+            //   to the config, so this is what proves the verdict reaches the instance the decorator actually
+            //   uses - not merely a predicate that would be right if it were installed.
+            //
 
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
@@ -194,8 +202,11 @@ class WebClientVerdictsTest {
 
         @Test
         fun `should still count a 500 answer as a circuit-breaker failure`() {
-            // Without this, a breaker that recorded nothing at all - the far worse defect, since it disables the
-            // protection silently - would satisfy the zero-failure assertion above.
+            // What is tested: the counterpart of the 404 case through the same decorated pipeline.
+            // Success criteria: a 500 fails the call and advances the failed-call counter to exactly one.
+            // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
+            //   it disables the protection silently - would satisfy the zero-failure assertion above.
+            //
 
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()

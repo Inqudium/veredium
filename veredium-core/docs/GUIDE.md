@@ -85,7 +85,9 @@ consults them as the last step of building each `instances.<alias>` entry, so th
 metric and health binders bind to is already the final one. `MeshResilienceStartupGuard` fails
 the context when an alias is not declared under all three `resilience4j.<layer>.instances` (the
 instance would silently run on the registry default) or when the customizer's effect is not
-observable on the instance the registry serves. Each stack's `*VerdictsConfig` `@Import`s
+observable on the instance the registry serves, and logs a WARN when the mesh bulkheads together
+admit more calls (`sum(max-concurrent-calls)`) than the shared pool has connections
+(`app.mesh.defaults.transport.max-connections`). Each stack's `*VerdictsConfig` `@Import`s
 `MeshTimeoutConfig`, so a host that scans its stack's package gets all of it.
 
 **The blocking decorator.** `BlockingResilienceDecorator` runs a `() -> T` as

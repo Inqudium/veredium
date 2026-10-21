@@ -39,7 +39,7 @@ import java.util.function.Supplier
  *    this factory produces; that the module toggle `http-observation-enabled=false` still switches the
  *    observation of THESE clients off although Boot wired the registry; and that a context without the
  *    builder bean fails to start rather than running silently on a bare builder.
- * 2. Success criterion: a marker header set by a test customizer arrives at a local WireMock backend; an
+ * 2. Success criteria: a marker header set by a test customizer arrives at a local WireMock backend; an
  *    `http.client.requests` meter appears in a `SimpleMeterRegistry` behind the context's `ObservationRegistry`
  *    when the toggle is on and does NOT appear when it is off; and the builder-less context's startup failure
  *    names `WebClient.Builder`.
@@ -150,6 +150,13 @@ class ResilientWebClientFactoryBuilderWiringTest {
     inner class `Host customizers` {
         @Test
         fun `should send the header a WebClientCustomizer bean of the host puts on Boot's builder`() {
+            // What is tested: that a host's own WebClientCustomizer reaches the clients of this factory.
+            // Success criteria: the marker header the customizer sets as a default header arrives at WireMock
+            //   on a request made through a client of the context's factory.
+            // Why it matters: before the factory cloned Boot's builder, every customizer of the host - a
+            //   correlation header, a custom observation convention, Boot's codec settings - reached every
+            //   WebClient of the host except these, and nothing at runtime said so.
+            //
             // Given: Boot's auto-configuration plus a host WebClientCustomizer bean that sets a marker header
             wireMock.resetRequests()
             val meterRegistry = SimpleMeterRegistry()
@@ -172,6 +179,13 @@ class ResilientWebClientFactoryBuilderWiringTest {
     inner class `Observation wired by Boot` {
         @Test
         fun `should record an http client observation per request without the factory wiring the registry`() {
+            // What is tested: that the observation registry Boot's ObservationWebClientCustomizer puts on the
+            //   builder survives into the factory's clients when the module toggle is on.
+            // Success criteria: one request produces an `http.client.requests` timer with count 1 in the meter
+            //   registry behind the context's ObservationRegistry.
+            // Why it matters: the factory no longer wires the registry itself; if Boot's did not arrive either,
+            //   the client span would vanish without a log line.
+            //
             // Given: the toggle ON, an ObservationRegistry bean, and Boot's ObservationWebClientCustomizer
             val meterRegistry = SimpleMeterRegistry()
             factoryContext(observationEnabled = true, meterRegistry = meterRegistry)
@@ -190,6 +204,13 @@ class ResilientWebClientFactoryBuilderWiringTest {
 
         @Test
         fun `should record no http client observation when the module toggle is off although Boot wired the registry`() {
+            // What is tested: the toggle's OFF branch against a builder Boot DID wire.
+            // Success criteria: after one request the meter registry holds no `http.client.requests` timer and no
+            //   meter at all.
+            // Why it matters: the toggle is the module's only way to keep its own clients unobserved while the
+            //   host observes everything else; a factory that kept Boot's registry regardless would pass the
+            //   test above and ignore the operator's choice here.
+            //
             // Given: the toggle OFF, the same registry bean and the same Boot customizer as above
             val meterRegistry = SimpleMeterRegistry()
             factoryContext(observationEnabled = false, meterRegistry = meterRegistry)
@@ -209,6 +230,14 @@ class ResilientWebClientFactoryBuilderWiringTest {
     inner class `Missing builder bean` {
         @Test
         fun `should fail the context start naming WebClient Builder when no builder bean exists`() {
+            // What is tested: a context without Boot's WebClient auto-configuration and without a builder bean of
+            //   its own.
+            // Success criteria: the context fails to start, and the failure names both `WebClient$Builder` and
+            //   the bean that required it, `resilientWebClientFactory`.
+            // Why it matters: a Kotlin default on that parameter would let Spring treat the bean as optional and
+            //   construct the factory on a bare builder - no customizer, no observation, no error. The required
+            //   parameter turns that silent degradation into a failed start that says what is missing.
+            //
             // Given: the factory's collaborators but neither Boot's auto-configuration nor a builder bean
             factoryContext(observationEnabled = true, meterRegistry = SimpleMeterRegistry())
                 // When: the context starts

@@ -16,6 +16,11 @@ surface are configured in the host's `application.yml`. `src/test/resources/appl
 of this module is the reference configuration the contract tests pin - a library ships no
 `application.yml` of its own.
 
+**The response contract.** A client's `Mono<T>` emits exactly one value or an error. Since 2026-10-21 a 2xx
+answer without a body (204, empty 200) fails with `EmptyResponseBodyException` instead of completing the
+`Mono` empty - a behaviour change for any caller that relied on the empty completion; see the
+[configuration guide](webclient-config-guide.md) §3.4.
+
 ## Prerequisites
 
 - Java 21 or newer at runtime (the build itself needs JDK 24+, see the

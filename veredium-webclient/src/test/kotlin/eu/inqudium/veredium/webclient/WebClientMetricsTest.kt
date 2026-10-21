@@ -27,20 +27,35 @@ class WebClientMetricsTest {
     inner class KnownPathsMapToTheirTemplate {
         @Test
         fun `should map the product-agreements lookup path to its template`() {
+            // What is tested: a variable-free template - the path IS the template.
+            // Success criteria: the exact path maps to its own template, not to another endpoint's.
+            // Why it matters: the simplest case of the mapping; if it fails, every static endpoint's latency
+            //   lands in the catch-all bucket and its own series stays empty.
+            //
             // Given / When / Then
             assertThat(WebClientMetrics.uriTag("/v8/agreements/products/lookup", tags)).isEqualTo(productAgreements)
         }
 
         @Test
         fun `should map the involved-parties POST lookup path to its POST template`() {
+            // What is tested: a static path next to a templated one on the same resource in another version
+            //   (`/v5/involved-parties/lookup` and `/v6/involved-parties/{uuid}`).
+            // Success criteria: the lookup path maps to the lookup template.
+            // Why it matters: near-identical paths are where a loose matcher picks the wrong template, and two
+            //   endpoints' numbers would then merge into one series.
+            //
             // Given / When / Then
             assertThat(WebClientMetrics.uriTag("/v5/involved-parties/lookup", tags)).isEqualTo(involvedPartiesLookup)
         }
 
         @Test
         fun `should map a concrete involved-party GET path with a UUID to the templated GET tag`() {
-            // Given: a real call carries a per-request UUID in the path - exactly the value that would explode
-            // metric cardinality if it reached the tag raw.
+            // What is tested: the cardinality guard proper - a path variable collapsed into its template.
+            // Success criteria: a path carrying a UUID maps to `/v6/involved-parties/{uuid}`.
+            // Why it matters: a real call carries a per-request UUID in the path - exactly the value that would
+            //   mint one time series per call if it reached the tag raw, until the metric backend refuses more.
+            //
+            // Given: a concrete path with a per-request UUID
             val uri = "/v6/involved-parties/123e4567-e89b-12d3-a456-426614174000"
 
             // When / Then: the UUID collapses into the fixed template, so all such calls share one series.
@@ -49,6 +64,11 @@ class WebClientMetricsTest {
 
         @Test
         fun `should map a concrete access-profiles path with an id to the access-profiles template`() {
+            // What is tested: a template whose variable follows several static segments.
+            // Success criteria: `/v5/access-profiles/by-involved-party/987654` maps to its template.
+            // Why it matters: the prefix is everything before the first variable; a deeper static part is where
+            //   an off-by-one in that cut would show first.
+            //
             // Given / When / Then
             assertThat(WebClientMetrics.uriTag("/v5/access-profiles/by-involved-party/987654", tags))
                 .isEqualTo(accessProfiles)
@@ -59,7 +79,12 @@ class WebClientMetricsTest {
     inner class PerEndpointScoping {
         @Test
         fun `should tag a call with the endpoint's own template`() {
-            // Given / When / Then: the mapper an endpoint's HttpClient receives knows one template - its own.
+            // What is tested: uriTagger - the per-endpoint mapper an endpoint's HttpClient receives.
+            // Success criteria: it maps a call on its own endpoint to its own template.
+            // Why it matters: the production path uses this form, not tagsOf over all templates; the scoping test
+            //   below is only meaningful next to this positive case.
+            //
+            // Given / When / Then: the mapper knows one template - its own
             val tagger = WebClientMetrics.uriTagger(involvedPartyGet)
 
             assertThat(tagger("/v6/involved-parties/123e4567-e89b-12d3-a456-426614174000")).isEqualTo(involvedPartyGet)
@@ -68,7 +93,7 @@ class WebClientMetricsTest {
         @Test
         fun `should never label a call with a foreign endpoint's template`() {
             // What is tested: that a per-endpoint mapper cannot attribute a request to a DIFFERENT endpoint.
-            // How success is judged: asked about another endpoint's path, the mapper answers UNKNOWN rather
+            // Success criteria: asked about another endpoint's path, the mapper answers UNKNOWN rather
             //   than that endpoint's template.
             // Why it matters: every endpoint gets its own HttpClient, but the mapper used to be built from the
             //   templates of ALL of them, so a request could match a foreign template first and be counted
@@ -88,7 +113,7 @@ class WebClientMetricsTest {
         @Test
         fun `should order templates deterministically when two share a prefix`() {
             // What is tested: that templates reducing to the SAME static prefix get a defined order.
-            // How success is judged: `/a/{id}` and `/a/{id}/details` both reduce to `/a/`, and tagsOf returns
+            // Success criteria: `/a/{id}` and `/a/{id}/details` both reduce to `/a/`, and tagsOf returns
             //   them in the same order regardless of the order they went in.
             // Why it matters: with a length-only sort the two are tied, so which one a URI is labelled with
             //   depended on the iteration order of the input - a mislabelling that would differ between runs
@@ -108,7 +133,12 @@ class WebClientMetricsTest {
     inner class CardinalityGuards {
         @Test
         fun `should ignore a trailing query string when matching the prefix`() {
-            // Given: a query string sits past the matched prefix and must not change the bucket.
+            // What is tested: a query string on a templated path.
+            // Success criteria: the path with a query maps to the same template as without.
+            // Why it matters: query values are as unbounded as path variables; a matcher that folded them into
+            //   the tag would leak cardinality through the back door.
+            //
+            // Given: a query string past the matched prefix
             val uri = "/v8/agreements/products/lookup?productAgreementStatus=ACTV&fields=a,b"
 
             // When / Then
@@ -118,9 +148,12 @@ class WebClientMetricsTest {
         @Test
         fun `should prefer the longer prefix when one path nests inside another`() {
             // What is tested: a static path whose prefix is contained in a shorter templated path's prefix must
-            // still resolve to its own (more specific) tag. How: a "/a/b/lookup" static path next to a "/a/b/{id}"
-            // template - the shorter prefix "/a/b/" would swallow "/a/b/lookup" if order were undefined.
+            //   still resolve to its own (more specific) tag.
+            // Success criteria: next to a "/a/b/{id}" template, "/a/b/lookup" maps to "/a/b/lookup" and "/a/b/42"
+            //   to "/a/b/{id}" - the shorter prefix "/a/b/" would swallow the lookup if order were undefined.
             // Why it matters: tagsOf sorts longest-prefix-first precisely so a nested path cannot be mislabelled.
+            //
+            // Given
             val nested = WebClientMetrics.tagsOf(listOf("/a/b/{id}", "/a/b/lookup"))
 
             // When / Then
@@ -130,13 +163,22 @@ class WebClientMetricsTest {
 
         @Test
         fun `should collapse an unknown path into the catch-all bucket`() {
-            // Given: an unforeseen path must never blow up the metric backend with a fresh series.
-            // When / Then
+            // What is tested: a path no template knows.
+            // Success criteria: it maps to UNKNOWN.
+            // Why it matters: an unforeseen path must never blow up the metric backend with a fresh series; one
+            //   bounded bucket for everything unknown is what keeps the tag set finite.
+            //
+            // Given / When / Then
             assertThat(WebClientMetrics.uriTag("/actuator/health", tags)).isEqualTo(WebClientMetrics.UNKNOWN)
         }
 
         @Test
         fun `should collapse an empty path into the catch-all bucket`() {
+            // What is tested: the empty URI.
+            // Success criteria: it maps to UNKNOWN rather than matching some template's empty prefix.
+            // Why it matters: an empty static prefix would match everything; this pins that no template claims
+            //   a path it does not start.
+            //
             // Given / When / Then
             assertThat(WebClientMetrics.uriTag("", tags)).isEqualTo(WebClientMetrics.UNKNOWN)
         }
@@ -146,7 +188,7 @@ class WebClientMetricsTest {
             // What is tested: that a template WITHOUT a path variable does not swallow unrelated paths that share
             //   its text. Such a template yields a prefix equal to the whole path, so a plain startsWith would
             //   match anything continuing it.
-            // How success is judged: the sibling paths land in the catch-all, while the exact path, a deeper
+            // Success criteria: the sibling paths land in the catch-all, while the exact path, a deeper
             //   segment and a query-string variant still resolve to the template.
             // Why it matters: a mislabelled URI does not just tag one call wrongly - it merges a DIFFERENT
             //   endpoint's timings into this template's series, so the metric quietly reports on two endpoints at

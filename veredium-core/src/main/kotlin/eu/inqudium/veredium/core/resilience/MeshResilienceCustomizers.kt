@@ -67,12 +67,20 @@ internal const val SLOW_CALL_RATE_PIN_PERCENT: Float = 100f
  *
  * ## Additive, not replacing
  *
- * `ignoreException(predicate)` and `recordException(predicate)` REPLACE whatever the builder holds, and the
+ * `ignoreException(predicate)` and `recordException(predicate)` REPLACE the predicate the builder holds, and the
  * builder holds what the operator wrote into YAML (`ignore-exceptions`, `record-exceptions`, the predicate
  * classes). The customizer therefore reads the config the builder would produce as it stands and folds it back
  * in: the ignore predicate is OR-ed (the breaker ignores MORE), the record predicate is AND-ed (it records
  * LESS). An operator's own list survives; a benign 4xx cannot be recorded by it, since a 4xx that the adapter
  * contract documents as a normal outcome is never a backend fault.
+ *
+ * That only holds because the customizer also EMPTIES the builder's two class lists once it has read them.
+ * The lists are not part of the predicate a setter replaces: `build()` OR-s `record-exceptions` /
+ * `ignore-exceptions` back in on top of whatever predicate is set, so an operator who listed a superclass of
+ * the stack's 4xx exception (`record-exceptions: [...WebClientResponseException]`, to count 5xx explicitly)
+ * would have had the benign 404 recorded again - `isInstance(list) OR (!benign AND configured)`. Their effect
+ * is already inside the captured config's predicates, so after the customizer they reach the instance through
+ * those and through nothing else.
  *
  * ## The derived slow-call knobs
  *
@@ -91,6 +99,12 @@ fun circuitBreakerCustomizer(
         // What YAML produced for this instance, read before anything is replaced. `build()` is side-effect
         // free: it assembles a config from the builder's fields and leaves the builder as it was.
         val configured = builder.build()
+        // Assumption: CircuitBreakerConfig.Builder.build() (Resilience4j 2.4.0) composes each final predicate as
+        // `classes(list) OR predicate` (PredicateCreator.createExceptionsPredicate). The lists' effect is inside
+        // `configured` now; left on the builder, `record-exceptions` would be OR-ed back past the benign-4xx
+        // verdict below. Empty lists drop out of that composition entirely (function KDoc, "Additive").
+        builder.recordExceptions()
+        builder.ignoreExceptions()
         builder.ignoreException { error ->
             verdicts.clientSideFailure.isClientSideFailure(error) || configured.ignoreExceptionPredicate.test(error)
         }

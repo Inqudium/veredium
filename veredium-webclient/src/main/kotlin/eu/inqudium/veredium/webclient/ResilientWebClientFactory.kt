@@ -21,6 +21,8 @@ import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.WebClient
 import reactor.core.publisher.Hooks
 import reactor.core.publisher.Mono
+import reactor.core.scheduler.Scheduler
+import reactor.core.scheduler.Schedulers
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionProvider
 import tools.jackson.databind.ObjectMapper
@@ -47,7 +49,7 @@ class ResilientWebClientFactory(
     // Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; Spring injects
     // the auto-configured factory when a Bean Validation provider is on the classpath. Absent -> validation
     // cannot run for ANY backend, whatever the properties say, which the startup line reports rather than
-    // leaving it to be discovered. See [ResponseValidation] for why the FACTORY rather than a Validator.
+    // leaving it to be discovered. See `ResponseValidation` for why the FACTORY rather than a Validator.
     validatorFactory: ValidatorFactory? = null,
     // Nullable like the two above: an optional dependency, so a direct (test) construction and a minimal
     // context both work without one. Absent -> the response-size summary is simply not registered and the
@@ -112,8 +114,12 @@ class ResilientWebClientFactory(
      * cannot let anything finish that was not going to finish anyway. A literal here would be a second, silent
      * timeout next to the mesh ladder - free to drift below the ladder as endpoints are retuned, and nothing
      * would say so.
+     *
+     * The bound is sized for the strongest reading of "drain" - waiting out every in-flight call - although the
+     * disposal [shutdown] runs waits only for the idle connections to close (see there). It is therefore
+     * generous rather than tight; what it must never be is SHORTER than a call that could still be running.
      */
-    private val poolDisposeTimeout: Duration =
+    internal val poolDisposeTimeout: Duration =
         (meshByBackend.values.maxOfOrNull { it.responseTimeout } ?: Duration.ZERO)
             .plusMillis(meshTransport.connectTimeoutMs + meshTransport.pendingAcquireTimeoutMs)
             .plusSeconds(1)
@@ -247,8 +253,14 @@ class ResilientWebClientFactory(
     }
 
     /**
-     * Drains the shared pool on context shutdown, waiting up to [poolDisposeTimeout] for in-flight connections
-     * to close.
+     * Disposes the shared pool on context shutdown, waiting up to [poolDisposeTimeout] for the disposal to
+     * finish.
+     *
+     * What the disposal waits for is narrower than "drain": the pool is built without Reactor Netty's
+     * `disposeTimeout`, so `disposeLater()` is not a graceful shutdown. It fails pending acquires, closes the
+     * IDLE connections and completes; a connection an in-flight call holds is not cut - the call finishes on it,
+     * and the connection is closed when it is released. So an in-flight call does not hold [shutdown] up, and
+     * the timeout bounds the closing of the idle connections.
      *
      * Expiry is an OUTCOME, not a failure. `block(Duration)` would report it as an `IllegalStateException` -
      * the same shape as a genuine disposal error, and one that Spring can only catch and log as a destroy
@@ -260,9 +272,24 @@ class ResilientWebClientFactory(
      */
     @PreDestroy
     fun shutdown() {
-        connectionProvider
-            .disposeLater()
-            .timeout(poolDisposeTimeout)
+        drain(connectionProvider.disposeLater(), Schedulers.parallel()).block()
+    }
+
+    /**
+     * [shutdown]'s bounded wait for [disposal], with the WARN for a disposal that outlives [poolDisposeTimeout].
+     *
+     * Separate from [shutdown] for the one reason that the timeout branch can only be tested with a disposal
+     * that never ends and a clock that can be advanced: the real pool's disposal finishes in milliseconds, and
+     * [poolDisposeTimeout] is longer than any response timeout by construction. [timer] is where the timeout is
+     * scheduled - Reactor's parallel scheduler in production (what `timeout(Duration)` uses on its own), a
+     * virtual-time scheduler in the test.
+     */
+    internal fun drain(
+        disposal: Mono<Void>,
+        timer: Scheduler,
+    ): Mono<Void> =
+        disposal
+            .timeout(poolDisposeTimeout, timer)
             .onErrorResume(TimeoutException::class.java) {
                 logger.warn(
                     "Connection pool '{}' did not drain within {} - dropping it with connections still open",
@@ -270,8 +297,7 @@ class ResilientWebClientFactory(
                     poolDisposeTimeout,
                 )
                 Mono.empty()
-            }.block()
-    }
+            }
 
     private companion object {
         /** Name of the single shared Reactor-Netty pool; also the `name` tag on its pool metrics. */

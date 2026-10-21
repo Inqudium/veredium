@@ -81,6 +81,17 @@ import java.time.Duration
  * callers where a `CallNotPermittedException` is the truthful answer. It would also not remove the need for
  * the record/ignore mechanism, since a client-side failure raised by the SOURCE - a codec limit, a parse
  * error - sits inside every operator regardless of their order.
+ *
+ * ## Pinned, and one thing the order does NOT do
+ *
+ * `ReactiveResilienceDecoratorTest` pins the nesting by its consequences (a timeout counted by the breaker, an
+ * open breaker that neither subscribes nor takes a permit, a full bulkhead's rejection reaching the breaker);
+ * each of the five other orders turns one of them red. It also pins a property no order changes: a bulkhead
+ * configured to WAIT for a permit waits inside `subscribe()`, on the subscribing thread, BEFORE the
+ * TimeLimiter's timer starts - Resilience4j's reactive bulkhead acquires before it passes its subscription on,
+ * and Reactor's `timeout` starts counting only once it receives one. So a waiting caller does not spend its
+ * budget, it parks a thread no timeout of the ladder bounds - which is why the reference configuration keeps
+ * `max-wait-duration: 0`.
  */
 @Component
 class ReactiveResilienceDecorator(

@@ -1,10 +1,11 @@
 # Test-owned configuration fixture. The mesh/resilience4j/logging CONTRACT and BINDING tests bind THIS file
 # (via ClassPathResource("application-test.yml")) for the VALUES they pin - a level, a body mode, a threshold,
-# an anchor - so that operational edits to the shipped src/main/resources/application.yml never break the
+# an anchor - so that edits of a recommended value in the reference configuration (src/test/resources/
+# application.yml, a test resource too: the module is a library and ships no application.yml) never break the
 # tests. IDENTITIES and INVARIANTS - the alias set, the resilience4j instance keys, the exchange logger's name
 # against its level line, the bulkhead sum against the pool - are pinned in BOTH files (see the test helper
-# ConfigurationFiles): nobody tunes those by hand, and a drift in the shipped file has to fail the build.
-# Keep this file in sync with the shipped one only for the parts a test actually asserts; it may otherwise
+# ConfigurationFiles): nobody tunes those by hand, and a drift in the reference has to fail the build.
+# Keep this file in sync with the reference only for the parts a test actually asserts; it may otherwise
 # diverge (that divergence is the whole point of decoupling).
 #
 # NOT a Spring profile override in disguise: no test activates the `test` profile, so Spring never auto-merges
@@ -14,8 +15,9 @@ logging:
   level:
     # Framework noise off; this module's own classes stay verbose on purpose.
     root: INFO
-    com:
-      ing: DEBUG
+    eu:
+      inqudium:
+        veredium: DEBUG
     # The exchange stream: one event per outbound HTTP exchange, written by legatium-restclient-logging (see the
     # adapter-logging block below). INFO = every call; WARN = only failures, timeouts, cancellations, slow
     # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Unlike the module's former exchange diary, raising this level FILTERS
@@ -24,7 +26,7 @@ logging:
     adapter-http-exchange: INFO
     # The library's own logger: the immediate WARN breadcrumb when a call throws, and errors of the logging
     # itself (fail-open lines). Keep at WARN or lower - silencing it hides the breadcrumb. DEBUG adds the wiring
-    # report at context start - which builders got the filter, which properties bound (legatium 1.2.0).
+    # report at context start - which builders got the filter, which properties bound (since legatium 1.2.0).
     eu.inqudium.legatium.restclient.logging: WARN
 
 # Outbound exchange logging (legatium-restclient-logging). The full reference with every default and its
@@ -67,7 +69,7 @@ adapter-logging:
 
 app:
   restclient:
-    # Mirrors the shipped buffer ceiling. Tests that need a smaller boundary pass it explicitly.
+    # Mirrors the reference buffer ceiling. Tests that need a smaller boundary pass it explicitly.
     #
     # A response that exceeds it fails the call with a ResponseBodyLimitExceededException. That is a CLIENT-side
     # refusal - the backend answered correctly - so it does not count towards the circuit breaker;
@@ -104,14 +106,15 @@ app:
     # false to watch a newly-enabled backend against real traffic before enforcing. It is one posture for the
     # whole app, deliberately not per-endpoint - the per-alias choice is only WHICH backends validate.
     #
-    # Omitted entirely here: the shipped default is off, so there is nothing to set. To adopt validation,
+    # Omitted entirely here: the code default is off, so there is nothing to set. To adopt validation,
     # uncomment ONE of the `validation:` blocks above (not both - they are alternatives).
   # The single per-endpoint tree (see docs/mesh-timeout.md). Each endpoint drives BOTH the RestClient target
   # (baseUrl = the sidecar; the Host header is derived from the triplet host) AND the full timeout ladder
   # (connect / response / pending-acquire / max-connections + the per-endpoint TimeLimiter and slow-call).
   # No explicit alias: the logical backend name (R4j instance + metric label) is DERIVED from the triplet
   # (host-METHOD-path), so it is the single source of the endpoint identity. The adapters' ALIAS constants
-  # must match that derived value (pinned by MeshAliasContractTest).
+  # must match that derived value: ResilientRestClientFactory.create fails fast on a name no endpoint derives,
+  # and ResilienceConfigContractTest pins the resilience4j instance keys below against the derived set.
   #
   # Per-endpoint feature toggles live here too, tri-state (unset inherits app.mesh.defaults):
   #   time-limiter.enabled    (default true)  - whether mesh derives + overrides that endpoint's TimeLimiter budget
@@ -151,8 +154,8 @@ resilience4j:
   # the call path unconditionally (BlockingResilienceDecorator applies all three, regardless of the app.mesh
   # toggles), so leaving one undeclared does not mean "off" - it means that backend silently runs on
   # Resilience4j's own defaults, at values nobody had chosen and nothing documented. The instance keys are the
-  # mesh-derived aliases and must stay in sync with the adapters' ALIAS constants (pinned by
-  # ResilienceConfigContractTest).
+  # mesh-derived aliases; ResilienceConfigContractTest pins, in this file and its twin, that every alias is
+  # declared on all three layers.
   #
   # The TimeLimiter entries have a second job: Resilience4j's Boot configuration materialises exactly the
   # `instances.<name>` listed here, and the mesh customizer (MeshResilienceCustomizers) sets the derived budget
@@ -160,7 +163,7 @@ resilience4j:
   # endpoint uses but this block does not declare still gets an instance (Resilience4j creates one for the
   # customizer) - on the registry default, not on lap-backend, silently; MeshResilienceStartupGuard therefore
   # fails the start and names the missing key. MeshResilienceShippedConfigTest boots the auto-configuration
-  # against this file.
+  # against the reference file, application.yml.
   timelimiter:
     configs:
       lap-backend:
@@ -193,7 +196,8 @@ resilience4j:
         # letting callers pile up on pendingAcquire. Raising this without raising max-connections moves the
         # queueing into the pool, where pending-acquire-timeout-ms (200) fails them anyway, only later and
         # with a less obvious error. ResilienceConfigContractTest enforces sum(max-concurrent-calls) <=
-        # max-connections.
+        # max-connections for this file; at runtime MeshResilienceStartupGuard WARNs (names both numbers and every
+        # alias) when a host's own configuration breaks it.
         max-concurrent-calls: 25
         # Fail fast rather than queue: the same choice the mesh transport already makes for the pool. A
         # waiting caller burns its TimeLimiter budget (1.1-1.6s per the derived ladder) doing nothing.

@@ -48,6 +48,28 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  * Every problem is collected before anything is thrown, so one failed start names them all. It does NOT check
  * that the derived numbers are right - that is the ladder's own tests - only that they arrived.
  *
+ * A breaker that records the benign 4xx is reported in one of two ways, because the two have different fixes.
+ * When it does not ignore the client-side probe either, no customizer ever ran on it (the hand-built registry
+ * above). When it DOES ignore the probe, the client-side verdict is in place - the customizer most likely ran -
+ * and something composed after it put the 4xx back; the message then points at the instance's own
+ * record-exceptions configuration instead of at the registry. (A hand-built registry that carries an ignore
+ * list of its own but no benign-4xx rule looks the same from here, and the message says so.)
+ *
+ * ## What it warns about
+ *
+ * Once every alias is wired, the bulkheads are checked against the shared connection pool:
+ * `sum(max-concurrent-calls)` over the mesh aliases must not exceed `app.mesh.defaults.transport.max-connections`.
+ * The bulkheads are sized as a PARTITION of that pool; if together they admit more calls than it has
+ * connections, the excess does not shed at the bulkhead with a named `BulkheadFullException` but queues for a
+ * connection, and a pending-acquire timeout is a FAILURE on the breaker of whichever backend happened to be
+ * waiting - not necessarily the one holding the connections. That is a sizing decision, not a wiring fault, and
+ * a deliberately over-committed pool can be right for a host whose backends are never busy at once, so it is a
+ * WARN naming both numbers and every alias, not a failed start. The sum runs over ALL mesh aliases, which is
+ * exact for the blocking stack (one Apache pool, its total cap shared by every route) and conservative for the
+ * reactive one (Reactor Netty caps per remote address, and endpoints with their own `base-url` get their own).
+ * The values are read off the registry's instances, i.e. after base config and instance properties were
+ * merged; the wiring check guarantees there is one per alias by then.
+ *
  * ## What it logs
  *
  * On success, the startup evidence an operator reads next to the meters: the two policy lines naming the
@@ -86,6 +108,7 @@ class MeshResilienceStartupGuard(
             "Resilience4j is not wired for every mesh endpoint - the call path would silently run on registry " +
                 "defaults. ${problems.size} problem(s):\n  - " + problems.joinToString("\n  - ")
         }
+        warnIfBulkheadsOvercommitThePool(endpoints)
         val aliases = endpoints.joinToString(", ") { it.alias }
         verdicts.clientSideFailure.logPolicy(log.atInfo(), aliases)
         verdicts.httpExchangeError.logPolicy(log.atInfo(), aliases)
@@ -107,11 +130,18 @@ class MeshResilienceStartupGuard(
                 add(unreached(LAYER_BULKHEAD, alias, "has no instance in the registry"))
             }
             circuitBreaker?.circuitBreakerConfig?.let { config ->
-                if (!config.ignoreExceptionPredicate.test(PROBE_CLIENT_SIDE_FAILURE)) {
+                val ignoresClientSideFailure = config.ignoreExceptionPredicate.test(PROBE_CLIENT_SIDE_FAILURE)
+                if (!ignoresClientSideFailure) {
                     add(unreached(LAYER_CIRCUIT_BREAKER, alias, "does not ignore a client-side failure (BulkheadFullException)"))
                 }
                 if (config.recordExceptionPredicate.test(verdicts.benignClientErrorProbe)) {
-                    add(unreached(LAYER_CIRCUIT_BREAKER, alias, "records a benign 4xx (404) as a backend failure"))
+                    add(
+                        if (ignoresClientSideFailure) {
+                            overridden(alias)
+                        } else {
+                            unreached(LAYER_CIRCUIT_BREAKER, alias, "records a benign 4xx (404) as a backend failure")
+                        },
+                    )
                 }
                 if (endpoint.circuitBreakerEnabled && config.slowCallDurationThreshold != endpoint.slowCallDuration) {
                     add(
@@ -156,6 +186,39 @@ class MeshResilienceStartupGuard(
         "the $layer '$alias' $symptom: the mesh customizer did not reach it. The registry was not built by " +
             "Resilience4j's Boot auto-configuration from the resilience4j.$layer.* properties - a customizer bean is " +
             "consulted only while that configuration builds its instances."
+
+    /**
+     * The breaker records the benign 4xx although its client-side verdict is in place (class KDoc): not a
+     * customizer that never ran, but a record rule composed past it.
+     */
+    private fun overridden(alias: String): String =
+        "the $LAYER_CIRCUIT_BREAKER '$alias' records a benign 4xx (404) as a backend failure although it ignores a " +
+            "client-side failure: the mesh customizer's client-side verdict is in place, so its benign-4xx verdict " +
+            "was overridden by a record rule applied after it. Check resilience4j.$LAYER_CIRCUIT_BREAKER.instances." +
+            "$alias and its base config for a record-exceptions or record-exception-predicate entry that matches the " +
+            "stack's 4xx exception. (A registry built by hand with an ignore list of its own but without the " +
+            "benign-4xx verdict shows the same symptom.)"
+
+    /**
+     * The pool check of the class KDoc ("What it warns about"). Runs only after the wiring check passed, so
+     * every alias has a bulkhead instance in the registry - the merged values, not the declared fragments.
+     */
+    private fun warnIfBulkheadsOvercommitThePool(endpoints: List<ResolvedTimeouts>) {
+        val maxConnections = meshProperties.defaults.transport.maxConnections
+        val permits = endpoints.associate { it.alias to bulkheadRegistry.bulkhead(it.alias).bulkheadConfig.maxConcurrentCalls }
+        val total = permits.values.sumOf { it.toLong() }
+        if (total <= maxConnections) return
+        log.warn(
+            "The mesh bulkheads admit more concurrent calls than the shared connection pool holds: " +
+                "sum(resilience4j.bulkhead.instances.<alias>.max-concurrent-calls)={} > " +
+                "app.mesh.defaults.transport.max-connections={} ({}). The excess queues for a connection instead of " +
+                "being shed by its bulkhead, and a pending-acquire timeout is recorded as a failure on the breaker " +
+                "of whichever backend is waiting. Lower the bulkheads or raise max-connections.",
+            total,
+            maxConnections,
+            permits.entries.joinToString(", ") { (alias, calls) -> "$alias=$calls" },
+        )
+    }
 
     private fun decisionOf(endpoint: ResolvedTimeouts): String {
         val timeLimiter =

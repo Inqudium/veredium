@@ -37,12 +37,15 @@ class HttpExchangeErrorPolicyTest {
         fun `should read nothing but a response exception of its stack as a client error`() {
             // What is tested: the one thing the stack supplies - the status reader - and what the rule does with a
             //   throwable the reader does not recognise.
-            // How success is judged: a response exception with a 4xx is expected, every other throwable (and null)
+            // Success criteria: a response exception with a 4xx is expected, every other throwable (and null)
             //   is not.
             // Why it matters: the predicate runs on every error the breaker sees; a reader that answered a status
             //   for a timeout or a bulkhead rejection would turn an operational fault into a business case.
+            //
+            // Given: the shared test policy
             val policy = TestVerdicts.httpExchangeError
 
+            // When / Then
             assertThat(policy.isExpectedClientError(TestResponseException(404))).isTrue()
             assertThat(policy.isExpectedClientError(TimeoutException("budget blown"))).isFalse()
             assertThat(policy.isExpectedClientError(TestVerdicts.bulkheadRejection())).isFalse()
@@ -52,9 +55,11 @@ class HttpExchangeErrorPolicyTest {
         @Test
         fun `should refuse a probe its own policy does not read as a benign client error`() {
             // What is tested: the consistency rule BreakerVerdicts enforces between the probe and the policy.
-            // How success is judged: a probe the policy rejects (a 500) fails construction and names the type.
+            // Success criteria: a probe the policy rejects (a 500) fails construction and names the type.
             // Why it matters: the startup guard applies every breaker's record predicate to this probe; a probe
             //   the policy does not recognise would make the guard fail every start of that stack.
+            //
+            // Given / When / Then
             assertThatThrownBy {
                 BreakerVerdicts(TestVerdicts.httpExchangeError, TestVerdicts.clientSideFailure, TestResponseException(500))
             }.isInstanceOf(IllegalArgumentException::class.java)
@@ -68,7 +73,7 @@ class HttpExchangeErrorPolicyTest {
         fun `should record a benign 4xx as a success so a business case cannot open the breaker`() {
             // What is tested: that the statuses the adapter contract documents as normal outcomes - a 404 for
             //   "does not exist", a 400 for a malformed body, 403, 409 - are not charged to the backend.
-            // How success is judged: the customized instance's RECORD predicate rejects each of them, so they
+            // Success criteria: the customized instance's RECORD predicate rejects each of them, so they
             //   enter the sliding window as successes rather than being kept out of it altogether.
             // Why it matters: a healthy backend returns 4xx for bad requests all day. Counting those toward the
             //   failure rate lets a 404-heavy lookup open the circuit against a backend that is perfectly up -
@@ -91,7 +96,7 @@ class HttpExchangeErrorPolicyTest {
         fun `should still record 408 and 429 although both are 4xx`() {
             // What is tested: the boundary the policy draws INSIDE the 4xx range - 408 Request Timeout and 429
             //   Too Many Requests are operational signals, not business cases, and stay recorded.
-            // How success is judged: the predicate rejects both, while a neighbouring status (404) is accepted -
+            // Success criteria: the predicate rejects both, while a neighbouring status (404) is accepted -
             //   so the assertion cannot pass by the predicate simply ignoring nothing.
             // Why it matters: this is the one distinction a reimplementation would get wrong, and getting it
             //   wrong is invisible: the breaker would sit blind through exactly the two conditions it exists to
@@ -114,12 +119,19 @@ class HttpExchangeErrorPolicyTest {
 
         @Test
         fun `should still record a 5xx and a resilience timeout`() {
-            // The counterpart that keeps the tests above honest: the verdict must discount ONLY benign 4xx, not
-            // disable failure recording.
+            // What is tested: the record side of the customized breaker for a genuine backend fault - 500, 503 and
+            //   a resilience TimeoutException.
+            // Success criteria: the record predicate accepts all three, so each counts as a failure.
+            // Why it matters: the counterpart that keeps the tests above honest: the verdict must discount ONLY
+            //   benign 4xx, not disable failure recording - a breaker that recorded nothing would never open.
+            //
+            // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
 
+            // When
             CustomizedRegistries.circuitBreakers(registry, propsFor())
 
+            // Then
             assertThat(countsAsFailure(registry, TestResponseException(500))).isTrue()
             assertThat(countsAsFailure(registry, TestResponseException(503))).isTrue()
             assertThat(countsAsFailure(registry, TimeoutException("budget blown"))).isTrue()
@@ -130,7 +142,7 @@ class HttpExchangeErrorPolicyTest {
             // What is tested: that the verdict is ADDITIVE on the record side. `recordException(predicate)`
             //   REPLACES the predicate the builder holds, so a naive customizer drops whatever the operator
             //   configured; the customizer reads the configured predicates first and folds them back in.
-            // How success is judged: after the customizer both the operator's exception and a benign 4xx are
+            // Success criteria: after the customizer both the operator's exception and a benign 4xx are
             //   discounted, and an unrelated failure is still recorded.
             // Why it matters: the customizer shapes a config it does not own. Clobbering the operator's list
             //   would silently re-arm the breaker against errors they deliberately excluded - visible to them
@@ -151,6 +163,13 @@ class HttpExchangeErrorPolicyTest {
 
         @Test
         fun `should customize every configured mesh backend`() {
+            // What is tested: that `CustomizedRegistries.circuitBreakers` installs the benign-4xx rule for EVERY
+            //   mesh endpoint, not only the first.
+            // Success criteria: with two endpoints, a 404 is not counted as a failure on the breaker of either
+            //   derived alias.
+            // Why it matters: one customizer is registered per alias; a backend left without the rule would open
+            //   its circuit on ordinary 404 traffic while its siblings stay closed.
+
             // Given: two endpoints, so there is one customizer per alias rather than a single one
             val registry = CircuitBreakerRegistry.ofDefaults()
             val props =
@@ -173,9 +192,12 @@ class HttpExchangeErrorPolicyTest {
 
         @Test
         fun `should install the rule even when the mesh circuit-breaker toggle is off`() {
-            // The toggle governs only whether mesh DERIVES the slow-call knobs; the breaker is in the call path
-            // unconditionally. Gating this verdict on it would leave the invariant unmet in exactly the default
-            // configuration - the one that ships.
+            // What is tested: that the benign-4xx rule is NOT gated on ResolvedTimeouts.circuitBreakerEnabled.
+            // Success criteria: with the toggle at its default (off), the customized breaker still does not count
+            //   a 404 as a failure.
+            // Why it matters: the toggle governs only whether mesh DERIVES the slow-call knobs; the breaker is in
+            //   the call path unconditionally. Gating this verdict on it would leave the invariant unmet in
+            //   exactly the default configuration - the one that ships.
 
             // Given: mesh defaults, i.e. the toggle off
             val registry = CircuitBreakerRegistry.ofDefaults()
@@ -194,7 +216,7 @@ class HttpExchangeErrorPolicyTest {
             // What is tested: the one customizer per alias installs BOTH verdicts, and neither widened into a
             //   blanket ignore: a benign 4xx is a success (not recorded, not ignored), a client-side failure is
             //   ignored, and a 5xx or a 429 is recorded.
-            // How success is judged: four probes, each landing in its own row of the three-verdict table.
+            // Success criteria: four probes, each landing in its own row of the three-verdict table.
             // Why it matters: the two verdicts answer different questions ("did the backend answer?" versus
             //   "does the call carry evidence at all?") and used to be two contributors; folding them into one
             //   customizer must not fold the answers into one.

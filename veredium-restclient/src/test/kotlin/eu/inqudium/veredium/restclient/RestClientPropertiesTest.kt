@@ -27,8 +27,8 @@ class RestClientPropertiesTest {
         @Test
         fun `should reject a limit of zero, which would fail every call as a client-side refusal`() {
             // What is tested: the lower bound of the buffer limit.
-            // How success is judged: binding throws, naming `app.restclient.max-in-memory-size`.
-            // Why this case is important: this is the value whose misconfiguration is hardest to trace. Zero
+            // Success criteria: binding throws, naming `app.restclient.max-in-memory-size`.
+            // Why it matters: this is the value whose misconfiguration is hardest to trace. Zero
             //   binds happily, and then every response exceeds the buffer and fails with a
             //   ResponseBodyLimitExceededException - the one exception RestClientVerdicts.clientSideFailure keeps
             //   OFF the circuit breaker on purpose. So every backend fails, no breaker opens, and the monitoring
@@ -45,8 +45,8 @@ class RestClientPropertiesTest {
         fun `should reject a limit past Int MAX_VALUE, which would wrap to a negative buffer`() {
             // What is tested: the UPPER bound, which exists for a reason that is invisible at this class -
             //   ResilientRestClientFactory narrows the value to an Int for the bounded reader.
-            // How success is judged: 3 GB is rejected here, rather than silently becoming a negative Int later.
-            // Why this case is important: without the guard, a value chosen to be generous would end up at the
+            // Success criteria: 3 GB is rejected here, rather than silently becoming a negative Int later.
+            // Why it matters: without the guard, a value chosen to be generous would end up at the
             //   zero case above, by a route nobody would suspect from reading the configured number.
             //
             // Given / When / Then
@@ -56,9 +56,12 @@ class RestClientPropertiesTest {
         }
 
         @Test
-        fun `should accept the shipped default and the extremes that are still meaningful`() {
-            // Why this test exists: a guard that rejects everything would satisfy the two tests above. This
-            // states where the line actually runs - one byte and Int.MAX_VALUE bytes are both admitted.
+        fun `should accept the code default and the extremes that are still meaningful`() {
+            // What is tested: the admitted range of the buffer limit.
+            // Success criteria: the code default, one byte and Int.MAX_VALUE bytes all construct without an
+            //   exception.
+            // Why it matters: a guard that rejects everything would satisfy the two tests above; this states
+            //   where the line actually runs.
             //
             // Given / When / Then
             assertThatCode {
@@ -70,10 +73,10 @@ class RestClientPropertiesTest {
 
         @Test
         fun `should default to 256 KB, the twin's ceiling and the size one oversized access-profile response needed`() {
-            // What is tested: the shipped default of the buffer limit, as a value in its own right rather than
+            // What is tested: the code default of the buffer limit, as a value in its own right rather than
             //   as a by-product of the range check above.
-            // How success is judged: the default is 256 KB and NOT the 8 KB the reactive module once shipped.
-            // Why this case is important: the two modules front the SAME backends, and a response that fits one
+            // Success criteria: the default is 256 KB and NOT the 8 KB the reactive module once shipped.
+            // Why it matters: the two modules front the SAME backends, and a response that fits one
             //   client's buffer and not the other's would be a difference nobody expects from a twin. 8 KB was
             //   measured to be too small on 2026-08-07; the limit applies per concurrently buffered response and
             //   the shared pool is bounded at 100 connections, so this default also bounds the worst case at
@@ -86,13 +89,23 @@ class RestClientPropertiesTest {
         }
 
         @Test
-        fun `should bind the shipped application yml to the same 256 KB ceiling`() {
-            val sources = YamlPropertySourceLoader().load("application.yml", ClassPathResource("application.yml"))
+        fun `should bind the reference application yml to the same 256 KB ceiling`() {
+            // What is tested: `app.restclient.max-in-memory-size` of the reference configuration, bound the way
+            //   Boot binds it.
+            // Success criteria: the bound value is the same 256 KB as the code default.
+            // Why it matters: the reference file is what hosts copy; a ceiling there that differed from the code
+            //   default would make "configured as documented" and "not configured" two different clients.
+            //
+            // Given
+            val sources = YamlPropertySourceLoader().load(ConfigurationFiles.REFERENCE, ClassPathResource(ConfigurationFiles.REFERENCE))
+
+            // When
             val bound =
                 Binder(ConfigurationPropertySources.from(sources))
                     .bind("app.restclient", Bindable.of(RestClientProperties::class.java))
-                    .orElseThrow { AssertionError("app.restclient did not bind from the shipped application.yml") }
+                    .orElseThrow { AssertionError("app.restclient did not bind from the reference application.yml") }
 
+            // Then
             assertThat(bound.maxInMemorySize).isEqualTo(DataSize.ofKilobytes(256))
         }
     }
@@ -104,8 +117,10 @@ class RestClientPropertiesTest {
             // What is tested: all three durations, because each is passed on to Apache's pool, which accepts a
             //   negative one and then means by it something no operator intended - a connection due for
             //   eviction the moment it is created.
-            // How success is judged: each of the three throws, naming its own key. Asserting them one by one
+            // Success criteria: each of the three throws, naming its own key. Asserting them one by one
             //   rather than as a group is what catches a guard that was copied but not adapted.
+            // Why it matters: a negative value is accepted by Apache and read as "already expired"; caught at
+            //   binding, it names the key, caught nowhere, it shows as connections that never live.
             //
             // Given / When / Then
             assertThatThrownBy { RestClientProperties.Pool(maxIdleTime = Duration.ofSeconds(-1)) }
@@ -118,8 +133,12 @@ class RestClientPropertiesTest {
 
         @Test
         fun `should accept zero durations, which the factory reads as off`() {
-            // Given / When / Then: Duration.ZERO means "no background eviction" and "no lifetime bound"; the
-            // guard must draw its line at negative, not at zero.
+            // What is tested: the lower end of the admitted range of the three pool durations.
+            // Success criteria: Duration.ZERO for all three constructs without an exception.
+            // Why it matters: zero means "no background eviction" and "no lifetime bound" - documented settings;
+            //   the guard must draw its line at negative, not at zero.
+            //
+            // Given / When / Then
             assertThatCode {
                 RestClientProperties.Pool(
                     maxIdleTime = Duration.ZERO,
@@ -134,8 +153,12 @@ class RestClientPropertiesTest {
     inner class UserAgent {
         @Test
         fun `should send the library's token by default`() {
-            // What/why: a host that says nothing names this library to its peers - `veredium/<version>`, the bare
-            //   name here where no manifest is on the classpath - never the transport's own default.
+            // What is tested: the User-Agent of a host that configures none.
+            // Success criteria: `userAgent` is unset and `effectiveUserAgent` is the library's token
+            //   (`veredium/<version>`, the bare name here where no manifest is on the classpath).
+            // Why it matters: a peer's access log should name what calls it - never the transport's own default,
+            //   which says only "Apache-HttpClient".
+            //
             // Given / When / Then
             assertThat(RestClientProperties().userAgent).isNull()
             assertThat(RestClientProperties().effectiveUserAgent).isEqualTo(Veredium.userAgent())
@@ -143,14 +166,23 @@ class RestClientPropertiesTest {
 
         @Test
         fun `should let the host name itself instead`() {
-            // Given / When / Then: the configured value, trimmed, replaces the library's token verbatim
+            // What is tested: `app.restclient.user-agent` set by the host.
+            // Success criteria: the configured value, trimmed, is the effective User-Agent.
+            // Why it matters: a host read per caller in its peers' logs names itself; surrounding whitespace from
+            //   a YAML edit must not end up on the wire.
+            //
+            // Given / When / Then
             assertThat(RestClientProperties(userAgent = " my-service/2.3 ").effectiveUserAgent).isEqualTo("my-service/2.3")
         }
 
         @Test
         fun `should reject a blank token at bind time, naming the key`() {
+            // What is tested: the binding guard of `app.restclient.user-agent`.
+            // Success criteria: a blank value throws IllegalArgumentException naming the key.
             // Why it matters: a blank or CR/LF-carrying value is refused by the transport per request, with a
-            // message that points nowhere near the configuration.
+            //   message that points nowhere near the configuration.
+            //
+            // Given / When / Then
             assertThatThrownBy { RestClientProperties(userAgent = "  ") }
                 .isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContaining("app.restclient.user-agent")

@@ -1,6 +1,5 @@
 package eu.inqudium.veredium.restclient
 
-import java.io.ByteArrayOutputStream
 import java.io.InputStream
 
 /**
@@ -40,6 +39,16 @@ class ResponseBodyLimitExceededException(
  *    truncating is what keeps the "oversized error body" case from ever carrying a client-side failure as its
  *    cause (see [RestClientVerdicts.clientSideFailure]).
  *
+ * ## Memory
+ *
+ * The limit bounds what one response may cost, so the reader is careful not to multiply it. The bytes are read
+ * straight into the array that is returned - no intermediate chunk, no `ByteArrayOutputStream` whose final
+ * `toByteArray()` would double the peak. When the response declares a `Content-Length` (the usual case for a
+ * JSON answer; Apache drops the header when it decompresses, so a declared length is the decoded one), the
+ * array is allocated at that size up front, capped at the limit so a lying header cannot reserve more than the
+ * limit allows; a body of exactly that length is then returned without a single copy. Without a declared length
+ * the array starts at 8 KiB and doubles, capped at the limit, and is trimmed to size once at the end.
+ *
  * The remainder of an over-limit body is NOT read here. Closing the response afterwards hands the stream back
  * to Apache HttpClient, which drains or discards the connection as its own rules dictate - that is the
  * transport's business, and the limit is about memory, not about the wire.
@@ -47,38 +56,79 @@ class ResponseBodyLimitExceededException(
 object BoundedBodyReader {
     private const val CHUNK_SIZE = 8 * 1024
 
-    /** The whole body when it fits into [limitBytes], otherwise `null`. */
+    /** The largest array the JVM reliably allocates - the bound `ArrayList` and `ByteArrayOutputStream` use too. */
+    private const val MAX_ARRAY_SIZE = Int.MAX_VALUE - 8
+
+    /**
+     * The whole body when it fits into [limitBytes], otherwise `null`. [contentLength] is the length the
+     * response declared, or `-1` when it declared none; it only sizes the buffer and is never trusted as the
+     * body's actual length.
+     */
     fun readOrNull(
         input: InputStream,
         limitBytes: Int,
+        contentLength: Long = -1,
     ): ByteArray? {
-        val buffer = ByteArrayOutputStream()
-        val chunk = ByteArray(CHUNK_SIZE)
-        while (true) {
-            // Never ask for more than one byte past the limit: that one byte is what distinguishes "exactly at
-            // the limit" (fits) from "past it" (rejected) without reading the rest of an oversized body.
-            // Computed in Long: RestClientProperties admits a limit of Int.MAX_VALUE, for which `limitBytes + 1`
-            // wraps to Int.MIN_VALUE in Int arithmetic and the read below throws on a negative length.
-            val wanted = minOf(chunk.size.toLong(), limitBytes + 1L - buffer.size()).toInt()
-            val read = input.read(chunk, 0, wanted)
-            if (read < 0) return buffer.toByteArray()
-            buffer.write(chunk, 0, read)
-            if (buffer.size() > limitBytes) return null
-        }
+        // Read at most one byte past the limit: that one byte is what distinguishes "exactly at the limit" (fits)
+        // from "past it" (rejected) without reading the rest of an oversized body. Computed in Long:
+        // RestClientProperties admits a limit of Int.MAX_VALUE, for which `limitBytes + 1` wraps to
+        // Int.MIN_VALUE in Int arithmetic.
+        val body = readAtMost(input, limitBytes + 1L, initialCapacity(contentLength, limitBytes))
+        return body.takeIf { it.size <= limitBytes }
     }
 
-    /** At most [limitBytes] of the body; whatever lies beyond is left unread. */
+    /** At most [limitBytes] of the body; whatever lies beyond is left unread. [contentLength] as for [readOrNull]. */
     fun readTruncated(
         input: InputStream,
         limitBytes: Int,
+        contentLength: Long = -1,
+    ): ByteArray = readAtMost(input, limitBytes.toLong(), initialCapacity(contentLength, limitBytes))
+
+    /**
+     * The declared length when there is one, the first chunk otherwise - each capped at the limit, so neither a
+     * lying header nor a tiny limit allocates more than the limit admits.
+     */
+    private fun initialCapacity(
+        contentLength: Long,
+        limitBytes: Int,
+    ): Int = (if (contentLength >= 0) contentLength else CHUNK_SIZE.toLong()).coerceAtMost(limitBytes.toLong()).toInt()
+
+    /** Reads until end of stream or until [maxBytes] have been read, into an array of [initialCapacity] that grows. */
+    private fun readAtMost(
+        input: InputStream,
+        maxBytes: Long,
+        initialCapacity: Int,
     ): ByteArray {
-        val buffer = ByteArrayOutputStream()
-        val chunk = ByteArray(CHUNK_SIZE)
-        while (buffer.size() < limitBytes) {
-            val read = input.read(chunk, 0, minOf(chunk.size, limitBytes - buffer.size()))
+        var buffer = ByteArray(initialCapacity)
+        var size = 0
+        while (size < maxBytes) {
+            if (size == buffer.size) {
+                // Full. One probe byte decides between "done" - the normal end of a body presized from its
+                // Content-Length, which then needs no copy at all - and "grow". Single-byte reads are cheap here:
+                // the transport's stream is buffered underneath.
+                val next = input.read()
+                if (next < 0) break
+                buffer = buffer.copyOf(grownCapacity(buffer.size, maxBytes))
+                buffer[size++] = next.toByte()
+                continue
+            }
+            val wanted = minOf((buffer.size - size).toLong(), maxBytes - size).toInt()
+            val read = input.read(buffer, size, wanted)
             if (read < 0) break
-            buffer.write(chunk, 0, read)
+            size += read
         }
-        return buffer.toByteArray()
+        return if (size == buffer.size) buffer else buffer.copyOf(size)
+    }
+
+    /** Doubles [current] (at least one chunk), never past [maxBytes] or the largest array the JVM allocates. */
+    private fun grownCapacity(
+        current: Int,
+        maxBytes: Long,
+    ): Int {
+        val grown = minOf(maxOf(current * 2L, CHUNK_SIZE.toLong()), maxBytes, MAX_ARRAY_SIZE.toLong()).toInt()
+        // Only reachable with a limit at the very top of the admitted range and a body of two gigabytes - the
+        // same OutOfMemoryError a ByteArrayOutputStream raises there.
+        if (grown <= current) throw OutOfMemoryError("Response body does not fit into a byte array of $current bytes")
+        return grown
     }
 }

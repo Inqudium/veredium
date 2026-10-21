@@ -5,6 +5,7 @@ import io.micrometer.core.instrument.DistributionSummary
 import jakarta.validation.ConstraintViolationException
 import jakarta.validation.Validator
 import org.slf4j.Logger
+import org.slf4j.MDC
 import org.slf4j.event.Level
 import java.time.Duration
 
@@ -203,7 +204,10 @@ class ClientCallLog(
     private fun logIfBufferLimitExceeded(error: Throwable) {
         if (!verdicts.clientSideFailure.isBufferLimitFailure(error)) return
         val contentLength = bufferLimit.contentLengthOf(error)
-        logger.warn(
+        // Through log(), like every other line: it carries the two join fields (class KDoc) - written straight
+        // to the logger, this was the one transport line no dashboard could group next to its exchange event.
+        log(
+            Level.WARN,
             "Response body exceeded the {} on backend '{}': limit={} bytes, Content-Length={}" +
                 " (wire size, a lower bound - the body may be compressed). Raise {}.max-in-memory-size;" +
                 " see {} for the sizes that do fit.",
@@ -262,6 +266,30 @@ class ClientCallLog(
     }
 
     companion object {
+        /**
+         * Runs [block] with [snapshot] installed as the MDC, and restores the thread's own MDC afterwards.
+         *
+         * For a stack whose lines are written on a thread the caller never ran on: the reactive client's signal
+         * hooks fire on a Netty event loop, whose MDC is empty unless the host enabled Reactor's automatic
+         * context propagation AND registered an MDC accessor. The client takes [snapshot] on the subscribing
+         * thread - where a coroutine's `MDCContext` or a servlet filter put the caller's keys - and writes its
+         * lines through here, so they carry the caller's correlation keys whatever the host configured. A
+         * `null` snapshot (the caller had no MDC) clears the MDC for the block, so a line never borrows another
+         * request's keys from the thread it happens to run on.
+         */
+        fun <R> withMdc(
+            snapshot: Map<String, String>?,
+            block: () -> R,
+        ): R {
+            val previous: Map<String, String>? = MDC.getCopyOfContextMap()
+            if (snapshot != null) MDC.setContextMap(snapshot) else MDC.clear()
+            try {
+                return block()
+            } finally {
+                if (previous != null) MDC.setContextMap(previous) else MDC.clear()
+            }
+        }
+
         /**
          * The two wire names the transport lines share with legatium's exchange event (`ClientLogField.NAME`
          * and `.URL_TEMPLATE` there). Spelled out because that enum is internal to the library; they are a

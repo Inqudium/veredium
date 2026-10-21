@@ -19,6 +19,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -75,7 +76,7 @@ import java.util.concurrent.atomic.AtomicReference
  *    would be a second hand-off next to the one the TimeLimiter already needs. The semaphore with a zero wait
  *    rejects at once, the virtual worker is interruptible, and the only concurrency limits in the call path stay
  *    the configured, named and metered ones. The long form is `veredium-restclient/docs/timeouts-bulkheads-threads.md`,
- *    section 4.1.
+ *    "Why a semaphore bulkhead over an unbounded executor, and not a `ThreadPoolBulkhead`".
  * 2. **The caller's context.** The worker starts with an empty MDC and no current observation, so everything
  *    logged there would lose the caller's correlation keys, and an observation opened on the worker would start
  *    a detached root instead of nesting under the caller's span. [propagate] carries both across: the caller's
@@ -151,7 +152,11 @@ class BlockingResilienceDecorator(
      * Runs [call] guarded by the three instances registered under [name] in the registries this decorator was
      * built with - the shape a Spring host uses, where `resilience4j.<layer>.instances.<name>` configures them.
      * An instance the registry does not hold is created on its default config, as the registries do.
+     *
+     * @throws TimeoutException when the TimeLimiter budget expired before the call returned.
+     * @throws InterruptedException when the CALLER was interrupted while waiting; the worker is cancelled.
      */
+    @Throws(TimeoutException::class, InterruptedException::class)
     fun <T : Any> decorate(
         name: String,
         call: () -> T,
@@ -169,7 +174,16 @@ class BlockingResilienceDecorator(
      * Runs [call] guarded by exactly these three instances - the shape a standalone user takes, with instances
      * built by hand (`CircuitBreaker.of(...)`, `TimeLimiter.of(...)`, `Bulkhead.of(...)`) or taken from any
      * registry. The registries this decorator holds are not consulted.
+     *
+     * Declared with `@Throws` for a Java host (ADR-0002 offers this class as a component of its own): the two
+     * checked exceptions the pipeline itself raises would otherwise be uncatchable by type in Java. Everything
+     * else arrives as itself, unwrapped - `CallNotPermittedException`, `BulkheadFullException`, and whatever the
+     * call throws (a Kotlin [call] may throw a checked exception of its own, which is not declared here).
+     *
+     * @throws TimeoutException when the TimeLimiter budget expired before the call returned.
+     * @throws InterruptedException when the CALLER was interrupted while waiting; the worker is cancelled.
      */
+    @Throws(TimeoutException::class, InterruptedException::class)
     fun <T : Any> decorate(
         circuitBreaker: CircuitBreaker,
         timeLimiter: TimeLimiter,
@@ -257,7 +271,10 @@ class BlockingResilienceDecorator(
                 return result
             }
         result.waiter.set(waiter)
-        // A cancel() that arrived between submit and this line found no waiter to interrupt; do it now.
+        // Safety: a cancel() that arrived before the line above found no waiter to interrupt; do it now. Nothing
+        // can reach `result` before it is returned below today, so this is unreachable as written - kept so that
+        // a change publishing the future earlier (a callback, a registry of in-flight calls) cannot reopen the
+        // window in which a cancelled call would keep its worker and its permit.
         if (result.isCancelled) waiter.cancel(true)
         return result
     }
@@ -275,10 +292,12 @@ class BlockingResilienceDecorator(
      * time, which is the moment `decorate` runs - the same moment a reactive `contextCapture()` would read the
      * subscriber's thread-locals.
      *
-     * Restoration is unconditional and in `finally`: a virtual thread is never reused, but an executor handed in
-     * by a test might reuse platform threads, and a worker must not leak one caller's keys into the next call.
+     * Restoration is unconditional and in `finally`: the virtual workers of this class are never reused, but the
+     * wrapper must not depend on that - a thread that runs it twice must not carry one caller's keys or scope
+     * into the next call. `internal` so `BlockingResilienceDecoratorTest` can prove exactly that on a REUSED
+     * thread of its own, which the decorator's fresh-thread executor never offers.
      */
-    private fun <T : Any> propagate(call: () -> T): Callable<T> {
+    internal fun <T : Any> propagate(call: () -> T): Callable<T> {
         val callerMdc: Map<String, String>? = MDC.getCopyOfContextMap()
         val callerObservation = observationRegistry?.currentObservation
         return Callable {

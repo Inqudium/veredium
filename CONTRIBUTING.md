@@ -33,8 +33,12 @@ mvn verify
 
 This compiles the modules, runs all tests, and runs the `ktlint` style check.
 A PR must pass `mvn verify` cleanly. Test coverage (JaCoCo) is collected in the
-same run and written per module to `target/site/jacoco/`; skip it locally with
-`-Djacoco.skip=true` if you need a faster loop.
+same run and written per module to `target/site/jacoco/`; the build-only module
+`veredium-coverage` merges them into one cross-module report
+(`veredium-coverage/target/site/jacoco-aggregate/`), which is the number the badge
+and the published report show. Read coverage only from a `mvn clean verify`: a
+build without `clean` can count stale classes left in `target/classes`. Skip
+coverage locally with `-Djacoco.skip=true` if you need a faster loop.
 
 Commits that only reformat, rewrap or prefix comments without a change of meaning are
 listed in `.git-blame-ignore-revs` (created with the first such commit). Run once

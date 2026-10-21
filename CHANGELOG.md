@@ -28,6 +28,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Release workflows, and the documentation site - set up from the sibling project
   [Legatium](https://github.com/Inqudium/legatium).
 
+### Fixed
+
+Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
+
+- An empty 2xx body (204, empty 200) now fails the call with `EmptyResponseBodyException` on both stacks,
+  after the Resilience4j decoration, so the breaker records a success. Before, the blocking client threw a
+  Jackson parse error, and the reactive client completed its `Mono` empty, with no error line.
+- The circuit-breaker customizer no longer lets an operator's `record-exceptions` class list record a benign
+  4xx: Resilience4j OR-ed the class list back in at `build()`. The startup guard now tells "customizer
+  overridden" apart from "customizer not reached".
+- The startup guard WARNs when the sum of the mesh aliases' bulkhead `max-concurrent-calls` exceeds
+  `app.mesh.defaults.transport.max-connections`. `ResilienceConfigContractTest` (both stacks) pins the
+  invariant for the reference configuration.
+- The reactive client's transport lines (error, cancel, final signal, report-only validation) carry the
+  caller's MDC, taken at subscription. Before, they carried it only when the host had enabled Reactor's
+  automatic context propagation.
+- `ResolvedTimeouts` rejects a negative `global-margin-ms`, and `MeshProperties.Transport` bounds the
+  timeouts to `Int.MAX_VALUE`. Every guard message names the key, the endpoint and the value.
+- The blocking async API completes the returned future on every `CancellationException` that is not the
+  caller's own cancel. Before, the future could hang.
+- `@Throws` on the blocking `decorate`, `get` and `post`, so Java callers can catch `TimeoutException` and
+  `InterruptedException`.
+- The buffer-limit line carries `adapter_name` and `adapter_url_template` like every other transport line.
+- The blocking client's bounded read no longer copies the body several times: the buffer is presized from
+  `Content-Length`, and a UTF-8 body goes to Jackson as bytes.
+- legatium 1.2.0 → 1.2.1: Apache's pool-lease timeout (`ConnectionRequestTimeoutException`) now shows
+  in the exchange event as `adapter_outcome=timeout` at WARN instead of `failure` at ERROR. A pool-lease
+  case in the restclient's `LegatiumExchangeLoggingIntegrationTest` pins it. A cancelled exchange
+  (TimeLimiter expiry, interrupted caller: `Closed by interrupt`) is still logged as ERROR `failure`.
+- Coverage: the build-only module `veredium-coverage` merges every module's JaCoCo data into one report
+  (`jacoco:report-aggregate`). A class now counts as covered when any module's tests run it; before, the
+  per-module reports under-counted `veredium-core`. The badge, the CI job summary and the published
+  `/coverage/` page read this report. The module is never deployed, bundled for Central, or listed in the SBOM.
+- Jackson 3 is pinned to 3.1.7, above the Spring Boot 4.1.1 BOM's 3.1.5, to clear seven OSV advisories
+  against `jackson-core`/`jackson-databind` 3.1.5 (five High, two Medium). Drop the pin once Boot manages
+  3.1.7 or later itself.
+- `ResponseValidationTest` builds its German host validator after switching the default locale. Hibernate
+  Validator fixes the locale when the factory is built, so the test only passed on a de_DE machine, and CI and
+  Docs on `main` had been red since 2026-10-19.
+- Jazzer fuzz targets for `ResponseBodyMetrics.utf8Size` and `BoundedBodyReader`, both in the nightly Fuzz
+  workflow.
+
 ### Changed
 
 - `BlockingResilienceDecorator` moves from `veredium-restclient` to `veredium-core` as a component

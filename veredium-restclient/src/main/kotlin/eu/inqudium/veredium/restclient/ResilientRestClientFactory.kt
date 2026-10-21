@@ -75,7 +75,7 @@ class ResilientRestClientFactory(
     // Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; Spring injects
     // the auto-configured factory when a Bean Validation provider is on the classpath. Absent -> validation
     // cannot run for ANY backend, whatever the properties say, which the startup line reports rather than
-    // leaving it to be discovered. See [ResponseValidation] for why the FACTORY rather than a Validator.
+    // leaving it to be discovered. See `ResponseValidation` for why the FACTORY rather than a Validator.
     validatorFactory: ValidatorFactory? = null,
     // Nullable like the two above: an optional dependency, so a direct (test) construction and a minimal
     // context both work without one. Absent -> neither the pool meters nor the response-size summary are
@@ -194,8 +194,11 @@ class ResilientRestClientFactory(
      * connections idle for longer than `maxIdleTime` and connections past their time-to-live are closed. One
      * schedule for the one pool - Apache's own `evictIdleConnections` would start a thread per HttpClient, i.e.
      * one per endpoint, for the same pool. `null` when the interval is zero, which is "off".
+     *
+     * `internal` so the factory's integration test can see that [shutdown] stops it: the scheduler runs on a
+     * virtual thread, which no thread listing shows.
      */
-    private val evictor: ScheduledExecutorService? =
+    internal val evictor: ScheduledExecutorService? =
         properties.pool.evictInBackground
             .takeUnless { it.isZero }
             ?.let { interval ->

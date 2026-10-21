@@ -2,6 +2,7 @@ package eu.inqudium.veredium.webclient
 
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
 import eu.inqudium.veredium.core.client.ClientCallLog
+import eu.inqudium.veredium.core.client.EmptyResponseBodyException
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.validation.ResponseValidationProperties
@@ -10,6 +11,7 @@ import jakarta.validation.ConstraintViolationException
 import jakarta.validation.Validator
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import org.slf4j.MDC
 import org.slf4j.event.Level
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.WebClientResponseException
@@ -30,6 +32,25 @@ import java.util.concurrent.TimeUnit
  * sets). What this class logs is the transport detail underneath: the per-call DEBUG lines, the error line
  * with the exception class, the cancellation line and the buffer-limit line - each carrying `adapter_name` and
  * `adapter_url_template` under the library's own field names ([ClientCallLog]), so it joins the exchange event on sight.
+ *
+ * ## The response contract
+ *
+ * The returned `Mono<T>` emits exactly one value or an error - never completes empty. A 2xx answer without a
+ * body (a 204, or a 200 with an empty entity) fails with [EmptyResponseBodyException] naming the backend and the
+ * expected type; a non-2xx answer fails with the `WebClientResponseException` `retrieve()` raises. Until
+ * 2026-10-21 an empty body completed the `Mono` empty instead: no error line, a success for the breaker, and a
+ * `NoSuchElementException` out of the caller's `awaitSingle()` that named nothing - the blocking twin failed
+ * the same answer with a parse error, so the two stacks disagreed. The failure is raised AFTER the
+ * Resilience4j decoration, like a deserialisation failure: the backend answered promptly with a success status,
+ * so the breaker records a success, and the error line reports the anomaly at WARN.
+ *
+ * ## The caller's MDC on the transport lines
+ *
+ * The error, cancellation and closing lines are written in signal hooks that run on a Netty event loop, which
+ * carries none of the caller's MDC. Rather than depend on the host having enabled Reactor's automatic context
+ * propagation AND registered an MDC accessor, each subscription snapshots the MDC on the SUBSCRIBING thread -
+ * where a coroutine's `MDCContext` or a servlet filter put the correlation keys - and writes those lines under
+ * it ([ClientCallLog.withMdc]), leaving the event loop's own MDC as it found it.
  */
 class ResilientWebClient(
     private val webClient: WebClient,
@@ -185,7 +206,13 @@ class ResilientWebClient(
         // never shares state across subscriptions.
         val exchange =
             Mono.defer {
-                // Per subscription, i.e. on every outbound call - guarded inside, see ClientCallLog.
+                // The caller's MDC, taken HERE because this is the subscribing thread - the last point at which
+                // the caller's correlation keys are reliably on the thread. Every hook below fires on an event
+                // loop and writes its line under this snapshot (class KDoc). Per subscription, like the clock.
+                val callerMdc: Map<String, String>? = MDC.getCopyOfContextMap()
+
+                // Per subscription, i.e. on every outbound call - guarded inside, see ClientCallLog. Runs on the
+                // subscribing thread itself, so it carries the caller's MDC without help.
                 calls.logExecuting(responseType, requestBody)
 
                 // The attempt's own clock, started per SUBSCRIPTION like everything else in this defer. The
@@ -204,9 +231,16 @@ class ResilientWebClient(
                 // contract problem, not an outage, and must not open the circuit either.
                 resilience
                     .decorate(backendName, rawMono)
+                    // An empty 2xx body (204, empty 200) completes bodyToMono EMPTY. Turned into a named error
+                    // here - after the decoration, so the breaker has already recorded the success the backend's
+                    // answer was, and before the hooks below, so the error line reports it (class KDoc).
+                    .switchIfEmpty(Mono.error { EmptyResponseBodyException(backendName, responseType) })
                     .map { rawBody ->
-                        calls.recordBodySize(rawBody)
-                        calls.validate(objectMapper.readValue(rawBody, responseType))
+                        // The report-only validation line is written here, on the event loop, too.
+                        ClientCallLog.withMdc(callerMdc) {
+                            calls.recordBodySize(rawBody)
+                            calls.validate(objectMapper.readValue(rawBody, responseType))
+                        }
                     }
                     // doOnError/doOnCancel/doFinally sit OUTSIDE the decoration so the transport lines also
                     // carry the resilience verdict: a TimeLimiter timeout, CircuitBreaker short-circuit,
@@ -217,11 +251,13 @@ class ResilientWebClient(
                     .doOnCancel {
                         // A cancelled scope (caller timeout, client disconnect) tears the stream down without
                         // doOnError, so this is the only hook that can report it.
-                        calls.onCancel(responseType, elapsedMillis)
+                        ClientCallLog.withMdc(callerMdc) { calls.onCancel(responseType, elapsedMillis) }
                     }.doOnError { error ->
-                        calls.onError(responseType, error, elapsedMillis)
+                        ClientCallLog.withMdc(callerMdc) { calls.onError(responseType, error, elapsedMillis) }
                     }.doFinally { signalType ->
-                        calls.log(Level.DEBUG, "On signalType={} for backend '{}'", signalType, backendName)
+                        ClientCallLog.withMdc(callerMdc) {
+                            calls.log(Level.DEBUG, "On signalType={} for backend '{}'", signalType, backendName)
+                        }
                     }
             }
 

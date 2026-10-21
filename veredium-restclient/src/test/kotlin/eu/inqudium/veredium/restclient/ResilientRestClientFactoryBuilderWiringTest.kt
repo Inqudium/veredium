@@ -40,7 +40,7 @@ import java.util.function.Supplier
  *    this factory produces; that the module toggle `http-observation-enabled=false` still switches the
  *    observation of THESE clients off although Boot wired the registry; and that a context without the
  *    builder bean fails to start rather than running silently on a bare builder.
- * 2. Success criterion: a marker header set by a test customizer arrives at a local WireMock backend; an
+ * 2. Success criteria: a marker header set by a test customizer arrives at a local WireMock backend; an
  *    `http.client.requests` meter appears in a `SimpleMeterRegistry` behind the context's `ObservationRegistry`
  *    when the toggle is on and does NOT appear when it is off; and the builder-less context's startup failure
  *    names `RestClient.Builder`.
@@ -150,6 +150,13 @@ class ResilientRestClientFactoryBuilderWiringTest {
     inner class `Host customizers` {
         @Test
         fun `should send the header a RestClientCustomizer bean of the host puts on Boot's builder`() {
+            // What is tested: that the factory clones Boot's builder bean, with every host customizer already
+            //   applied, instead of starting from a builder of its own.
+            // Success criteria: the marker header a host RestClientCustomizer bean sets arrives at WireMock on a
+            //   request made through a client of the factory.
+            // Why it matters: a host puts its correlation headers, converters and conventions on Boot's builder;
+            //   a factory that bypassed it would drop all of them without an error.
+            //
             // Given: Boot's auto-configuration plus a host RestClientCustomizer bean that sets a marker header
             wireMock.resetRequests()
             val meterRegistry = SimpleMeterRegistry()
@@ -172,6 +179,13 @@ class ResilientRestClientFactoryBuilderWiringTest {
     inner class `Observation wired by Boot` {
         @Test
         fun `should record an http client observation per request without the factory wiring the registry`() {
+            // What is tested: the observation with the toggle ON comes from Boot's ObservationRestClientCustomizer
+            //   on the builder bean - the factory only keeps it.
+            // Success criteria: one request produces exactly one `http.client.requests` timer in the registry
+            //   behind the context's ObservationRegistry.
+            // Why it matters: the client span and the request timer of every call depend on this route; a
+            //   factory that wired a registry itself would diverge from the host's own observation conventions.
+            //
             // Given: the toggle ON, an ObservationRegistry bean, and Boot's ObservationRestClientCustomizer
             val meterRegistry = SimpleMeterRegistry()
             factoryContext(observationEnabled = true, meterRegistry = meterRegistry)
@@ -190,6 +204,13 @@ class ResilientRestClientFactoryBuilderWiringTest {
 
         @Test
         fun `should record no http client observation when the module toggle is off although Boot wired the registry`() {
+            // What is tested: the module toggle OFF overriding what Boot put on the builder - for this factory's
+            //   clients only.
+            // Success criteria: no `http.client.requests` timer after a request, with the same registry and the
+            //   same Boot customizer as the case above.
+            // Why it matters: the toggle is the operator's off switch for these clients' spans; one that lost to
+            //   Boot's wiring would switch nothing off.
+            //
             // Given: the toggle OFF, the same registry bean and the same Boot customizer as above
             val meterRegistry = SimpleMeterRegistry()
             factoryContext(observationEnabled = false, meterRegistry = meterRegistry)
@@ -208,6 +229,13 @@ class ResilientRestClientFactoryBuilderWiringTest {
     inner class `Missing builder bean` {
         @Test
         fun `should fail the context start naming RestClient Builder when no builder bean exists`() {
+            // What is tested: the builder bean as a REQUIRED dependency of the factory.
+            // Success criteria: the context fails to start, and the failure names `RestClient$Builder` and the
+            //   factory bean that needed it.
+            // Why it matters: a Kotlin default on the parameter would make Spring treat the bean as optional, and
+            //   a host without RestClientAutoConfiguration would silently run on a bare builder - no customizers,
+            //   no client span, no log line.
+            //
             // Given: the factory's collaborators but neither Boot's auto-configuration nor a builder bean
             factoryContext(observationEnabled = true, meterRegistry = SimpleMeterRegistry())
                 // When: the context starts

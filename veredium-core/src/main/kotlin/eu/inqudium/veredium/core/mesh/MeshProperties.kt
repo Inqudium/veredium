@@ -43,7 +43,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  * - `margins` - a PARTIAL override, field-merged onto `defaults.margins` (only the fields you set change).
  *
  * **`margins`** (under `defaults` and, partially, per endpoint - shapes the derived ladder; see [Margins]):
- * - `global-margin-ms` (Long, `200`) - buffer folded into `global = (1 + maxRetries)*individual + globalMargin`;
+ * - `global-margin-ms` (Long, `200`, `>= 0`) - buffer folded into `global = (1 + maxRetries)*individual + globalMargin`;
  *   the ONE margin the sidecar also reads.
  * - `response-timeout-margin-ms` (Long, `200`) - `responseTimeout = global + responseTimeoutMargin`: the
  *   transport's response timeout of the app->sidecar hop, one rung above the sidecar's `global`. The name is
@@ -56,8 +56,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  *
  * **`transport`** (under `defaults` - the app->sidecar pre-response phases; see [Transport]):
  * - `sidecar-base-url` (String, `http://localhost:8042`).
- * - `connect-timeout-ms` (Long, `100`) - small because app->sidecar is localhost + plaintext.
- * - `pending-acquire-timeout-ms` (Long, `200`) - fail fast on pool exhaustion.
+ * - `connect-timeout-ms` (Long, `100`, `1..Int.MAX_VALUE`) - small because app->sidecar is localhost + plaintext.
+ * - `pending-acquire-timeout-ms` (Long, `200`, `1..Int.MAX_VALUE`) - fail fast on pool exhaustion.
  * - `max-connections` (Int, `100`).
  * - NOTE: `timeLimiterMargin` is COMPUTED = `connect + pendingAcquire + 100` headroom (not configurable).
  *
@@ -262,14 +262,22 @@ data class MeshProperties(
             // that fills long before the four bulkheads (4 x 25) ever reject anything. A zero or negative
             // timeout means "unbounded" to the transport, which makes the computed timeLimiterMargin - the
             // worst case of exactly these two phases - a lie. Fail at bind time, naming the key.
+            //
+            // The upper bound comes from the transports: Reactor Netty takes the connect timeout as an `Int`
+            // channel option, so the reactive factory narrows it with `toInt()`, which WRAPS above Int.MAX_VALUE
+            // instead of failing - to a negative or a tiny timeout, nothing like the value written. The
+            // pending-acquire timeout shares the bound, so neither phase can be configured past what every
+            // transport represents.
             require(maxConnections >= 1) {
                 "app.mesh.defaults.transport.max-connections must be at least 1, but was $maxConnections"
             }
-            require(connectTimeoutMs >= 1) {
-                "app.mesh.defaults.transport.connect-timeout-ms must be at least 1, but was $connectTimeoutMs"
+            require(connectTimeoutMs in 1..MAX_TRANSPORT_TIMEOUT_MS) {
+                "app.mesh.defaults.transport.connect-timeout-ms must be between 1 and $MAX_TRANSPORT_TIMEOUT_MS, " +
+                    "but was $connectTimeoutMs"
             }
-            require(pendingAcquireTimeoutMs >= 1) {
-                "app.mesh.defaults.transport.pending-acquire-timeout-ms must be at least 1, but was $pendingAcquireTimeoutMs"
+            require(pendingAcquireTimeoutMs in 1..MAX_TRANSPORT_TIMEOUT_MS) {
+                "app.mesh.defaults.transport.pending-acquire-timeout-ms must be between 1 and " +
+                    "$MAX_TRANSPORT_TIMEOUT_MS, but was $pendingAcquireTimeoutMs"
             }
         }
 
@@ -287,6 +295,13 @@ data class MeshProperties(
 
             /** Fixed headroom the computed timeLimiterMargin adds on top of the worst-case pre-response phases. */
             const val TIME_LIMITER_HEADROOM_MS: Long = 100
+
+            /**
+             * The largest connect / pending-acquire timeout either transport can represent: the reactive stack
+             * narrows the value to an `Int`, so anything above `Int.MAX_VALUE` (about 24.8 days) is rejected at
+             * bind time rather than wrapped.
+             */
+            const val MAX_TRANSPORT_TIMEOUT_MS: Long = Int.MAX_VALUE.toLong()
         }
     }
 

@@ -25,12 +25,11 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          # No fuzz target yet: the scaffold carries no parser of caller- or
-          # peer-controlled data. The first one (a *FuzzTest.java under
-          # src/test/java, CONTRIBUTING.md "Fuzzing") replaces this entry;
-          # until then the job finds no test and passes (failIfNoSpecifiedTests
-          # is off below).
-          - VerediumFuzzTest
+          # One entry per *FuzzTest.java under a module's src/test/java
+          # (CONTRIBUTING.md "Fuzzing"): the surfaces that bound or measure
+          # peer-controlled response bodies.
+          - ResponseBodyMetricsFuzzTest
+          - BoundedBodyReaderFuzzTest
     steps:
       # Pinned to commit SHAs, not mutable tags - see ci.yml for the
       # rationale.

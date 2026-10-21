@@ -1,10 +1,16 @@
+# The REFERENCE configuration of veredium-restclient: a worked example of how a host configures the client,
+# every key with its reasoning - the file the module's docs quote. It is a TEST resource: the module is a
+# library without src/main/resources, so no consumer receives this file, and a host writes its own (copying
+# from here). The contract tests bind it (see the test helper ConfigurationFiles) so that what the docs
+# recommend is checked; the test-owned twin application-test.yml carries the values the tests pin.
 
 logging:
   level:
     # Framework noise off; this module's own classes stay verbose on purpose.
     root: INFO
-    com:
-      ing: DEBUG
+    eu:
+      inqudium:
+        veredium: DEBUG
     # The exchange stream: one event per outbound HTTP exchange, written by legatium-restclient-logging (see the
     # adapter-logging block below). INFO = every call; WARN = only failures, timeouts, cancellations, slow
     # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Unlike the module's former exchange diary, raising this level FILTERS
@@ -13,7 +19,7 @@ logging:
     adapter-http-exchange: INFO
     # The library's own logger: the immediate WARN breadcrumb when a call throws, and errors of the logging
     # itself (fail-open lines). Keep at WARN or lower - silencing it hides the breadcrumb. DEBUG adds the wiring
-    # report at context start - which builders got the filter, which properties bound (legatium 1.2.0).
+    # report at context start - which builders got the filter, which properties bound (since legatium 1.2.0).
     eu.inqudium.legatium.restclient.logging: WARN
 
 # =====================================================================================================
@@ -27,7 +33,7 @@ adapter-logging:
   # Logger the exchange events are emitted on: the library's default name, kept so its documentation and the
   # runbook queries apply verbatim. It must be the SAME string as the `logging.level` key above - the level
   # line addresses the logger by this name, and a mismatch leaves the level filtering nothing (the stream
-  # would silently inherit `eu.inqudium.veredium: DEBUG` instead). LoggingLevelContractTest pins the pair in this file.
+  # would silently inherit the root level instead). LoggingLevelContractTest pins the pair in this file.
   logger-name: adapter-http-exchange
 
   # Optionally log an ARRIVAL line the moment the request is sent, before the wire call is made.
@@ -85,8 +91,8 @@ app:
     observability:
       # Whether Boot's ObservationRegistry stays on the cloned builder (client spans, the http.client.requests
       # timer, the outgoing traceparent) or is replaced by NOOP for these clients. The code default is OFF
-      # (opt-in, RestClientProperties.Observability); the module SHIPS it on, so a host that says nothing gets
-      # observed calls and legatium's traced identity (trace id as request id) whenever the host has a tracer.
+      # (opt-in, RestClientProperties.Observability); this reference configuration switches it on, so a host
+      # that copies it gets observed calls and legatium's traced identity (trace id as request id) whenever the host has a tracer.
       # Effective only with a recording ObservationRegistry bean - the factory's startup line reports the
       # difference between "on" and "on, but nothing is observed". The chart sets the same key per stage.
       http-observation-enabled: true
@@ -121,8 +127,8 @@ app:
     # false to watch a newly-enabled backend against real traffic before enforcing. It is one posture for the
     # whole app, deliberately not per-endpoint - the per-alias choice is only WHICH backends validate.
     #
-    # SHIPPED: on everywhere, report only. The code default is off; the module ships the adoption posture
-    # instead - every backend's response is checked, a violation is logged at WARN and the response returned
+    # REFERENCE: on everywhere, report only. The code default is off; this reference configuration recommends
+    # the adoption posture instead - every backend's response is checked, a violation is logged at WARN and the response returned
     # unchanged, so the generated constraints are measured against real traffic before any of them may fail a
     # call. To enforce, flip fail-on-violation (one posture for the whole app); to exempt a backend whose spec
     # is known to be stricter than reality, add it under endpoints with `false`.
@@ -134,7 +140,8 @@ app:
   # (connect / response / pending-acquire / max-connections + the per-endpoint TimeLimiter and slow-call).
   # No explicit alias: the logical backend name (R4j instance + metric label) is DERIVED from the triplet
   # (host-METHOD-path), so it is the single source of the endpoint identity. The adapters' ALIAS constants
-  # must match that derived value (pinned by MeshAliasContractTest).
+  # must match that derived value: ResilientRestClientFactory.create fails fast on a name no endpoint derives,
+  # and ResilienceConfigContractTest pins the resilience4j instance keys below against the derived set.
   #
   # Per-endpoint feature toggles live here too, tri-state (unset inherits app.mesh.defaults):
   #   time-limiter.enabled    (default true)  - whether mesh derives + overrides that endpoint's TimeLimiter budget
@@ -174,8 +181,8 @@ resilience4j:
   # the call path unconditionally (BlockingResilienceDecorator applies all three, regardless of the app.mesh
   # toggles), so leaving one undeclared does not mean "off" - it means that backend silently runs on
   # Resilience4j's own defaults, at values nobody had chosen and nothing documented. The instance keys are the
-  # mesh-derived aliases and must stay in sync with the adapters' ALIAS constants (pinned by
-  # ResilienceConfigContractTest).
+  # mesh-derived aliases; ResilienceConfigContractTest pins, in this file and its twin, that every alias is
+  # declared on all three layers.
   #
   # The TimeLimiter entries have a second job: Resilience4j's Boot configuration materialises exactly the
   # `instances.<name>` listed here, and the mesh customizer (MeshResilienceCustomizers) sets the derived budget
@@ -216,7 +223,8 @@ resilience4j:
         # letting callers pile up on pendingAcquire. Raising this without raising max-connections moves the
         # queueing into the pool, where pending-acquire-timeout-ms (200) fails them anyway, only later and
         # with a less obvious error. ResilienceConfigContractTest enforces sum(max-concurrent-calls) <=
-        # max-connections.
+        # max-connections for this file; at runtime MeshResilienceStartupGuard WARNs (names both numbers and every
+        # alias) when a host's own configuration breaks it.
         max-concurrent-calls: 25
         # Fail fast rather than queue: the same choice the mesh transport already makes for the pool. A
         # waiting caller burns its TimeLimiter budget (1.1-1.6s per the derived ladder) doing nothing.
@@ -232,8 +240,9 @@ resilience4j:
         # A BulkheadFullException on a known path is therefore a SIGNAL, not the design working: it says that
         # the caller's own bound is mis-sized, or that a second caller in the same JVM is consuming more of the
         # alias than assumed. Raising this value is the wrong first response; sum(max-concurrent-calls) <=
-        # max-connections is enforced by ResilienceConfigContractTest and raising it here without raising the
-        # pool just moves the queueing. The decision this inherits is recorded in docs/decisions.md (D1).
+        # max-connections is enforced for this file by ResilienceConfigContractTest (and warned about at startup
+        # by MeshResilienceStartupGuard), and raising it here without raising the pool just moves the queueing.
+        # The decision this inherits is recorded in docs/decisions.md (D1).
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
         base-config: lap-backend
