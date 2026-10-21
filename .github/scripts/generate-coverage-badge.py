@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Generate a self-hosted coverage badge (SVG) from JaCoCo's CSV reports.
 
-Reads every module's target/site/jacoco/jacoco.csv, computes the total
-instruction coverage across all modules, and writes a shields-style flat
+Reads the cross-module report of veredium-coverage
+(target/site/jacoco-aggregate/jacoco.csv) - where a class counts as covered
+when ANY module's tests run it, not only its own module's - and writes the
+total instruction coverage as a shields-style flat
 badge. The badge is published on the docs site by the Docs workflow and
 referenced from the README - so the number the README shows is always
 generated from a real test run, never hand-maintained.
@@ -16,9 +18,9 @@ import sys
 from pathlib import Path
 
 OUT_PATH = Path(sys.argv[1] if len(sys.argv) > 1 else "site/coverage/badge.svg")
-CSV_PATHS = [Path(p) for p in sys.argv[2:]] or sorted(
-    Path(".").glob("*/target/site/jacoco/jacoco.csv")
-)
+CSV_PATHS = [Path(p) for p in sys.argv[2:]] or [
+    Path("veredium-coverage/target/site/jacoco-aggregate/jacoco.csv")
+]
 
 # shields.io flat-style colors, by coverage threshold.
 COLORS = [(90, "#4c1"), (80, "#97ca00"), (70, "#a4a61d"), (60, "#dfb317"), (50, "#fe7d37"), (0, "#e05d44")]

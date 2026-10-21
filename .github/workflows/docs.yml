@@ -93,24 +93,14 @@ jobs:
             cp -r "$module"/target/dokka "site/api/$module"
           done
 
-      # One JaCoCo report per module plus the combined badge; the small
-      # index page keeps /coverage/ (badge link target) from 404ing.
-      - name: Add coverage reports and badge to site
+      # The cross-module report of veredium-coverage is /coverage/ itself (a
+      # class counts as covered when ANY module's tests run it); the badge is
+      # derived from the same report, so the two cannot disagree.
+      - name: Add coverage report and badge to site
         run: |
-          mkdir -p site/coverage
-          for module in veredium-core veredium-restclient veredium-webclient; do
-            cp -r "$module"/target/site/jacoco "site/coverage/$module"
-          done
+          mkdir -p site
+          cp -r veredium-coverage/target/site/jacoco-aggregate site/coverage
           python3 .github/scripts/generate-coverage-badge.py site/coverage/badge.svg
-          cat > site/coverage/index.html <<'EOT'
-          <!DOCTYPE html>
-          <html lang="en"><head><meta charset="utf-8"><title>Veredium coverage</title></head>
-          <body><h1>Veredium coverage reports</h1><ul>
-          <li><a href="veredium-core/">veredium-core</a></li>
-          <li><a href="veredium-restclient/">veredium-restclient</a></li>
-          <li><a href="veredium-webclient/">veredium-webclient</a></li>
-          </ul><p>The badge aggregates instruction coverage across the modules listed above.</p></body></html>
-          EOT
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

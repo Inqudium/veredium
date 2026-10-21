@@ -127,11 +127,17 @@ class ResponseValidationTest {
             // Why it matters: these messages end up in log lines people search and alert on; a text that depends
             //   on the locale of the machine the process happens to run on belongs nowhere near them.
             //
-            // Given: a constrained value and a German default locale
-            val validation = ResponseValidation(ResponseValidationProperties(enabled = true), validatorFactory)
+            // Given: a constrained value and a German default locale. The host's factory is built INSIDE the
+            // German window: Hibernate Validator takes its default locale from Locale.getDefault() when the
+            // factory is BUILT, not per call - a factory built before the switch reads in whatever locale the
+            // machine runs on (German on a de_DE workstation, English on the CI runner), and the counter-check
+            // below would pass or fail by machine.
             val previous = Locale.getDefault()
             Locale.setDefault(Locale.GERMAN)
+            val germanHost = Validation.buildDefaultValidatorFactory()
             try {
+                val validation = ResponseValidation(ResponseValidationProperties(enabled = true), germanHost)
+
                 // When
                 val pinned =
                     validation.validator!!
@@ -139,7 +145,7 @@ class ResponseValidationTest {
                         .single()
                         .message
                 val hosts =
-                    validatorFactory.validator
+                    germanHost.validator
                         .validate(TooLong())
                         .single()
                         .message
@@ -148,6 +154,7 @@ class ResponseValidationTest {
                 assertThat(pinned).isEqualTo("size must be between 0 and 3")
                 assertThat(hosts).`as`("the host's own validator follows the default locale - which is the point").isNotEqualTo(pinned)
             } finally {
+                germanHost.close()
                 Locale.setDefault(previous)
             }
         }

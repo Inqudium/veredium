@@ -76,6 +76,8 @@
         <module>veredium-core</module>
         <module>veredium-restclient</module>
         <module>veredium-webclient</module>
+        <!-- Build-only: the cross-module coverage report, never published (see its pom). -->
+        <module>veredium-coverage</module>
     </modules>
 
     <properties>
@@ -108,6 +110,11 @@
         <project.build.outputTimestamp>2026-10-19T00:00:00Z</project.build.outputTimestamp>
 
         <!-- Third Party Dependencies -->
+        <!-- Jackson 3 above the Spring Boot 4.1.1 BOM's 3.1.5: 3.1.7 fixes the OSV findings against
+             jackson-core/-databind 3.1.5 (GHSA-7hhh-6rmp-j9qf, GHSA-p6pp-m3f8-5c89, GHSA-cxp5-3px4-pw24,
+             GHSA-gx83-3vf8-gh7j, GHSA-q4xh-88c3-wmh7, GHSA-wjgm-6hv5-3cvf, GHSA-wv8q-qhhj-9h54). Remove the
+             override once a Boot release manages >= 3.1.7 itself. -->
+        <jackson-bom.version>3.1.7</jackson-bom.version>
         <!-- Fuzzing (test scope): Jazzer's JUnit 5 integration - @FuzzTest
              methods run as regression tests in every verify and fuzz for
              real in the scheduled Fuzz workflow (JAZZER_FUZZ=1). -->
@@ -449,9 +456,10 @@
                 property (merged with the JVM flags in the Surefire config -
                 see the @{argLine} note there) and each module's report is
                 written at verify to target/site/jacoco/ (HTML + XML + CSV).
-                The Docs workflow publishes the HTML reports and derives the
-                combined coverage badge from the CSVs, so the visible numbers
-                are generated, never hand-maintained. Skip locally with
+                veredium-coverage merges all of them into one cross-module
+                report (target/site/jacoco-aggregate/), which the badge, the CI
+                summary and the published /coverage/ page read, so the visible
+                numbers are generated, never hand-maintained. Skip locally with
                 -Djacoco.skip=true.
             -->
             <plugin>
@@ -652,6 +660,10 @@
                         <extensions>true</extensions>
                         <configuration>
                             <publishingServerId>central</publishingServerId>
+                            <!-- The build-only coverage module is no artefact of the library. -->
+                            <excludeArtifacts>
+                                <artifact>veredium-coverage</artifact>
+                            </excludeArtifacts>
                             <!-- Uploads and validates the bundle but waits for a manual "Publish"
                                  click in the Central Portal; set to true for hands-off releases. -->
                             <autoPublish>false</autoPublish>

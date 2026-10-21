@@ -36,7 +36,7 @@ snippet says `...`:
   the generated inventory of the test suite: every test sentence plus its
   rationale, grouped by module and component.
 - **[Coverage report](https://inqudium.github.io/veredium/coverage/)** —
-  the JaCoCo reports of the run that built this site.
+  the cross-module JaCoCo report of the run that built this site.
 - **[API reference](https://inqudium.github.io/veredium/api/veredium-core/)** —
   generated with Dokka.
 

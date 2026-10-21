@@ -57,6 +57,16 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
   in the exchange event as `adapter_outcome=timeout` at WARN instead of `failure` at ERROR. A pool-lease
   case in the restclient's `LegatiumExchangeLoggingIntegrationTest` pins it. A cancelled exchange
   (TimeLimiter expiry, interrupted caller: `Closed by interrupt`) is still logged as ERROR `failure`.
+- Coverage: the build-only module `veredium-coverage` merges every module's JaCoCo data into one report
+  (`jacoco:report-aggregate`). A class now counts as covered when any module's tests run it; before, the
+  per-module reports under-counted `veredium-core`. The badge, the CI job summary and the published
+  `/coverage/` page read this report. The module is never deployed, bundled for Central, or listed in the SBOM.
+- Jackson 3 is pinned to 3.1.7, above the Spring Boot 4.1.1 BOM's 3.1.5, to clear seven OSV advisories
+  against `jackson-core`/`jackson-databind` 3.1.5 (five High, two Medium). Drop the pin once Boot manages
+  3.1.7 or later itself.
+- `ResponseValidationTest` builds its German host validator after switching the default locale. Hibernate
+  Validator fixes the locale when the factory is built, so the test only passed on a de_DE machine, and CI and
+  Docs on `main` had been red since 2026-10-19.
 - Jazzer fuzz targets for `ResponseBodyMetrics.utf8Size` and `BoundedBodyReader`, both in the nightly Fuzz
   workflow.
 

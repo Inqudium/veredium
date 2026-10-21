@@ -65,8 +65,8 @@ group, the fictional periodic table of **Inqudium**.
 - **[Reactive client guide](veredium-webclient/docs/GUIDE.md)** — `veredium-webclient`: configuration, metrics, logging.
 - **[Test evidence](https://inqudium.github.io/veredium/tests/test-evidence/)** — the generated
   inventory of the test suite: every test sentence plus its rationale.
-- **[Coverage report](https://inqudium.github.io/veredium/coverage/)** — the JaCoCo reports of
-  the run that built the site.
+- **[Coverage report](https://inqudium.github.io/veredium/coverage/)** — the cross-module JaCoCo
+  report of the run that built the site (a class counts as covered when any module's tests run it).
 - **[API reference](https://inqudium.github.io/veredium/api/veredium-core/)** — generated with
   Dokka.
 - **[Architecture decision records](docs/adr/README.md)** — the decisions, numbered and never

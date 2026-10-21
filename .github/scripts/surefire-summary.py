@@ -55,7 +55,12 @@ def main() -> None:
                 f"| `{module}` | `{name}`{marker} | {vals[0]} | {vals[1]} | {vals[2]} | {vals[3]} | {vals[4]:.1f}s |"
             )
     missed = covered = 0
-    for jacoco_csv in sorted(Path(".").glob("*/target/site/jacoco/jacoco.csv")):
+    # The cross-module report (veredium-coverage): a class counts as covered when any module's tests
+    # run it. The per-module reports would under-count veredium-core, whose classes the client suites
+    # exercise too; they are only the fallback for a partial build that did not reach the aggregator.
+    aggregate = Path("veredium-coverage/target/site/jacoco-aggregate/jacoco.csv")
+    jacoco_csvs = [aggregate] if aggregate.exists() else sorted(Path(".").glob("*/target/site/jacoco/jacoco.csv"))
+    for jacoco_csv in jacoco_csvs:
         with jacoco_csv.open(encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 missed += int(row["INSTRUCTION_MISSED"])

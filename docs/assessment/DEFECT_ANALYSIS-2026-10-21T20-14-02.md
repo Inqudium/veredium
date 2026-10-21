@@ -111,10 +111,10 @@ Kategorien: test quality 15, robustness 4, correctness 2, maintainability 2, res
 
 ## Bearbeitungsstand (2026-10-21, nach der Analyse)
 
-23 von 25 Befunden sind behoben (abgehakt). Stand: Arbeitsbaum auf `main` über Commit
-`0faa7dcc20b2a74c0ba09d19102f790ae47e82be`, noch nicht committet. Ein `mvn -o clean verify` über alle drei Module
-ist grün: 441 Tests (vorher 342), 0 Fehler, ktlint sauber. `generate-test-catalog.py` meldet für alle 441 Tests
-einen vollständigen Rationale-Block. Die Änderungen sind in `./CHANGELOG.md` unter „Fixed“ zusammengefasst.
+24 von 25 Befunden sind behoben (abgehakt), auf Branch `fix/defect-analysis-2026-10-21` über Commit
+`0faa7dcc20b2a74c0ba09d19102f790ae47e82be`. Ein `mvn -o clean verify` über alle Module ist grün: 442 Tests (vorher
+342), 0 Fehler, ktlint sauber. `generate-test-catalog.py` meldet für alle 442 Tests einen vollständigen
+Rationale-Block. Die Änderungen sind in `./CHANGELOG.md` unter „Fixed“ zusammengefasst.
 
 Offen:
 
@@ -123,10 +123,14 @@ Offen:
   rot). Offen bleibt der abgebrochene Exchange (TimeLimiter-Ablauf, unterbrochener Aufrufer: `Closed by
   interrupt`): er erscheint weiter als ERROR `failure`. Das kann nur legatium ändern; erfasst als
   [Inqudium/legatium#88](https://github.com/Inqudium/legatium/issues/88).
-- **24** — Nur teilweise erledigt. `ClientCallLog` hat einen eigenen Unit-Test (`ClientCallLogTest`) und
-  erscheint im Core nicht mehr mit 0 %. Eine aggregierte JaCoCo-Coverage (`report-aggregate`) gibt es nicht,
-  denn sie bräuchte ein eigenes Aggregator-Modul. Die CI baut ohnehin aus einem frischen Checkout, verwaiste
-  Klassen betreffen also nur lokale Builds ohne `clean`.
+
+Nachgezogen:
+
+- **24** — `ClientCallLog` hat einen eigenen Unit-Test (`ClientCallLogTest`). Das
+  build-only Modul `./veredium-coverage/` führt per `jacoco:report-aggregate` die Daten aller Module zusammen.
+  Badge, CI-Summary und `/coverage/` lesen diesen Gesamtbericht: Core 95,5 % → 97,1 %, gesamt 96,2 % → 97,0 %
+  (Instruction). Das Modul ist von Deploy, Central-Bundle, SBOM und Dokka ausgenommen. CONTRIBUTING weist darauf
+  hin, Coverage nur aus `mvn clean verify` zu lesen (verwaiste Klassen).
 
 Bei der Behebung zusätzlich gefunden:
 
@@ -434,7 +438,7 @@ Keine.
     Methodenrümpfe, siehe Abschnitt 2.
   - Fix strategy: Blöcke nachziehen und eine einheitliche Überschrift wählen, damit die Evidence-Seite vollständig ist.
 
-- [ ] 24. [`./pom.xml:459` — JaCoCo-Konfiguration, mit `./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/client/ClientCallLog.kt:58`] {Low} {Confidence: high} {test quality / coverage illusion}
+- [x] 24. [`./pom.xml:459` — JaCoCo-Konfiguration, mit `./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/client/ClientCallLog.kt:58`] {Low} {Confidence: high} {test quality / coverage illusion}
   - JaCoCo misst pro Modul, und das Badge summiert die Modul-CSVs. `ClientCallLog` (86 Zeilen, 34 Branches)
     erscheint deshalb mit 0 %, obwohl beide Client-Suiten es ausführen; einen eigenen Unit-Test hat es nicht.
   - Ein Build ohne `clean` zählt außerdem verwaiste Klassen der ADR-0001/0002-Verschiebungen mit

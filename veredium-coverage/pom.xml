@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.inqudium</groupId>
+        <artifactId>veredium</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <!--
+        Build-only module: the cross-module JaCoCo report. Never released.
+
+        Each library module's own report (target/site/jacoco/) counts only what that module's tests
+        execute, so a veredium-core class exercised by the restclient or webclient suite shows up as
+        uncovered there. `report-aggregate` merges every module's jacoco.exec against every module's
+        classes, so a class counts as covered as soon as any test in the reactor runs it. The badge, the
+        CI job summary and the published /coverage/ page read this report
+        (target/site/jacoco-aggregate/).
+
+        It lists the three modules as dependencies so the reactor builds it last and report-aggregate
+        knows which modules to include. It carries no code, and it is kept out of every published
+        artefact: no deploy (GitHub Packages, and cyclonedx's skipNotDeployed drops it from the aggregate
+        SBOM), excluded from the Central bundle in the release profile of the parent, and no Dokka run.
+    -->
+    <artifactId>veredium-coverage</artifactId>
+    <packaging>pom</packaging>
+    <name>Veredium Coverage (build-only)</name>
+    <description>Cross-module JaCoCo report of the veredium reactor; not published.</description>
+
+    <properties>
+        <maven.deploy.skip>true</maven.deploy.skip>
+        <dokka.skip>true</dokka.skip>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>eu.inqudium</groupId>
+            <artifactId>veredium-core</artifactId>
+            <version>${revision}</version>
+        </dependency>
+        <dependency>
+            <groupId>eu.inqudium</groupId>
+            <artifactId>veredium-restclient</artifactId>
+            <version>${revision}</version>
+        </dependency>
+        <dependency>
+            <groupId>eu.inqudium</groupId>
+            <artifactId>veredium-webclient</artifactId>
+            <version>${revision}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>report-aggregate</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report-aggregate</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
