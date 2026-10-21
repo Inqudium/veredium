@@ -11,60 +11,46 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.observation.ObservationRegistry
 import jakarta.annotation.PreDestroy
 import jakarta.validation.ValidatorFactory
-import org.apache.hc.client5.http.config.ConnectionConfig
-import org.apache.hc.client5.http.config.RequestConfig
-import org.apache.hc.client5.http.impl.classic.CloseableHttpClient
-import org.apache.hc.client5.http.impl.classic.HttpClients
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder
-import org.apache.hc.client5.http.observation.MetricConfig
-import org.apache.hc.client5.http.observation.binder.ConnPoolMeters
-import org.apache.hc.core5.io.CloseMode
-import org.apache.hc.core5.util.TimeValue
-import org.apache.hc.core5.util.Timeout
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
-import org.springframework.http.client.HttpComponentsClientHttpRequestFactory
+import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.locks.LockSupport
 
 /**
- * Produces fully assembled [ResilientRestClient]s - one per mesh endpoint - bundling the Apache HttpClient 5
- * transport (one shared pool, per-target timeouts, base URL, JSON headers) with the
- * [BlockingResilienceDecorator] pipeline. The backend name is reused as the Resilience4j instance name, so
- * `product-agreements` needs matching `resilience4j.*.instances.product-agreements` config.
+ * Produces fully assembled [ResilientRestClient]s - one per mesh endpoint - bundling the HTTP transport (one
+ * shared pool per engine, per-target timeouts, base URL, JSON headers) with the [BlockingResilienceDecorator]
+ * pipeline. The backend name is reused as the Resilience4j instance name, so `product-agreements` needs
+ * matching `resilience4j.*.instances.product-agreements` config.
  *
  * Exchange logging is not assembled here: legatium-restclient-logging's auto-configuration puts its
  * interceptor on Boot's `RestClient.Builder` bean as a `RestClientCustomizer`, and every client below is a
  * clone of that bean. The factory's only contribution is the request attribute the library reads the client's
  * name from.
  *
- * ## The transport, mapped from the reactive twin
+ * ## Engines
  *
- * | Reactor Netty (web-client)                   | Apache HttpClient 5 (here)                                            |
- * |----------------------------------------------|-----------------------------------------------------------------------|
- * | one `ConnectionProvider` for all endpoints   | one `PoolingHttpClientConnectionManager`, shared by every client      |
- * | `maxConnections`                             | `maxConnTotal` AND `maxConnPerRoute` (every endpoint is one route)    |
- * | `pendingAcquireTimeout`                      | `RequestConfig.connectionRequestTimeout`                              |
- * | `pendingAcquireMaxCount`                     | none - Apache's pending queue is bounded in time only                 |
- * | `CONNECT_TIMEOUT_MILLIS`                     | `ConnectionConfig.connectTimeout`                                     |
- * | per-endpoint `responseTimeout`               | per-client `RequestConfig.responseTimeout` (applied as socket timeout) |
- * | `maxIdleTime` / `maxLifeTime` / `evictInBackground` | `closeIdle` / `ConnectionConfig.timeToLive` + `closeExpired`, on the factory's own schedule |
- * | `compress(true)` / `keepAlive(true)`         | Apache's defaults (content compression and keep-alive are on)         |
- * | `.metrics(true)` on the pool                 | Apache's `ConnPoolMeters` (httpclient5-observation), see [RestClientMetrics] |
- * | `.metrics(true)` per request, URI-templated  | none - Spring's `http.client.requests` observation carries the template |
+ * Which HTTP engine carries a backend's exchanges is `app.restclient.engine` ([RestClientProperties.Engine]):
+ * Apache HttpClient 5 by default (the wiring this factory has always had), or the JDK
+ * client, Jetty or Reactor Netty, for all backends or per alias. Each engine in use is created ONCE, when the
+ * factory is - an engine no backend selects is never created - and shared by the backends on it; the factory
+ * owns it and closes it in [shutdown]. Its request factory goes onto the backend's clone of Boot's builder and
+ * nowhere else: nothing here reads or writes Boot's `spring.http.clients.*` settings or registers a bean a host's
+ * other clients could pick up, so the property changes this module's clients and no other client of the host.
  *
- * What Apache does by default and Reactor Netty does not is switched OFF, so the two clients behave alike on
- * the wire: no automatic retry of a failed idempotent request (the sidecar owns retries, and a second attempt
- * would double-count against the ladder), no redirect following, no cookie jar.
+ * Everything above the request factory is the same on every engine: the bounded body read over the response
+ * stream, the status mapping, the Host / User-Agent / Accept headers, legatium's interceptor, the observation and
+ * the decorator. What an engine maps from the mesh ladder and `app.restclient.pool`, and what it cannot express,
+ * is one INFO line per engine at startup, next to the line naming each backend's engine.
+ *
+ * A configuration the factory cannot honour fails its construction, i.e. the context start, naming the key: an
+ * override for an alias that is not a mesh endpoint, an engine whose library is not on the classpath, the JDK
+ * engine for a backend whose Host header the JDK would replace.
  */
 @Component
 class ResilientRestClientFactory(
@@ -101,6 +87,12 @@ class ResilientRestClientFactory(
      * shape as `ResilientRestClient`'s clock, and like it never used for a timestamp.
      */
     private val nanoTime: () -> Long = System::nanoTime,
+    /**
+     * Whether an engine's library is on the classpath ([RestClientEngine.isPresent] by default). Injectable for
+     * the same reason as [nanoTime]: the test classpath carries every engine, and the missing-library failure
+     * is reached by a test that says an engine is absent instead of one that builds a classpath without it.
+     */
+    private val engineLibraryPresent: (RestClientEngine) -> Boolean = RestClientEngine::isPresent,
 ) {
     private val logger: Logger = LoggerFactory.getLogger(ResilientRestClientFactory::class.java)
 
@@ -137,21 +129,19 @@ class ResilientRestClientFactory(
     /** The mesh-derived ladder per backend, keyed by the endpoint alias (which must equal the backend name). */
     private val meshByBackend: Map<String, ResolvedTimeouts> = meshProperties.resolveAll().values.associateBy { it.alias }
 
-    /** Global mesh transport caps (connect / pending-acquire / max-connections) shared by the pool and clients. */
+    /** Global mesh transport caps (connect / pending-acquire / max-connections) shared by the pools and clients. */
     private val meshTransport: MeshProperties.Transport = meshProperties.defaults.transport
 
-    /** Name of the single shared Apache pool: the [RestClientMetrics.POOL_TAG] value on its gauges, its evictor's thread name. */
-    private val poolName: String = RestClientMetrics.POOL_NAME
-
     /**
-     * How long [shutdown] waits for the pool to drain: the LONGEST response timeout any endpoint permits, plus
+     * How long [shutdown] waits for the pools to drain: the LONGEST response timeout any endpoint permits, plus
      * the pre-response phases (connect + pending-acquire) and a second of slack.
      *
      * Derived rather than chosen, because the quantity it must exceed is knowable: no in-flight call can
      * outlive its own `responseTimeout`, so waiting beyond the largest of them plus the phases that precede it
      * cannot let anything finish that was not going to finish anyway. A literal here would be a second, silent
      * timeout next to the mesh ladder - free to drift below the ladder as endpoints are retuned, and nothing
-     * would say so.
+     * would say so. One window for all engines, not one each: the drains run one after another against the
+     * same deadline.
      */
     private val poolDisposeTimeout: Duration =
         (meshByBackend.values.maxOfOrNull { it.responseTimeout } ?: Duration.ZERO)
@@ -164,88 +154,108 @@ class ResilientRestClientFactory(
      */
     private val maxInMemoryBytes: Int = properties.maxInMemorySize.toBytes().toInt()
 
-    /**
-     * The single connection pool shared by every target's HttpClient, built once and closed in [shutdown].
-     * Apache keeps a separate sub-pool per route, so distinct sidecar ports stay isolated - which is also why
-     * the per-route limit is raised to the total: every endpoint IS one route, and Apache's per-route default
-     * of five would otherwise cap each backend at five connections regardless of `maxConnections`.
-     *
-     * `maxConnections` / `pendingAcquireTimeout` come from the mesh transport config; the lifetime bound from
-     * [RestClientProperties.Pool]. A zero `maxLifeTime` leaves the time-to-live unset, Apache's "no limit".
-     */
-    private val connectionManager: PoolingHttpClientConnectionManager =
-        PoolingHttpClientConnectionManagerBuilder
-            .create()
-            .setMaxConnTotal(meshTransport.maxConnections)
-            .setMaxConnPerRoute(meshTransport.maxConnections)
-            .setDefaultConnectionConfig(
-                ConnectionConfig
-                    .custom()
-                    .setConnectTimeout(Timeout.ofMilliseconds(meshTransport.connectTimeoutMs))
-                    .apply {
-                        properties.pool.maxLifeTime
-                            .takeUnless { it.isZero }
-                            ?.let { setTimeToLive(TimeValue.ofMilliseconds(it.toMillis())) }
-                    }.build(),
-            ).build()
+    /** Each backend's engine, resolved once and checked ([checkedEngineSelection]) before any engine is created. */
+    private val engineByBackend: Map<String, RestClientEngine> = checkedEngineSelection()
 
     /**
-     * The pool's background eviction, the counterpart of Reactor Netty's `evictInBackground`: every interval,
-     * connections idle for longer than `maxIdleTime` and connections past their time-to-live are closed. One
-     * schedule for the one pool - Apache's own `evictIdleConnections` would start a thread per HttpClient, i.e.
-     * one per endpoint, for the same pool. `null` when the interval is zero, which is "off".
-     *
-     * `internal` so the factory's integration test can see that [shutdown] stops it: the scheduler runs on a
-     * virtual thread, which no thread listing shows.
+     * The engines in use, one transport each, created here in a stable order (the enum's) and only for an engine
+     * some backend selects. Apache first, as before the engines existed: its pool and its meters come up when
+     * the factory does.
      */
-    internal val evictor: ScheduledExecutorService? =
-        properties.pool.evictInBackground
-            .takeUnless { it.isZero }
-            ?.let { interval ->
-                Executors
-                    .newSingleThreadScheduledExecutor(Thread.ofVirtual().name("$poolName-evictor").factory())
-                    .also { scheduler ->
-                        val maxIdle = TimeValue.ofMilliseconds(properties.pool.maxIdleTime.toMillis())
-                        scheduler.scheduleWithFixedDelay(
-                            {
-                                connectionManager.closeExpired()
-                                connectionManager.closeIdle(maxIdle)
-                            },
-                            interval.toMillis(),
-                            interval.toMillis(),
-                            TimeUnit.MILLISECONDS,
-                        )
-                    }
+    private val transports: Map<RestClientEngine, EngineTransport> =
+        engineByBackend.values
+            .toSortedSet()
+            .associateWith { engine ->
+                val settings = EngineTransport.Settings(meshTransport, properties.pool, meterRegistry)
+                when (engine) {
+                    RestClientEngine.APACHE -> ApacheEngineTransport(settings)
+                    RestClientEngine.JDK -> JdkEngineTransport(settings)
+                    RestClientEngine.JETTY -> JettyEngineTransport(settings)
+                    RestClientEngine.REACTOR_NETTY -> ReactorNettyEngineTransport(settings)
+                }
             }
 
     init {
-        // Pool metrics: the same question the reactor twin's `.metrics(true)` answers - how full is the pool.
-        // Apache's own binder (httpclient5-observation; Micrometer deprecated its hc5 binder in favour of it)
-        // reads the manager off a client BUILDER, so a throwaway builder over the shared manager is handed to
-        // it once, here - never per endpoint, which would register the same gauges once per client.
-        meterRegistry?.let { registry ->
-            ConnPoolMeters.bindTo(
-                HttpClients.custom().setConnectionManager(connectionManager),
-                registry,
-                MetricConfig
-                    .builder()
-                    .prefix(RestClientMetrics.POOL_METER_PREFIX)
-                    .addCommonTag(RestClientMetrics.POOL_TAG, poolName)
-                    .build(),
-            )
+        // The engine of every backend, and per engine what of the mesh ladder and the pool settings it applies.
+        // Worth the lines because an engine without a knob does not complain about the knob: the setting simply
+        // has no effect, and the only place that can say so is here.
+        logger.info(
+            "HTTP engines: default={}, per backend {}",
+            properties.engine.default,
+            engineByBackend.toSortedMap().entries.joinToString(", ", "[", "]") { (alias, engine) -> "$alias=$engine" },
+        )
+        transports.forEach { (engine, transport) ->
+            logger.info(transport.settingsLine(engineByBackend.filterValues { it == engine }.keys.sorted()))
         }
     }
+
+    /** The Apache engine's background eviction, when Apache is in use - see [ApacheEngineTransport.evictor]. */
+    internal val evictor: ScheduledExecutorService? get() = (transports[RestClientEngine.APACHE] as? ApacheEngineTransport)?.evictor
+
+    /** The engine transports this factory created - for the tests that pin which engines exist and that [shutdown] closes them. */
+    internal val engineTransports: Map<RestClientEngine, EngineTransport> get() = transports
 
     /** Caches one client per logical name so [create] is idempotent - repeated calls return the same instance. */
     private val cache = ConcurrentHashMap<String, ResilientRestClient>()
 
-    /** The per-endpoint transports, kept so [shutdown] can close them ahead of the pool they share. */
-    private val httpClients = ConcurrentHashMap<String, CloseableHttpClient>()
+    /** The request factory each built client runs on - what a test reads to prove which engine carries a backend. */
+    private val requestFactories = ConcurrentHashMap<String, ClientHttpRequestFactory>()
+
+    /** The request factory the client of [backendName] was built on, or `null` before [create] built it. */
+    internal fun requestFactoryOf(backendName: String): ClientHttpRequestFactory? = requestFactories[backendName]
+
+    /**
+     * Resolves each backend's engine and fails the start when the selection cannot be honoured, naming the key:
+     *
+     * - an `app.restclient.engine.endpoints` key that is no mesh alias - a typo would otherwise leave that backend
+     *   on the default engine without a word, the same silent failure an unknown validation key has;
+     * - an engine whose library is not on the classpath, naming the dependency to add - better at startup than as
+     *   a `NoClassDefFoundError` at the first call;
+     * - the JDK engine for a backend whose Host header the JDK would replace by the base URL's authority.
+     */
+    private fun checkedEngineSelection(): Map<String, RestClientEngine> {
+        val engines = properties.engine
+        val unknown = engines.endpoints.keys - meshByBackend.keys
+        check(unknown.isEmpty()) {
+            "${unknown.sorted().joinToString { "${RestClientProperties.Engine.PREFIX}.endpoints.$it" }} " +
+                "names no mesh endpoint - the key must be the alias of an app.mesh.endpoints[] entry. " +
+                "Known aliases: ${meshByBackend.keys.sorted()}"
+        }
+        val selected = meshByBackend.keys.associateWith(engines::engineFor)
+        selected.entries
+            .groupBy({ it.value }, { it.key })
+            .filterKeys { !engineLibraryPresent(it) }
+            .forEach { (engine, aliases) ->
+                error(
+                    "${aliases.map(engines::keyFor).distinct().sorted().joinToString()} selects the HTTP engine " +
+                        "'$engine' (for ${aliases.sorted().joinToString()}), but its library is not on the classpath " +
+                        "(${engine.markerClass} is missing). Add ${engine.dependency}, or select another engine.",
+                )
+            }
+        val allowRestricted = System.getProperty(JdkEngineTransport.ALLOW_RESTRICTED_HEADERS)
+        selected
+            .filterValues { it == RestClientEngine.JDK }
+            .keys
+            .sorted()
+            .forEach { alias ->
+                JdkEngineTransport.hostHeaderConflict(meshByBackend.getValue(alias), allowRestricted)?.let { conflict ->
+                    error(
+                        "${engines.keyFor(alias)} selects the HTTP engine 'jdk' for '$alias', but the JDK client " +
+                            "restricts the Host header: $conflict, so the sidecar would route the call by the wrong " +
+                            "host. Select another engine for this backend, point its base-url at a URL whose " +
+                            "authority is the Host, or start the JVM with " +
+                            "-D${JdkEngineTransport.ALLOW_RESTRICTED_HEADERS}=host - a JVM-wide setting that " +
+                            "changes every java.net.http client of the process, which is why veredium never sets it.",
+                    )
+                }
+            }
+        return selected
+    }
 
     /**
      * Returns the resilient client for [backendName], building it on first request and caching it after.
-     * Everything per-endpoint (base URL, Host header, timeouts) comes from the `app.mesh.endpoints[]` entry
-     * whose alias equals [backendName].
+     * Everything per-endpoint (base URL, Host header, timeouts, engine) comes from the `app.mesh.endpoints[]`
+     * entry whose alias equals [backendName] and from its `app.restclient.engine` selection.
      *
      * @throws IllegalStateException if no mesh endpoint with that alias is configured - failing fast at
      *         startup beats a confusing 404/connection error at the first call.
@@ -260,24 +270,25 @@ class ResilientRestClientFactory(
                         "Add an app.mesh.endpoints[] entry whose alias equals '$backendName'.",
                 )
 
-        val httpClient = buildHttpClient(endpoint)
-        httpClients[backendName] = httpClient
+        val requestFactory = transports.getValue(engineByBackend.getValue(backendName)).requestFactory(endpoint)
+        requestFactories[backendName] = requestFactory
 
         val restClient =
             baseBuilder
                 .clone()
                 .baseUrl(endpoint.baseUrl)
                 // Replaces whatever request factory Boot put on the builder from its `spring.http.client.*`
-                // settings: these clients run on the mesh ladder's timeouts and the shared pool above, which the
+                // settings - on this CLONE only, Boot's builder bean and every other client built from it keep
+                // theirs: these clients run on the mesh ladder's timeouts and the engine's shared pool, which the
                 // host's global HTTP client settings know nothing about. Deliberate, and the same split the
                 // reactive twin makes for its connector.
-                .requestFactory(HttpComponentsClientHttpRequestFactory(httpClient))
+                .requestFactory(requestFactory)
                 // Host routes the sidecar to the upstream (from the triplet); set() (not add) so re-applying
-                // never accumulates values. Apache honours an explicit Host header - its own interceptor only
-                // adds one when none is present, and the same goes for User-Agent: the library's token
-                // (`veredium/<version>`) or the host's own (app.restclient.user-agent) replaces Apache's default
-                // so a peer's access log names what calls it. Extra static headers are applied on top, so an
-                // endpoint can override either.
+                // never accumulates values. Every engine honours an explicit Host header except the JDK's, which
+                // the factory refuses at startup where it matters (checkedEngineSelection); the same goes for
+                // User-Agent: the library's token (`veredium/<version>`) or the host's own
+                // (app.restclient.user-agent) replaces the engine's default so a peer's access log names what
+                // calls it. Extra static headers are applied on top, so an endpoint can override either.
                 .defaultHeaders { headers ->
                     headers.set(HttpHeaders.HOST, endpoint.host)
                     headers.set(HttpHeaders.USER_AGENT, properties.effectiveUserAgent)
@@ -331,73 +342,21 @@ class ResilientRestClientFactory(
         }
 
     /**
-     * One HttpClient per endpoint over the shared pool, carrying that endpoint's response timeout. The
-     * per-endpoint responseTimeout is tighter than that endpoint's TimeLimiter budget by construction, so it
-     * never drifts past it; its expiry surfaces as a `ResourceAccessException` over a `SocketTimeoutException`,
-     * which the circuit breaker records (and legatium classifies as `timeout`).
+     * Closes every engine in use on context shutdown, each draining its exchanges in flight until one shared
+     * deadline [poolDisposeTimeout] from now (see each engine's `shutdown`): the Apache pool, the Jetty client,
+     * the Reactor Netty pool and event loops, the JDK client.
      *
-     * Three Apache defaults are switched off because Reactor Netty does not have them and the ladder does not
-     * expect them: automatic retries (the sidecar owns retries; an in-app second attempt would spend the ladder's
-     * budget twice without telling anyone), redirect following, and the cookie store. Content compression and
-     * keep-alive stay on - the twin enables both explicitly, Apache has them on by default.
-     */
-    private fun buildHttpClient(endpoint: ResolvedTimeouts): CloseableHttpClient =
-        HttpClients
-            .custom()
-            .setConnectionManager(connectionManager)
-            .setConnectionManagerShared(true)
-            .setDefaultRequestConfig(
-                RequestConfig
-                    .custom()
-                    .setConnectionRequestTimeout(Timeout.ofMilliseconds(meshTransport.pendingAcquireTimeoutMs))
-                    .setResponseTimeout(Timeout.ofMilliseconds(endpoint.responseTimeout.toMillis()))
-                    .setRedirectsEnabled(false)
-                    .build(),
-            ).disableAutomaticRetries()
-            .disableRedirectHandling()
-            .disableCookieManagement()
-            .build()
-
-    /**
-     * Drains the shared pool on context shutdown, waiting up to [poolDisposeTimeout] for leased connections to
-     * come back, then closes it.
+     * An engine that does not drain in time is an OUTCOME, not a failure - reported as the statement it is and
+     * closed anyway, never as an exception out of a destroy callback, where Spring could only log a stack trace at
+     * the moment someone is looking for one. The wait also ends when the calling thread is INTERRUPTED (a
+     * container tearing the context down under a deadline of its own); the flag is left for the caller.
      *
-     * Apache's pool has no "dispose when drained" of its own: `close` discards leased connections on the spot.
-     * The wait is therefore made here, bounded, and its expiry is an OUTCOME, not a failure - reported as the
-     * statement it is (the pool did not drain in time and is being dropped anyway), never as an exception out
-     * of a destroy callback, where Spring could only log a stack trace at the moment someone is looking for one.
-     *
-     * The wait also ends when the calling thread is INTERRUPTED - a container tearing the context down under a
-     * deadline of its own, a test executor's `shutdownNow`. `parkNanos` returns at once on a thread whose
-     * interrupt flag is set and leaves the flag set, so without this exit the loop would spin hot until the
-     * deadline instead of waiting. The flag is left for the caller, as an interrupt always is.
-     *
-     * Idempotent: Spring calls it once, tests may call it twice; a closed pool reports no leased connections and
-     * closes again without complaint.
+     * Idempotent: Spring calls it once, tests may call it twice; a closed engine closes again without complaint.
      */
     @PreDestroy
     fun shutdown() {
-        evictor?.shutdownNow()
-        httpClients.values.forEach { it.close(CloseMode.GRACEFUL) }
         val deadline = nanoTime() + poolDisposeTimeout.toNanos()
-        while (connectionManager.totalStats.leased > 0 && nanoTime() < deadline && !Thread.currentThread().isInterrupted) {
-            LockSupport.parkNanos(DRAIN_POLL_NANOS)
-        }
-        val leased = connectionManager.totalStats.leased
-        if (leased > 0) {
-            logger.warn(
-                "Connection pool '{}' did not drain {} - dropping it with {} connection(s) still leased",
-                poolName,
-                if (Thread.currentThread().isInterrupted) "because the shutdown thread was interrupted" else "within $poolDisposeTimeout",
-                leased,
-            )
-        }
-        connectionManager.close(CloseMode.GRACEFUL)
-    }
-
-    private companion object {
-        /** How often [shutdown] re-checks the pool while waiting for it to drain. */
-        val DRAIN_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(50)
+        transports.values.forEach { it.shutdown(deadline, nanoTime, poolDisposeTimeout, logger) }
     }
 }
 

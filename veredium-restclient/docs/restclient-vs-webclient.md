@@ -4,7 +4,9 @@
 > cut of ADR-0001). Where this text and the code disagree, the code wins.
 
 `veredium-restclient` is `veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient` re-implemented on Spring's
-blocking `RestClient` over Apache HttpClient 5, with **no reactive dependency on the classpath**. Package
+blocking `RestClient` over Apache HttpClient 5 by default (the JDK client, Jetty and Reactor Netty are
+selectable per backend, §3.1), with **no reactive dependency on a consumer's classpath** - Reactor Netty is an
+optional dependency a host adds only to select that engine. Package
 `eu.inqudium.veredium.restclient`. What is identical by construction between the two stacks - the mesh timeout
 ladder, the breaker verdicts and the Resilience4j wiring that installs them - is not re-implemented at all:
 both modules depend on `veredium-core` for it ([ADR-0001](../../docs/adr/ADR-0001-one-stack-neutral-core-module.md)).
@@ -70,7 +72,8 @@ adds is its bean (`RestClientConfiguration`) with the worker name `restclient-ca
    read *does* react to that: the socket is closed and the read fails at once with
    `SocketException: Closed by interrupt` (connect and pool lease are interruptible too). The worker is released
    promptly in every phase, its bulkhead permit with it; the half-read connection is discarded. The caller is
-   released at the budget regardless.
+   released at the budget regardless. That is the Apache engine; the other engines reach the same release by
+   their own routes (§3.1).
 
 A caller being interrupted (its own budget expired, its scope cancelled) is the blocking counterpart of a
 subscriber cancelling: Resilience4j does not cancel the future in that case, so the decorator does, and rethrows
@@ -95,10 +98,11 @@ future itself. The origin module's asynchronous API was dropped at the port for 
 
 ---
 
-## 3. The transport (Apache HttpClient 5)
+## 3. The transport (Apache HttpClient 5 by default)
 
-Apache's pool is the one blocking engine Spring supports that expresses what the mesh transport config needs.
-The mapping, as `ResilientRestClientFactory` makes it:
+Apache's pool is the one blocking engine Spring supports that expresses everything the mesh transport config needs,
+which is why it is the default (§3.1 for the others). The mapping, as the Apache engine of
+`ResilientRestClientFactory` makes it:
 
 | Reactor Netty (web-client)                     | Apache HttpClient 5 (rest-client)                                        |
 |------------------------------------------------|--------------------------------------------------------------------------|
@@ -121,6 +125,22 @@ redirect following, and the cookie store.
 The factory replaces whatever request factory Boot put on the builder from `spring.http.client.*`: these clients
 run on the ladder's timeouts and the shared pool, which the host's global settings know nothing about — the same
 split the twin makes for its connector and codecs.
+
+### 3.1 The selectable engines
+
+`app.restclient.engine.default` and `app.restclient.engine.endpoints.<alias>` select `apache`, `jdk`, `jetty` or
+`reactor-netty` - Spring's four blocking request factories over their engines. The selection is the module's own:
+Boot's `spring.http.clients.imperative.factory` is neither read nor written, no engine bean is registered, and the
+request factory goes onto the per-backend clone of Boot's builder only, so a host's other clients keep the engine
+Boot gave them. The full mapping of the ladder and the pool settings per engine, what each cannot express, the
+JDK's restricted Host header and how each engine abandons an interrupted exchange are in
+[the guide's "Engines"](GUIDE.md#engines) and [timeouts, bulkheads and threads](timeouts-bulkheads-threads.md) §9.
+
+Two points touch the twin. With `reactor-netty` the blocking client runs on the twin's transport library - but on
+its own `ConnectionProvider` (`restclient-reactor-netty`) and event loops, never on Reactor Netty's global
+`HttpResources` the twin's defaults would share, and with Reactor Netty's own pool gauge names in the host's
+registry. And the twin's `pending-acquire-max-count` still has no key here: on `reactor-netty` the pending queue is
+bounded at Reactor Netty's default of twice `max-connections`.
 
 ---
 
@@ -164,7 +184,7 @@ point, pinned by `LegatiumExchangeLoggingIntegrationTest`:
 |------------------------------------------|-------------------------------|------------------------------------------------------------|
 | 2xx / benign 4xx / 5xx                   | `success` / `rejected` / `failure` | same                                                  |
 | transport response timeout               | `timeout` (WARN)              | `timeout` (WARN)                                           |
-| caller cancels / TimeLimiter expires     | `cancelled` (WARN)            | **`failure` (ERROR)**, cause `SocketException: Closed by interrupt`, written promptly — there is no `cancelled` on the blocking stack |
+| caller cancels / TimeLimiter expires     | `cancelled` (WARN)            | **`failure` (ERROR)**, cause `SocketException: Closed by interrupt` on Apache (an I/O failure over the interrupt on the other engines), written promptly — there is no `cancelled` on the blocking stack |
 | serialisation failure before the exchange | no event                      | no event                                                   |
 
 An alert keyed on `adapter_outcome == "cancelled"` never fires for this module. The resilience verdict itself
@@ -190,6 +210,9 @@ app:
       fail-on-violation: false
       endpoints: {}
     # user-agent: my-service/2.3     # the host's own token instead of veredium/<version>
+    engine:
+      default: apache                # apache | jdk | jetty | reactor-netty (§3.1)
+      endpoints: {}                  # <mesh-alias>: <engine>
   mesh: ...                          # the shared tree, see veredium-core/docs/mesh-timeout.md
 adapter-logging: ...                 # unchanged, read by legatium-restclient-logging
 logging:
@@ -215,6 +238,13 @@ module:
   drained into memory - each also through short and zero-length reads and across the reader's buffer growth;
   `BoundedBodyReaderFuzzTest` (Jazzer, `src/test/java`) explores the same invariants with arbitrary bodies, limits,
   declared lengths and read patterns.
+- `RestClientEngineIntegrationTest` — every engine against WireMock: GET/POST, the status mapping, the response
+  timeout and its cause type, the buffer limit, the Host and User-Agent headers, the four ways an exchange is
+  abandoned (head and body phase of a TimeLimiter expiry, the caller's interrupt, the cancelled future - permit and
+  connection back promptly), the lifecycle (created only when selected, shared, closed), the per-backend override,
+  the fail-fast checks and the startup lines; `RestClientEngineIsolationTest` — in a real context, that the
+  selection does not reach a host client built from Boot's builder bean, that Boot's global switch does not reach
+  the module's clients, and that no engine bean is registered.
 - `RestClientVerdictsTest` — the verdicts through the real decorator and against this stack's exception shapes
   (Spring's status-specific subclasses, the `ResourceAccessException` wrapper, the four client-side failures of
   the hand-off); `MeshResilienceShippedConfigTest` — this module's reference configuration booted with the

@@ -16,6 +16,11 @@ surface are configured in the host's `application.yml`. `src/test/resources/appl
 of this module is the reference configuration the contract tests pin - a library ships no
 `application.yml` of its own.
 
+**The HTTP engine.** Reactor Netty by default; `app.webclient.engine` moves all backends or single ones to the
+JDK's `java.net.http.HttpClient`, Jetty or Apache HttpClient 5 - scoped to this module, so the host's other
+WebClients keep the connector Boot gave them. What each engine applies of the mesh transport and pool
+settings, which meters it has and what it needs: [configuration guide](webclient-config-guide.md) §1.6.
+
 **The response contract.** A client's `Mono<T>` emits exactly one value or an error. Since 2026-10-21 a 2xx
 answer without a body (204, empty 200) fails with `EmptyResponseBodyException` instead of completing the
 `Mono` empty - a behaviour change for any caller that relied on the empty completion; see the
@@ -36,6 +41,67 @@ answer without a body (204, empty 200) fails with `EmptyResponseBodyException` i
     <version>...</version>
 </dependency>
 ```
+
+The non-default engines need their library on the host's classpath - the module declares them `optional`,
+versions from the Spring Boot BOM. Only the one selected is required:
+
+```xml
+<!-- app.webclient.engine: jetty -->
+<dependency>
+    <groupId>org.eclipse.jetty</groupId>
+    <artifactId>jetty-client</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.eclipse.jetty</groupId>
+    <artifactId>jetty-reactive-httpclient</artifactId>
+</dependency>
+
+<!-- app.webclient.engine: apache -->
+<dependency>
+    <groupId>org.apache.httpcomponents.client5</groupId>
+    <artifactId>httpclient5</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.apache.httpcomponents.core5</groupId>
+    <artifactId>httpcore5-reactive</artifactId>
+</dependency>
+```
+
+`jdk` needs no dependency, but the JVM flag `-Djdk.httpclient.allowRestrictedHeaders=host` (the clients send
+the mesh Host header; the configuration guide §1.6 explains why the module does not set it).
+
+## Engines
+
+The HTTP engine underneath the clients is selectable, for all backends and per backend:
+
+```yaml
+app:
+  webclient:
+    engine:
+      default: reactor-netty                            # reactor-netty | jdk | jetty | apache
+      endpoints:
+        apis-example-com-GET-v6-involved-parties: jetty   # this backend only; the key is its mesh alias
+```
+
+| Value | Spring connector | Dependency the host adds |
+|---|---|---|
+| `reactor-netty` (default) | `ReactorClientHttpConnector` | none |
+| `jdk` | `JdkClientHttpConnector` | none, but the JVM flag above |
+| `jetty` | `JettyClientHttpConnector` | `jetty-client`, `jetty-reactive-httpclient` |
+| `apache` | `HttpComponentsClientHttpConnector` | `httpclient5`, `httpcore5-reactive` |
+
+- **Scope.** The setting reaches only the clients of this module. Boot's global `spring.http.clients.*`
+  switches are neither read nor written, the host's own `WebClient.Builder` bean keeps the connector Boot gave
+  it, and no process-global resource is used. Even the default engine runs on event loops and a resolver of
+  its own, not on Reactor Netty's global `HttpResources`.
+- **What applies.** The mesh transport settings (connect, response timeout, max connections, pending-acquire)
+  and `app.webclient.pool.*` are applied as far as each engine supports them. One startup line per engine in use
+  names what does not apply. The per-request and pool meters exist on `reactor-netty` only.
+- **Fail fast.** The start fails, naming the key, for an override key that is no mesh alias, for a missing engine
+  library (with its coordinates), and for `jdk` without the Host-header flag.
+- **Cancellation.** A TimeLimiter expiry or a cancelled subscription aborts the exchange on every engine.
+
+Every detail, with the mapping table per engine: [configuration guide](webclient-config-guide.md) §1.6.
 
 ## Guides
 

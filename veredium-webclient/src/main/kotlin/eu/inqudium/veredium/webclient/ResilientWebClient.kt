@@ -19,6 +19,7 @@ import reactor.core.publisher.Mono
 import tools.jackson.databind.ObjectMapper
 import java.time.Duration
 import java.util.concurrent.TimeUnit
+import java.util.function.Consumer
 
 /**
  * A resilience-wrapped HTTP caller for a single downstream backend, handed out by [ResilientWebClientFactory]
@@ -46,7 +47,8 @@ import java.util.concurrent.TimeUnit
  *
  * ## The caller's MDC on the transport lines
  *
- * The error, cancellation and closing lines are written in signal hooks that run on a Netty event loop, which
+ * The error, cancellation and closing lines are written in signal hooks that run on the engine's I/O thread - a
+ * Netty event loop by default, the JDK client's executor, a Jetty or Apache worker otherwise - which
  * carries none of the caller's MDC. Rather than depend on the host having enabled Reactor's automatic context
  * propagation AND registered an MDC accessor, each subscription snapshots the MDC on the SUBSCRIBING thread -
  * where a coroutine's `MDCContext` or a servlet filter put the correlation keys - and writes those lines under
@@ -259,8 +261,37 @@ class ResilientWebClient(
                             calls.log(Level.DEBUG, "On signalType={} for backend '{}'", signalType, backendName)
                         }
                     }
+                    // An engine may still report a failure of the exchange AFTER the subscription was cancelled -
+                    // the JDK client's cancelled future, Jetty's abort, Apache's cancelled exchange, each by design -
+                    // and the operators between it and the cancelling TimeLimiter hand such an error to Reactor's
+                    // dropped-error hook, which logs it at ERROR as if it had been lost. It is the expected end of
+                    // an aborted exchange, so it is written at DEBUG instead. Outermost on purpose: the context
+                    // reaches every operator above it, the decoration's included, and those are where it drops.
+                    // Assumption: the key is Reactor's per-subscription onErrorDropped hook
+                    // (`Hooks.KEY_ON_ERROR_DROPPED`, package-private, unchanged since Reactor 3.3); should it change,
+                    // the line goes back to Reactor's ERROR, which WebClientEngineIntegrationTest pins against.
+                    .contextWrite { context ->
+                        context.put(
+                            ON_ERROR_DROPPED_KEY,
+                            Consumer<Throwable> { dropped ->
+                                ClientCallLog.withMdc(callerMdc) {
+                                    calls.log(
+                                        Level.DEBUG,
+                                        "Exchange of backend '{}' ended after cancellation: {}",
+                                        backendName,
+                                        dropped.toString(),
+                                    )
+                                }
+                            },
+                        )
+                    }
             }
 
         return exchange.contextCapture()
+    }
+
+    private companion object {
+        /** Reactor's per-subscription `onErrorDropped` hook key - see the Assumption at its use. */
+        const val ON_ERROR_DROPPED_KEY = "reactor.onErrorDropped.local"
     }
 }

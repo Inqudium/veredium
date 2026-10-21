@@ -11,8 +11,8 @@ import java.time.Duration
  * per-endpoint. The per-endpoint config (base URL, Host, timeout ladder) lives in `app.mesh.endpoints[]`,
  * so one factory serves several backends from that tree with one shared connection [pool].
  *
- * Only knobs with no mesh equivalent stay here: `maxInMemorySize` and the pool lifecycle. The mesh transport
- * config owns `maxConnections` / `pendingAcquireTimeout`, the ladder owns the response timeout.
+ * Only knobs with no mesh equivalent stay here: `maxInMemorySize`, the pool lifecycle and the HTTP [engine]. The
+ * mesh transport config owns `maxConnections` / `pendingAcquireTimeout`, the ladder owns the response timeout.
  *
  * Every value is checked while BINDING, the way `MeshProperties` and `ResolvedTimeouts` do it - and for the
  * same reason: a wrong number here does not announce itself. It binds, the context starts, and the effect
@@ -45,10 +45,11 @@ data class RestClientProperties(
      */
     val maxInMemorySize: DataSize = DataSize.ofKilobytes(256),
     /**
-     * One shared connection pool for ALL endpoints. Every endpoint connects to the same local sidecar over
-     * loopback, so per-endpoint pool isolation is not worth the lost connection reuse; per-backend isolation
-     * is owned by the R4j bulkhead / circuit breaker / time limiter instead. `maxConnections` and
-     * `pendingAcquireTimeout` come from the mesh transport config.
+     * One shared connection pool per engine for ALL endpoints on it. Every endpoint connects to the same local
+     * sidecar over loopback, so per-endpoint pool isolation is not worth the lost connection reuse; per-backend
+     * isolation is owned by the R4j bulkhead / circuit breaker / time limiter instead. `maxConnections` and
+     * `pendingAcquireTimeout` come from the mesh transport config. Every knob applies to the Apache engine; Jetty
+     * and Reactor Netty take the ones they have an equivalent for, the JDK engine none (see [Pool]).
      */
     val pool: Pool = Pool(),
     /** HTTP client Micrometer Observation - standalone, self-contained (does NOT depend on sync-bridge). */
@@ -63,10 +64,16 @@ data class RestClientProperties(
      * `null` (the default) sends the library's token `veredium/<version>` ([Veredium.userAgent]); a value
      * replaces it verbatim, trimmed. An endpoint's static `headers` under `app.mesh` still win over either.
      * Validated at bind time ([Veredium.resolveUserAgent]): blank or with a control character is rejected,
-     * naming the key, because Apache HttpClient would otherwise refuse the header per request with a message that
+     * naming the key, because the engine would otherwise refuse the header per request with a message that
      * points nowhere near the configuration.
      */
     val userAgent: String? = null,
+    /**
+     * Which HTTP engine carries the exchanges of this module's clients: a default with per-backend overrides.
+     * Isolated by construction - it selects the engine of the clients [ResilientRestClientFactory] builds and of
+     * nothing else in the host (see [Engine]).
+     */
+    val engine: Engine = Engine(),
 ) {
     /** The token the factory puts on every request: [userAgent], or the library's own. */
     val effectiveUserAgent: String = Veredium.resolveUserAgent(userAgent, "app.restclient.user-agent")
@@ -89,7 +96,11 @@ data class RestClientProperties(
     }
 
     /**
-     * The lifecycle knobs of the shared Apache HttpClient 5 connection pool.
+     * The lifecycle knobs of the shared connection pool. Written for Apache HttpClient 5, the default engine, and
+     * applied there in full; the other engines take what they have an equivalent for - Reactor Netty all three,
+     * Jetty `maxIdleTime` (its connection idle timeout) and `maxLifeTime` (its pool's max duration, checked at
+     * lease time), the JDK engine none, since its pool is configurable only through JVM-wide system properties.
+     * Each engine's startup line names the knobs it applies and the ones it does not.
      *
      * The WebClient twin's `pending-acquire-max-count` has no counterpart here, deliberately: Apache's pool has
      * no bounded pending queue. A caller waiting for a connection is bounded in TIME only, by the mesh transport's
@@ -122,6 +133,49 @@ data class RestClientProperties(
             require(!evictInBackground.isNegative) {
                 "app.restclient.pool.evict-in-background must not be negative, but was $evictInBackground"
             }
+        }
+    }
+
+    /**
+     * The HTTP engine of this module's clients - `app.restclient.engine.default` and the per-backend overrides
+     * `app.restclient.engine.endpoints.<mesh-alias>`, the same shape as [validation]:
+     *
+     * ```yaml
+     * app:
+     *   restclient:
+     *     engine:
+     *       default: apache                                  # apache | jdk | jetty | reactor-netty
+     *       endpoints:
+     *         apis-example-com-GET-v6-involved-parties: jetty  # only THIS backend runs on Jetty
+     * ```
+     *
+     * **Isolation.** The selection reaches the clients [ResilientRestClientFactory] builds and nothing else:
+     * every engine is an object the factory owns and sets on its own clone of Boot's `RestClient.Builder`. Boot's
+     * `spring.http.clients.imperative.factory` is neither read nor written, no request factory or HTTP client
+     * bean is registered, and a RestClient the host builds from the same builder bean keeps the engine Boot
+     * gave it - a global switch would change every client of the host, which a library has no business doing.
+     *
+     * **Fail fast.** An override key that is no mesh alias, an engine whose library is not on the classpath and
+     * the JDK engine on a backend whose `Host` header it cannot send each fail the context start with a message
+     * naming the key, checked by the factory (which knows the aliases) rather than at binding.
+     *
+     * @property default The engine of every backend without an override. [RestClientEngine.APACHE], the
+     *   module's wiring before the property existed.
+     * @property endpoints Per-backend-alias overrides; an alias not present runs on [default].
+     */
+    data class Engine(
+        val default: RestClientEngine = RestClientEngine.APACHE,
+        val endpoints: Map<String, RestClientEngine> = emptyMap(),
+    ) {
+        /** The engine of [alias]: its own override when set, otherwise [default]. */
+        fun engineFor(alias: String): RestClientEngine = endpoints[alias] ?: default
+
+        /** The property key that selects the engine of [alias] - what a failure message tells the operator to edit. */
+        fun keyFor(alias: String): String = if (alias in endpoints) "$PREFIX.endpoints.$alias" else "$PREFIX.default"
+
+        companion object {
+            /** The property prefix of this block. */
+            const val PREFIX: String = "app.restclient.engine"
         }
     }
 

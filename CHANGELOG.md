@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Selectable HTTP engine per client stack, with a per-backend override (`engine.endpoints.<mesh-alias>`):
+  - `veredium-restclient`: `app.restclient.engine.default` takes `apache` (default), `jdk`, `jetty` or
+    `reactor-netty`.
+  - `veredium-webclient`: `app.webclient.engine.default` takes `reactor-netty` (default), `jdk`, `jetty` or
+    `apache`.
+
+  The setting applies to the module's own clients only. Boot's global `spring.http.clients.*` switches are
+  neither read nor written, and no transport bean is registered. Boot's `RestClient.Builder` / `WebClient.Builder`
+  bean is left untouched, because the engine is set on the module's clone of it. No process-global resource or
+  system property is used. Isolation tests pin all of this against Boot's real HTTP-client auto-configuration.
+
+  Each engine is created lazily, shared by the backends that select it, and released on shutdown. The mesh
+  ladder is mapped onto every engine as far as it allows. What an engine cannot apply, for example pool size
+  and pending-acquire on the JDK client, is stated in a startup line and in the module guides, not silently
+  ignored.
+
+  The non-default engine libraries are optional dependencies: `jetty-client` and `reactor-netty-http` for the
+  blocking client; `jetty-client`/`jetty-reactive-httpclient` and `httpclient5`/`httpcore5-reactive` for the
+  reactive one.
+
+  The start fails, naming the key:
+  - for an override key that is not a mesh alias,
+  - for an engine whose library is missing (with its Maven coordinates),
+  - for `jdk` while the JDK would replace the backend's `Host` header. The host enables that header itself
+    with `-Djdk.httpclient.allowRestrictedHeaders=host`.
+
+  Cancellation (TimeLimiter expiry, interrupted caller, cancelled future or subscription) abandons the
+  exchange on every engine. For Jetty and Reactor Netty on the blocking side, and for Apache on the reactive
+  side, this closes gaps in Spring Framework 7.0.9's adapters.
+
 - `veredium-core`: the stack-neutral part both client modules share - the mesh timeout ladder
   (`app.mesh`, `eu.inqudium.veredium.core.mesh`), the breaker verdicts (benign 4xx is a success, a
   client-side failure is ignored) and the Resilience4j wiring that installs them (one
@@ -71,6 +101,13 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
   workflow.
 
 ### Changed
+
+- `veredium-webclient`: the default Reactor Netty engine now runs on factory-owned event loops and a
+  factory-owned resolver, instead of Reactor Netty's global `HttpResources`. Its connection pool is created on
+  the first client. The new resolver resolves through `InetAddress`, so a remote (non-localhost) base URL means
+  a blocking DNS lookup on the event loop.
+- `veredium-webclient`: an exchange error reported after a cancellation is logged at DEBUG instead of as
+  Reactor's `onErrorDropped` ERROR.
 
 - `BlockingResilienceDecorator` moves from `veredium-restclient` to `veredium-core` as a component
   usable without a client: no Spring annotation (the blocking client declares its bean in

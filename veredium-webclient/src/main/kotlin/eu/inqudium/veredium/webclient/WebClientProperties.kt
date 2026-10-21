@@ -9,10 +9,10 @@ import java.time.Duration
 /**
  * GLOBAL configuration for the WebClients produced by [ResilientWebClientFactory] - everything NOT
  * per-endpoint. The per-endpoint config (base URL, Host, timeout ladder) lives in `app.mesh.endpoints[]`,
- * so one factory serves several backends from that tree with one shared connection [pool].
+ * so one factory serves several backends from that tree, with one connection [pool] per HTTP [engine].
  *
- * Only knobs with no mesh equivalent stay here: `maxInMemorySize` and the pool lifecycle. The mesh transport
- * config owns `maxConnections` / `pendingAcquireTimeout`, the ladder owns the response timeout.
+ * Only knobs with no mesh equivalent stay here: `maxInMemorySize`, the pool lifecycle and the engine. The mesh
+ * transport config owns `maxConnections` / `pendingAcquireTimeout`, the ladder owns the response timeout.
  *
  * Every value is checked while BINDING, the way `MeshProperties` and `ResolvedTimeouts` do it - and for the
  * same reason: a wrong number here does not announce itself. It binds, the context starts, and the effect
@@ -41,10 +41,14 @@ data class WebClientProperties(
      */
     val maxInMemorySize: DataSize = DataSize.ofKilobytes(256),
     /**
-     * One shared connection pool for ALL endpoints. Every endpoint connects to the same local sidecar over
-     * loopback, so per-endpoint pool isolation is not worth the lost connection reuse; per-backend isolation
-     * is owned by the R4j bulkhead / circuit breaker / time limiter instead. `maxConnections` and
+     * One shared connection pool for all endpoints of an engine. Every endpoint connects to the same local
+     * sidecar over loopback, so per-endpoint pool isolation is not worth the lost connection reuse; per-backend
+     * isolation is owned by the R4j bulkhead / circuit breaker / time limiter instead. `maxConnections` and
      * `pendingAcquireTimeout` come from the mesh transport config.
+     *
+     * Written in Reactor Netty's terms, the default engine, which applies all four knobs. The other engines
+     * apply what they have an equivalent for and say at startup which knobs they do not apply
+     * ([WebClientEngine]; the configuration guide tabulates it).
      */
     val pool: Pool = Pool(),
     /** HTTP client Micrometer Observation - standalone, self-contained (does NOT depend on sync-bridge). */
@@ -63,6 +67,11 @@ data class WebClientProperties(
      * points nowhere near the configuration.
      */
     val userAgent: String? = null,
+    /**
+     * Which HTTP engine carries the clients of this module - a default with per-backend (mesh alias)
+     * overrides, see [Engine]. The code default is Reactor Netty, the wiring this module always had.
+     */
+    val engine: Engine = Engine(),
 ) {
     /** The token the factory puts on every request: [userAgent], or the library's own. */
     val effectiveUserAgent: String = Veredium.resolveUserAgent(userAgent, "app.webclient.user-agent")
@@ -107,6 +116,34 @@ data class WebClientProperties(
                 "app.webclient.pool.evict-in-background must not be negative, but was $evictInBackground"
             }
         }
+    }
+
+    /**
+     * The HTTP engine per backend: [default] for every mesh alias, [endpoints] overriding it per alias - the same
+     * shape as `validation`.
+     *
+     * **Scoped to this module.** The setting chooses the connector the factory puts on ITS clone of Boot's
+     * `WebClient.Builder`; Boot's builder bean, Boot's connector and Boot's own switch
+     * (`spring.http.clients.reactive.connector`) are neither read nor changed, so every other WebClient of the
+     * host keeps the engine Boot gave it. That is the reason this is a property of its own rather than an
+     * instruction to set Boot's: Boot's switch is global to the host.
+     *
+     * **Checked against the mesh** when the factory is constructed, not here (this class does not know the
+     * aliases): an [endpoints] key that names no `app.mesh` alias fails the start - unlike a misspelt
+     * `validation.endpoints` key, which would silently fall back to the default - and so does an engine whose
+     * library is missing from the classpath, naming the Maven coordinates to add
+     * ([WebClientEngine.coordinates]).
+     *
+     * @property default The engine of every alias without an entry in [endpoints]. YAML: `reactor-netty`
+     *   (default), `jdk`, `jetty`, `apache`.
+     * @property endpoints Per-alias overrides, keyed by the mesh endpoint alias (the backend name).
+     */
+    data class Engine(
+        val default: WebClientEngine = WebClientEngine.REACTOR_NETTY,
+        val endpoints: Map<String, WebClientEngine> = emptyMap(),
+    ) {
+        /** The engine of [alias]: its own override when set, otherwise [default]. */
+        fun engineFor(alias: String): WebClientEngine = endpoints[alias] ?: default
     }
 
     /**

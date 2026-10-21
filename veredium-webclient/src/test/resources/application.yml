@@ -87,6 +87,16 @@ app:
     # The User-Agent every client sends. Unset = the library's token veredium/<version>; a host read per caller
     # in its peers' access logs names itself instead (an endpoint's static headers under app.mesh still win).
     # user-agent: my-service/2.3
+    # The HTTP engine of these clients - reactor-netty (code default, shown explicitly), jdk, jetty or apache - with
+    # per-alias overrides keyed like validation.endpoints below. Scoped to this module: Boot's own switch
+    # spring.http.clients.reactive.connector is neither read nor changed, so the host's other WebClients keep
+    # theirs. A key that names no mesh alias, or an engine whose library is missing, fails the start naming the
+    # key; jdk also needs the JVM started with -Djdk.httpclient.allowRestrictedHeaders=host (the Host header).
+    # What each engine applies of the mesh transport and pool settings: webclient-config-guide.md section 1.6.
+    engine:
+      default: reactor-netty
+      endpoints: {}
+      #   apis-example-com-GET-v6-involved-parties: jetty     # move ONE backend, e.g. to try an engine
     observability:
       # Whether Boot's ObservationRegistry stays on the cloned builder (client spans, the http.client.requests
       # timer, the outgoing traceparent) or is replaced by NOOP for these clients. The code default is OFF

@@ -10,9 +10,10 @@ Resilience4j knobs (TimeLimiter timeout, CircuitBreaker slow-call threshold) and
 client uses (the response timeout, TCP connect, pool `pendingAcquireTimeout`, pool `maxConnections`). There is
 no separate targets tree, and the path template is NOT re-declared anywhere else.
 
-The tree is **the same for both client stacks**: `veredium-restclient` (Apache HttpClient 5) and
-`veredium-webclient` (Reactor Netty) bind it from here, so one deployment's `app.mesh` block reads identically
-whichever stack the host runs on, and a host that switches stacks changes nothing under `app.mesh`. It is a
+The tree is **the same for both client stacks and every HTTP engine**: `veredium-restclient` (Apache HttpClient
+5 by default) and `veredium-webclient` (Reactor Netty by default) bind it from here, so one deployment's
+`app.mesh` block reads identically whichever stack the host runs on, and a host that switches stacks or
+engines (`app.restclient.engine` / `app.webclient.engine`) changes nothing under `app.mesh`. It is a
 self-contained port of the standalone PoC (`helm-mesh-timeouts/kotlin`, package `eu.mesh.timeouts.poc`, which
 stays the reference for the derivation and its rationale).
 
@@ -39,7 +40,9 @@ pre-response phases + a fixed headroom), so it can never be set below the ladder
 
 The `responseTimeout` rung is named for what it is on both stacks — the transport's bound on waiting for the
 response — rather than for a client class: Apache applies it as `RequestConfig.responseTimeout`, Reactor Netty
-as `responseTimeout`. The margin that feeds it is `response-timeout-margin-ms` accordingly.
+as `responseTimeout`, and the JDK client and Jetty with their own per-request timeouts. What exactly each
+engine bounds with it (per read, until the head, or the whole exchange) differs; the stack guides list it per
+engine. The margin that feeds it is `response-timeout-margin-ms` accordingly.
 
 ## What comes from mesh vs. the stack's own properties
 
@@ -58,7 +61,8 @@ ladder** (target, path, the R4j timeout knobs). The stack's own properties (`app
 | transport `responseTimeout` | per-endpoint | ladder `ResolvedTimeouts.responseTimeout` |
 | TimeLimiter `timeoutDuration`, CircuitBreaker `slowCallDurationThreshold` | per-endpoint | ladder, handed to the R4j registries through the customizers below |
 | whether mesh derives the TimeLimiter / CircuitBreaker knob | per-endpoint (global default + per-endpoint override) | mesh `time-limiter.enabled` / `circuit-breaker.enabled` (`defaults` + endpoint `BackendToggleOverride`) |
-| TCP connect, pool `pendingAcquireTimeout`, pool `maxConnections` | global | mesh `Transport` (`defaults.transport`) |
+| TCP connect, pool `pendingAcquireTimeout`, pool `maxConnections` | global | mesh `Transport` (`defaults.transport`); applied as far as the selected engine supports it, the startup line names what does not apply |
+| HTTP engine | global default + per-backend override | the stack's `engine` properties (`app.restclient.engine` / `app.webclient.engine`), no mesh equivalent |
 | `maxInMemorySize`, pool lifecycle, idle guards | global | the stack's properties (no mesh equivalent) |
 | response Bean Validation on/off, fail vs. report-only | per-backend / global | the stack's `Validation` properties |
 
@@ -125,9 +129,10 @@ named `BulkheadFullException`, and the pending-acquire timeout that follows is a
 whichever backend is waiting - not necessarily the one holding the connections. The guard logs a **WARN**
 naming the sum, the pool size and every alias with its permits, and does not fail the start: an over-committed
 pool can be a deliberate choice for backends that are never busy at once. The sum is over all mesh aliases,
-which is exact for the blocking stack (one Apache pool, its total cap shared by all routes) and conservative for
-the reactive one (Reactor Netty caps per remote address, so endpoints with their own `base-url` get their own
-pool).
+which is exact for the default blocking engine (one Apache pool, its total cap shared by all routes) and
+conservative where the engine caps per remote address or destination (Reactor Netty, Jetty: endpoints with
+their own `base-url` get their own pool). The JDK client has no connection cap at all, so the sum has nothing
+to exceed there; the guard still compares it with the configured value.
 
 ## One endpoint per operation; the alias is the logical backend name
 

@@ -11,13 +11,15 @@
 
     <!--
         The blocking client: a resilience-wrapped, mesh-configured client per backend, built on Spring's
-        RestClient over Apache HttpClient 5. No reactive dependency anywhere on this classpath - that is the
-        point of the module. docs/restclient-vs-webclient.md records what maps one-to-one to the reactive
-        sibling veredium-webclient and what deliberately differs.
+        RestClient over Apache HttpClient 5 by default, or over the JDK client, Jetty or Reactor Netty per
+        app.restclient.engine. No reactive dependency on a consumer's classpath - that is the point of the
+        module; Reactor Netty is an OPTIONAL dependency a host adds only to select that engine.
+        docs/restclient-vs-webclient.md records what maps one-to-one to the reactive sibling veredium-webclient
+        and what deliberately differs.
     -->
     <artifactId>veredium-restclient</artifactId>
     <name>veredium-restclient</name>
-    <description>Veredium blocking client: Spring RestClient over Apache HttpClient 5 with the mesh timeout ladder and Resilience4j</description>
+    <description>Veredium blocking client: Spring RestClient over Apache HttpClient 5 (or the JDK client, Jetty, Reactor Netty) with the mesh timeout ladder and Resilience4j</description>
     <!-- Explicit, so the published POM carries the homepage itself. -->
     <url>https://github.com/Inqudium/veredium</url>
 
@@ -39,9 +41,9 @@
             <artifactId>spring-boot-starter-restclient</artifactId>
         </dependency>
         <!--
-            The transport. Apache HttpClient 5 is the one blocking engine Spring supports that has a connection
-            POOL with the knobs the mesh transport config expresses (max connections, pending-acquire timeout,
-            idle and lifetime eviction). Version from the Boot BOM.
+            The default transport. Apache HttpClient 5 is the one blocking engine Spring supports whose connection
+            POOL has every knob the mesh transport config expresses (max connections, pending-acquire timeout,
+            idle and lifetime eviction) - hence the default, and a regular dependency. Version from the Boot BOM.
         -->
         <dependency>
             <groupId>org.apache.httpcomponents.client5</groupId>
@@ -51,6 +53,23 @@
         <dependency>
             <groupId>org.apache.httpcomponents.client5</groupId>
             <artifactId>httpclient5-observation</artifactId>
+        </dependency>
+        <!--
+            The two selectable engines that need a library (app.restclient.engine; the JDK engine needs none).
+            OPTIONAL: a consumer gets neither transitively, so its classpath stays as it was - no Jetty, and no
+            reactive artifact - until it selects the engine and adds the dependency itself; the factory fails the
+            start naming these coordinates when an engine is selected without its library. Here for compilation
+            and for the tests, which run every engine. Versions from the Boot BOM.
+        -->
+        <dependency>
+            <groupId>org.eclipse.jetty</groupId>
+            <artifactId>jetty-client</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.projectreactor.netty</groupId>
+            <artifactId>reactor-netty-http</artifactId>
+            <optional>true</optional>
         </dependency>
         <!-- Bean Validation API and an implementation, so a host's response DTO constraints can be evaluated. -->
         <dependency>
