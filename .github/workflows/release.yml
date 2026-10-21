@@ -52,7 +52,7 @@ jobs:
           ref: ${{ steps.meta.outputs.tag }}
 
       - name: Set up JDK 25
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
           distribution: temurin
           java-version: 25
@@ -130,7 +130,7 @@ jobs:
       # entry that reads the credentials from GITHUB_ACTOR/GITHUB_TOKEN,
       # matching the distributionManagement repository id in pom.xml.
       - name: Set up JDK 25 (with GitHub Packages credentials)
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
           distribution: temurin
           java-version: 25
