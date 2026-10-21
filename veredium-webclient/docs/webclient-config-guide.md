@@ -9,7 +9,7 @@ covers **every** knob the module reads, grouped by the four configuration surfac
 
 | Surface | Owner | What it configures |
 |---|---|---|
-| `app.webclient` | `WebClientProperties` | Global client knobs: buffer limit, connection-pool lifecycle, HTTP observation, **response validation** |
+| `app.webclient` | `WebClientProperties` | Global client knobs: buffer limit, connection-pool lifecycle, HTTP observation, **response validation**, the **HTTP engine** per backend |
 | `app.mesh` | `MeshProperties` | The per-endpoint tree: target, path, and the whole timeout ladder |
 | `resilience4j.*` | `resilience4j-spring-boot4` | The three R4j primitives (Bulkhead, CircuitBreaker, TimeLimiter) per backend |
 | `adapter-logging.*` / `logging.level` | `legatium-webclient-logging` / Spring | The outbound exchange log: one event per exchange, its headers, bodies and cap, and the level of its stream |
@@ -47,6 +47,9 @@ app:
       fail-on-violation: false
       endpoints: {}
     # user-agent: my-service/2.3     # the host's own token instead of veredium/<version> (see §1.5)
+    engine:                          # the HTTP engine (see §1.6)
+      default: reactor-netty         # reactor-netty | jdk | jetty | apache
+      endpoints: {}                  # per-alias overrides
 ```
 
 > **Reference versus code default.** Two keys above are set in the reference configuration to a value that
@@ -89,7 +92,8 @@ default maximum of 100 concurrent connections, the new ceiling bounds simultaneo
 One Reactor-Netty pool is shared by every endpoint's `HttpClient` (they all talk to the same local sidecar over
 loopback, so per-endpoint isolation is not worth the lost connection reuse; per-backend isolation is the R4j
 bulkhead's job instead). Reactor Netty keeps a separate sub-pool per remote address, so distinct sidecar ports
-stay isolated.
+stay isolated. The keys are written in Reactor Netty's terms, the default engine; another engine (§1.6) has one
+pool of its own for its backends and applies what it has an equivalent for - the table in §1.6 says which.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -203,6 +207,143 @@ is rejected at bind time naming the key (`Veredium.resolveUserAgent`), because t
 refuse the header per request with a message that points nowhere near the configuration. The blocking client
 binds the same key under `app.restclient.user-agent`.
 
+### 1.6 `engine.*` — the HTTP engine (`WebClientProperties.Engine`, `WebClientEngine`)
+
+Which library carries a backend's exchanges. A shared default with per-alias overrides, the same shape as
+`validation.*` (§1.4):
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `default` | `WebClientEngine` | `reactor-netty` | The engine of every alias without an override. |
+| `endpoints` | `Map<String, WebClientEngine>` | `{}` | Per-**alias** overrides (the derived alias of §2.2). |
+
+The values are `reactor-netty`, `jdk`, `jetty` and `apache`; each maps onto one of Spring's reactive connectors:
+
+| Value | Spring connector | Library | Dependency the host adds |
+|---|---|---|---|
+| `reactor-netty` | `ReactorClientHttpConnector` | Reactor Netty | none - `spring-boot-starter-webflux` brings it |
+| `jdk` | `JdkClientHttpConnector` | `java.net.http.HttpClient` | none - part of the JDK; **plus the JVM flag below** |
+| `jetty` | `JettyClientHttpConnector` | Jetty `HttpClient` 12 | `org.eclipse.jetty:jetty-client` and `org.eclipse.jetty:jetty-reactive-httpclient` |
+| `apache` | `HttpComponentsClientHttpConnector` | Apache HttpClient 5, async | `org.apache.httpcomponents.client5:httpclient5` and `org.apache.httpcomponents.core5:httpcore5-reactive` |
+
+The three non-default libraries are `optional` dependencies of this module: a host does not inherit them and
+declares the one it selects; the Spring Boot BOM manages their versions.
+
+```yaml
+app:
+  webclient:
+    engine:
+      default: reactor-netty
+      endpoints:
+        apis-example-com-GET-v6-involved-parties: jetty   # move ONE backend, e.g. to try an engine
+```
+
+**Scoped to this module - the isolation guarantee.** Boot has a switch of its own,
+`spring.http.clients.reactive.connector`, and it is global: it decides the connector Boot puts on its
+`WebClient.Builder` bean, and with it the engine of **every** WebClient the host builds from that bean. Using it
+to move the mesh clients would move all the others too. So this module never reads or writes Boot's switch (nor
+any other `spring.http.clients.*` key), registers no `ClientHttpConnector`, HTTP-client, connector-builder or
+settings bean, does not use the host's `ReactorResourceFactory` bean, and leaves Boot's builder bean as it found
+it: the factory builds the connector itself and sets it on **its clone** of the builder only. The reverse holds
+as well - a host that sets Boot's switch moves its own WebClients and not these. `WebClientEngineIsolationTest`
+pins both directions in a context with Boot's HTTP-client auto-configuration, reading the engine of the host's
+calls off the wire (the `User-Agent` each engine sends on its own).
+
+The engine resources belong to the factory: created when the first client of an engine is built (an engine no
+backend selected is never created - not even Reactor Netty's pool), shared by that engine's backends, and
+released in `shutdown()`. That includes Reactor Netty: its pool, its event loops (threads named after the pool,
+`lap-webclient-...`) and its resolver (Netty's `InetAddress`-based `DefaultAddressResolverGroup`, set explicitly
+because Reactor Netty's default resolver comes from the global resources) are the factory's, not the
+process-wide `HttpResources` every other Reactor Netty client of the JVM shares and Boot's `ReactorResourceFactory`
+manages. Until the engine switch existed the default engine ran on those global loops and that global resolver;
+this is the one change the default wiring received. The loops are disposed after the pool drain bound has
+passed rather than with the pool, because closing a loop group closes every channel on it - including those of
+the in-flight calls the pool disposal deliberately lets finish (see "Shutdown" below).
+
+**What each engine applies.** The mesh transport (§2.5), the per-endpoint response timeout of the ladder (§2.7)
+and the `pool.*` knobs (§1.2) map onto every engine as far as it has an equivalent. Where it has none, the
+setting does **not** apply - and the factory says so in one INFO line per engine in use at startup
+(`HTTP engine 'jdk' (...) for [...]: applies ...; does NOT apply ...; transport meters ...; cancellation ...`),
+next to a line naming the engine of every backend in alias order
+(`HTTP engine per backend (app.webclient.engine, default reactor-netty): a=jdk, b=reactor-netty`).
+
+| Setting | `reactor-netty` | `jdk` | `jetty` | `apache` |
+|---|---|---|---|---|
+| `transport.connect-timeout-ms` | `CONNECT_TIMEOUT_MILLIS` | client `connectTimeout` | client `connectTimeout` | `ConnectionConfig.connectTimeout` |
+| response timeout (per endpoint, §2.7) | `responseTimeout` - read inactivity | `HttpRequest.timeout` - until the response headers arrive | per-request `idleTimeout` - inactivity | `RequestConfig.responseTimeout` - socket inactivity |
+| `transport.max-connections` | per remote address | **not applied** | per destination | per route |
+| `transport.pending-acquire-timeout-ms` | pending-acquire timeout | **not applied** | **not applied** (no queue timeout) | connection-request timeout |
+| `pool.pending-acquire-max-count` | pending-acquire queue | **not applied** | requests queued per destination (`-1` = unbounded; `0` is rejected at startup, since Jetty queues every request) | **not applied** (no bound) |
+| `pool.max-idle-time` | max idle time | **not applied** | connection idle timeout | idle-connection eviction (only with `evict-in-background` > 0) |
+| `pool.max-life-time` | max life time | **not applied** | pool `maxDuration` | connection time-to-live |
+| `pool.evict-in-background` | background eviction | **not applied** | **not applied** (idle connections close on their own timer) | interval of the idle-connection evictor |
+| compression (`gzip`) | yes | **no** (no content decoding) | yes | yes |
+
+Notes on the table:
+
+- The JDK client has no per-client pool settings at all; its pool is tuned only by JVM-wide system properties
+  (`jdk.httpclient.connectionPoolSize`, `jdk.httpclient.keepalive.timeout`), which this module does not set -
+  they would change every other `java.net.http` client of the process.
+- Every non-default engine is aligned with Reactor Netty's defaults where they differ: HTTP/1.1 only (the JDK
+  client would otherwise offer an `h2c` upgrade on plaintext, Apache would negotiate HTTP/2 over TLS), no
+  redirects followed, no cookies stored (Jetty, Apache), and for Apache no automatic retries - an invisible
+  retry would spend the mesh budget behind the TimeLimiter's back. Apache's I/O reactor checks its timeouts
+  every 50 ms instead of every second, so its response timeout expires within the headroom below the
+  TimeLimiter rung.
+- The response-timeout semantics differ in detail - three engines bound inactivity, the JDK client bounds the
+  wait for the headers - but on every engine its expiry is a `WebClientRequestException` before the
+  TimeLimiter rung, which the breaker records as a transport failure (`WebClientEngineIntegrationTest`).
+
+**Meters per engine.** The per-request transport meters with the templated `uri` tag
+(`reactor.netty.http.client.*`) and the pool gauges (`reactor.netty.connection.provider.*`) exist on
+`reactor-netty` only ([metrics.md](metrics.md) §2). The `jdk`, `jetty` and `apache` engines expose no transport
+meter; what every engine has is the `http.client.requests` observation (§1.3), the Resilience4j meters and
+`webclient.response.body.size`.
+
+**Engine-agnostic.** Everything above the connector is the same on every engine, because it lives on the
+cloned builder or in the client, not in the transport. `WebClientEngineIntegrationTest` pins per engine: the
+codec limit (§1.1, with its `DataBufferLimitException` verdict), the status mapping, the empty-body contract
+(§3.4), the Host, User-Agent and Accept headers, and that the builder's filters (legatium's exchange filter is
+one) and its observation registry still run - the filter sees the backend name, the `http.client.requests`
+timer is recorded. Reactor's context propagation (§1.3) is a property of the Reactor pipeline above the
+connector and is not tested per engine.
+
+**The `jdk` engine and the Host header.** Every client of this module sends an explicit `Host` header, from
+the triplet (§2.1). The JDK client refuses that header unless the JVM was started with
+
+```
+-Djdk.httpclient.allowRestrictedHeaders=host
+```
+
+The module does **not** set this property: it is JVM-wide and would lift the restriction for every other
+`java.net.http` client of the process, which is exactly what the isolation guarantee rules out - and the JDK
+reads it only once, when its HTTP classes initialise. A host that selects `jdk` passes the flag at JVM start;
+without it the factory refuses to start, naming the key, the backends on `jdk` and the flag. The check asks the
+JDK itself, so a property set programmatically after the JDK client initialised is reported as missing -
+correctly, since the client ignores it. (`JdkEngineRestrictedHostHeaderTest` pins this in a JVM of its own.)
+
+**Cancellation.** The TimeLimiter cancels the subscription when the budget runs out; on every engine that
+aborts the exchange and closes its connection promptly - well before the response timeout - and gives the
+bulkhead permit back (`WebClientEngineIntegrationTest`, against a backend that never answers). Reactor Netty and
+Jetty (`abortOnCancel`) do it themselves, the JDK client through the cancelled `CompletableFuture`. Spring's
+Apache connector drops the `Future` of the exchange it starts, so a cancellation alone would leave the exchange
+running until the response timeout; the module keeps that `Future` per exchange and cancels it - while waiting
+for the response and while reading the body. Some engines report the aborted exchange as a failure after the
+cancellation; with no one left to receive it, Reactor would log it at ERROR as a dropped error, so the client
+writes it at DEBUG instead (`Exchange of backend '...' ended after cancellation: ...`).
+
+**Shutdown.** `shutdown()` releases each engine in use, bounded by the timeout the Reactor Netty pool drain
+already used (the longest response timeout of any endpoint + connect + pending-acquire + 1 s): Reactor Netty's
+pool closes its idle connections and lets in-flight calls finish on theirs, and its event loops are disposed
+once the bound has passed (daemon threads, so an exiting JVM is not held up); the JDK client shuts down in order -
+in-flight exchanges run to completion within the bound, then it is shut down hard with a WARN; Jetty's client
+stops, which aborts its exchanges; Apache's I/O reactor shuts down gracefully within the bound and is then
+closed, with a WARN when the bound ran out.
+
+**Fail-fast** (§5): an override key that names no mesh alias, a selected engine whose library is missing (the
+message names the coordinates), `jdk` without the Host flag, and `jetty` with `pool.pending-acquire-max-count: 0`.
+Only the engines in use are checked - a missing Apache library does not matter to a host that never selects it.
+
 ## 2. `app.mesh` — the per-endpoint tree (`MeshProperties`)
 
 `app.mesh` is **REQUIRED**: `ResilientWebClientFactory` injects `MeshProperties`, and a backend with no matching
@@ -312,7 +453,7 @@ only the TimeLimiter covers them.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `sidecar-base-url` | `String` | `http://localhost:8042` | Default base URL when an endpoint sets none. |
-| `connect-timeout-ms` | `Long` | `100` | Netty TCP connect timeout (small because app→sidecar is localhost + plaintext). |
+| `connect-timeout-ms` | `Long` | `100` | TCP connect timeout of the engine (small because app→sidecar is localhost + plaintext). |
 | `pending-acquire-timeout-ms` | `Long` | `200` | Fail fast on pool exhaustion. |
 | `max-connections` | `Int` | `100` | Cap on the shared pool. |
 
@@ -584,6 +725,11 @@ The module refuses to start (or fails at first use) rather than run mis-configur
 |---|---|---|
 | `max-in-memory-size` out of `1B..Int.MAX` | `WebClientProperties.init` | binding fails, names the key |
 | `pending-acquire-max-count < -1` / negative pool duration | `WebClientProperties.Pool.init` | binding fails, names the key |
+| `engine.default` / an `engine.endpoints` value not one of the four engines | Boot's binder | binding fails, names the key |
+| An `engine.endpoints` key that is no mesh alias | `ResilientWebClientFactory` (construction) | context start fails, names the key and the known aliases |
+| A selected engine's library missing from the classpath | `ResilientWebClientFactory` (construction) | context start fails, names the Maven coordinates |
+| `jdk` selected, JVM started without `-Djdk.httpclient.allowRestrictedHeaders=host` | `ResilientWebClientFactory` (construction) | context start fails, names the flag |
+| `jetty` selected with `pool.pending-acquire-max-count: 0` | `ResilientWebClientFactory` (construction) | context start fails, names both keys |
 | Invalid triplet (`< 4` parts / not `endpoint/...`) | `EndpointConfig` | fails when the endpoint is resolved |
 | Colliding aliases or triplets | `MeshProperties.init` | binding fails, names the duplicates |
 | Ladder cannot form (see §2.7 guards) | `ResolvedTimeouts.init` | binding fails, prefixed with the triplet |
@@ -627,6 +773,9 @@ app:
     validation:                                # §1.4 reference ON, report only; exempt per alias
       enabled: true
       fail-on-violation: false
+      endpoints: {}
+    engine:                                    # §1.6 the code default, shown explicitly
+      default: reactor-netty
       endpoints: {}
 
   mesh:

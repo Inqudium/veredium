@@ -8,33 +8,48 @@ import eu.inqudium.veredium.core.validation.ResponseValidation
 import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.observation.ObservationRegistry
-import io.netty.channel.ChannelOption
 import jakarta.annotation.PreDestroy
 import jakarta.validation.ValidatorFactory
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.context.annotation.Configuration
+import org.springframework.core.io.ResourceLoader
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
-import org.springframework.http.client.reactive.ReactorClientHttpConnector
+import org.springframework.http.client.reactive.ClientHttpConnector
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.WebClient
 import reactor.core.publisher.Hooks
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
-import reactor.netty.http.client.HttpClient
-import reactor.netty.resources.ConnectionProvider
 import tools.jackson.databind.ObjectMapper
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeoutException
 
 /**
- * Produces fully assembled [ResilientWebClient]s - one per mesh endpoint - bundling the Reactor-Netty
- * transport (one shared pool, per-target timeouts, base URL, JSON headers, bounded codec) with the
- * [ReactiveResilienceDecorator] pipeline. The backend name is reused as the Resilience4j instance name, so
- * `product-agreements` needs matching `resilience4j.*.instances.product-agreements` config.
+ * Produces fully assembled [ResilientWebClient]s - one per mesh endpoint - bundling the HTTP transport (the
+ * backend's engine on resources shared per engine, per-target timeouts, base URL, JSON headers, bounded codec)
+ * with the [ReactiveResilienceDecorator] pipeline. The backend name is reused as the Resilience4j instance name,
+ * so `product-agreements` needs matching `resilience4j.*.instances.product-agreements` config.
+ *
+ * ## Engines
+ *
+ * Which library carries a backend's exchanges is `app.webclient.engine` ([WebClientProperties.Engine],
+ * [WebClientEngine]): Reactor Netty by default, the JDK client, Jetty or Apache HttpClient 5 per backend. The
+ * choice stays inside this factory. It builds the connector itself, on resources it owns - created when the
+ * first client of an engine is built, shared by that engine's backends, released in [shutdown] - and sets it on
+ * its clone of Boot's builder. It never reads or writes Boot's `spring.http.clients.reactive.*` switches,
+ * registers no connector, HTTP-client or settings bean, does not use the host's `ReactorResourceFactory` bean and
+ * leaves Boot's builder bean as it found it, so every other WebClient of the host keeps the engine Boot gave it.
+ * Reactor Netty included: its pool, event loops and resolver are the factory's, not the process-wide
+ * `HttpResources` the host's own Reactor Netty clients share.
+ *
+ * The construction fails, naming the key, when an override names no mesh alias, when a selected engine's library
+ * is missing, when the JDK engine cannot send the Host header in this JVM, and when Jetty is asked for a request
+ * queue of 0. One INFO line names the engine per backend, one per engine in use states which transport and pool
+ * settings it applies and which it cannot, which transport meters it exposes and what cancellation does.
  *
  * Exchange logging is not assembled here: legatium-webclient-logging's auto-configuration puts its filter on
  * Boot's `WebClient.Builder` bean as a `WebClientCustomizer`, and every client below is a clone of that bean.
@@ -68,6 +83,10 @@ class ResilientWebClientFactory(
     // WebClient.Builder bean. Tests that construct the factory directly pass a bare builder and say so at the
     // call site.
     webClientBuilder: WebClient.Builder,
+    // Nullable like the optional dependencies above: the context injects itself, so the engine-library check asks
+    // the class loader the context was started with (which is what a test with a filtered class loader varies).
+    // Absent -> this class's own loader.
+    resourceLoader: ResourceLoader? = null,
 ) {
     private val logger: Logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java)
 
@@ -124,28 +143,56 @@ class ResilientWebClientFactory(
             .plusMillis(meshTransport.connectTimeoutMs + meshTransport.pendingAcquireTimeoutMs)
             .plusSeconds(1)
 
+    /** The engine of every backend, resolved once: its `app.webclient.engine.endpoints` entry or the default. */
+    private val engineByBackend: Map<String, WebClientEngine> = meshByBackend.keys.associateWith(properties.engine::engineFor)
+
+    init {
+        WebClientEngineChecks.requireKnownAliases(properties.engine, meshByBackend.keys)
+        WebClientEngineChecks.requireLibraries(engineByBackend, resourceLoader?.classLoader ?: javaClass.classLoader)
+        WebClientEngineChecks.requireJettyQueue(engineByBackend, properties.pool)
+        WebClientEngineChecks.requireJdkHostHeader(engineByBackend)
+        logger.info(WebClientEngineChecks.engineLine(properties.engine, engineByBackend))
+        engineByBackend.values.toSortedSet().forEach { engine ->
+            logger.info(WebClientEngineChecks.coverageLine(engine, engineByBackend, properties.pool, meshTransport))
+        }
+    }
+
+    /**
+     * The resources of every engine in use, each created when the first client of its engine is built - so an
+     * engine no backend selected is never created, and Reactor Netty's pool is not built for a factory whose
+     * backends all run on another engine.
+     */
+    private val transports =
+        EngineTransports(engineByBackend.values.toSet(), logger) { engine ->
+            when (engine) {
+                WebClientEngine.REACTOR_NETTY -> {
+                    ReactorNettyTransport(properties, meshTransport, POOL_NAME, poolDisposeTimeout) { disposal ->
+                        drain(disposal, Schedulers.parallel()).block()
+                    }
+                }
+
+                WebClientEngine.JDK -> {
+                    JdkTransport(meshTransport, poolDisposeTimeout, logger)
+                }
+
+                WebClientEngine.JETTY -> {
+                    JettyTransport(properties, meshTransport)
+                }
+
+                WebClientEngine.APACHE -> {
+                    ApacheTransport(properties, meshTransport, poolDisposeTimeout, logger)
+                }
+            }
+        }
+
+    /** The connector each backend's client was built with - for the tests that pin which engine carries whom. */
+    private val connectors = ConcurrentHashMap<String, ClientHttpConnector>()
+
     /**
      * `maxInMemorySize` in bytes: the cap on how much of a response body the codec will buffer. Set on every
      * client's codecs, and handed to the client so its buffer-limit line can name the number.
      */
     private val maxInMemoryBytes: Int = properties.maxInMemorySize.toBytes().toInt()
-
-    /**
-     * The single connection pool shared by every target's [HttpClient], built once and disposed in
-     * [shutdown]. Reactor Netty keeps a separate sub-pool per remote address, so distinct sidecar ports
-     * stay isolated. `maxConnections` / `pendingAcquireTimeout` come from the mesh transport config.
-     */
-    private val connectionProvider: ConnectionProvider =
-        ConnectionProvider
-            .builder(POOL_NAME)
-            .maxConnections(meshTransport.maxConnections)
-            .pendingAcquireMaxCount(properties.pool.pendingAcquireMaxCount)
-            .pendingAcquireTimeout(Duration.ofMillis(meshTransport.pendingAcquireTimeoutMs))
-            .maxIdleTime(properties.pool.maxIdleTime)
-            .maxLifeTime(properties.pool.maxLifeTime)
-            .evictInBackground(properties.pool.evictInBackground)
-            .metrics(true)
-            .build()
 
     /** Caches one client per logical name so [create] is idempotent - repeated calls return the same instance. */
     private val cache = ConcurrentHashMap<String, ResilientWebClient>()
@@ -168,17 +215,21 @@ class ResilientWebClientFactory(
                         "Add an app.mesh.endpoints[] entry whose alias equals '$backendName'.",
                 )
 
-        val httpClient = buildHttpClient(endpoint)
+        // The backend's engine, on the shared resources of that engine - set on the CLONE only, so Boot's builder
+        // bean and every other client of the host keep their own connector.
+        val connector = transports.connectorFor(engineByBackend.getValue(backendName), endpoint)
+        connectors[backendName] = connector
 
         val webClient =
             baseBuilder
                 .clone()
                 .baseUrl(endpoint.baseUrl)
-                .clientConnector(ReactorClientHttpConnector(httpClient))
+                .clientConnector(connector)
                 // Host routes the sidecar to the upstream (from the triplet); set() (not add) so re-applying
                 // never accumulates values. User-Agent is the library's token (`veredium/<version>`) or the
-                // host's own (app.webclient.user-agent), which Reactor Netty honours over its default, so a
-                // peer's access log names what calls it. Extra static headers are applied on top, so an
+                // host's own (app.webclient.user-agent), which every engine honours over its own default, so a
+                // peer's access log names what calls it. The JDK client accepts the Host header only with the JVM
+                // flag the construction checked for. Extra static headers are applied on top, so an
                 // endpoint can override either.
                 .defaultHeaders { headers ->
                     headers.set(HttpHeaders.HOST, endpoint.host)
@@ -233,31 +284,24 @@ class ResilientWebClientFactory(
                 .register(registry)
         }
 
-    private fun buildHttpClient(endpoint: ResolvedTimeouts): HttpClient {
-        // Scoped to THIS endpoint's template - see WebClientMetrics.uriTagger for why it is not the full set.
-        val uriTag = WebClientMetrics.uriTagger(endpoint.pathTemplate)
-        // Response and connect timeouts are the mesh-derived values. The per-endpoint responseTimeout is
-        // tighter than that endpoint's TimeLimiter budget by construction, so it never drifts past it; its
-        // expiry surfaces as a WebClientRequestException the circuit breaker records.
-        return HttpClient
-            .create(connectionProvider)
-            .option(
-                ChannelOption.CONNECT_TIMEOUT_MILLIS,
-                meshTransport.connectTimeoutMs.toInt(),
-            ).responseTimeout(endpoint.responseTimeout)
-            .compress(true)
-            .keepAlive(true)
-            // Pool metrics come from the shared ConnectionProvider; these add per-request transport
-            // metrics. The URI tag is templated centrally so a path variable cannot leak cardinality.
-            .metrics(true) { uri -> uriTag(uri) }
-    }
+    /** The engine of [backendName] as resolved at construction, or `null` for a name with no mesh endpoint. */
+    internal fun engineOf(backendName: String): WebClientEngine? = engineByBackend[backendName]
+
+    /** The connector [backendName]'s client was built with, or `null` before [create] was called for it. */
+    internal fun connectorOf(backendName: String): ClientHttpConnector? = connectors[backendName]
+
+    /** The engines whose resources exist - created by a first client, released or not. */
+    internal fun startedEngines(): Map<WebClientEngine, EngineTransport> = transports.started()
 
     /**
-     * Disposes the shared pool on context shutdown, waiting up to [poolDisposeTimeout] for the disposal to
-     * finish.
+     * Releases the resources of every engine in use on context shutdown, each bounded by [poolDisposeTimeout]:
+     * Reactor Netty's pool is disposed (below) and its event loops once the bound has passed, the JDK client shut
+     * down in order, Jetty's client stopped (which
+     * aborts its exchanges), Apache's I/O reactor shut down gracefully. An engine that never built a client has
+     * nothing to release.
      *
-     * What the disposal waits for is narrower than "drain": the pool is built without Reactor Netty's
-     * `disposeTimeout`, so `disposeLater()` is not a graceful shutdown. It fails pending acquires, closes the
+     * For Reactor Netty, what the disposal waits for is narrower than "drain": the pool is built without Reactor
+     * Netty's `disposeTimeout`, so `disposeLater()` is not a graceful shutdown. It fails pending acquires, closes the
      * IDLE connections and completes; a connection an in-flight call holds is not cut - the call finishes on it,
      * and the connection is closed when it is released. So an in-flight call does not hold [shutdown] up, and
      * the timeout bounds the closing of the idle connections.
@@ -272,7 +316,7 @@ class ResilientWebClientFactory(
      */
     @PreDestroy
     fun shutdown() {
-        drain(connectionProvider.disposeLater(), Schedulers.parallel()).block()
+        transports.release()
     }
 
     /**
@@ -299,8 +343,8 @@ class ResilientWebClientFactory(
                 Mono.empty()
             }
 
-    private companion object {
-        /** Name of the single shared Reactor-Netty pool; also the `name` tag on its pool metrics. */
+    internal companion object {
+        /** Name of the Reactor-Netty pool shared by that engine's backends; also the `name` tag on its pool metrics. */
         const val POOL_NAME = "lap-webclient"
     }
 }
@@ -375,7 +419,7 @@ object WebClientMetrics {
     /**
      * The URI->tag mapper for ONE endpoint's HttpClient: its own template, or [UNKNOWN].
      *
-     * Each endpoint gets its own [HttpClient] ([ResilientWebClientFactory.buildHttpClient] runs per endpoint),
+     * Each endpoint gets its own Reactor-Netty `HttpClient` (the transport builds one per endpoint),
      * and each such client only ever calls its own path - the adapters build the URI from
      * `ResilientWebClient.pathTemplate`. Handing it the templates of ALL endpoints, as this once did, gave a
      * request the chance to match a FOREIGN template first and be counted under another endpoint's series.

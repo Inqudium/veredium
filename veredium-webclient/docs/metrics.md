@@ -44,10 +44,19 @@ zero. Point it at the sequence-gap query instead.
 The package switches on Reactor Netty's built-in Micrometer integration; the meters are emitted by Reactor
 Netty, not by this module, and stay in the raw `reactor.netty.*` namespace (no rename).
 
+> **Only on the `reactor-netty` engine.** Both families below exist only for backends whose HTTP engine
+> (`app.webclient.engine`, [configuration guide](webclient-config-guide.md) §1.6) is `reactor-netty`, the
+> default. A backend on `jdk`, `jetty` or `apache` has **no transport meter** at all - neither per-request
+> timers nor pool gauges; the module wires none for those engines. What every engine has is the
+> `http.client.requests` observation (when `app.webclient.observability.http-observation-enabled` is on), the
+> Resilience4j meters of §3 and `webclient.response.body.size`. The startup line of each engine in use names its
+> transport meters (`transport meters ...`). A dashboard built on `reactor.netty.*` therefore goes silent for a
+> backend moved to another engine - it does not drop to zero.
+
 | Metric family | Type | Meaning | Suggested alert |
 |---|---|---|---|
 | `reactor.netty.http.client.*` (e.g. `response.time`, `connect.time`, `tls.handshake.time`, `data.received` / `data.sent`, `address.resolver`) | timers / distribution summaries | Per-request transport metrics, enabled in `ResilientWebClientFactory` via `.metrics(true) { uri -> uriTag(uri) }`. The `uri` tag is templated by `WebClientMetrics` (the object in `ResilientWebClientFactory.kt`), and the tagger is built **per endpoint** from that endpoint's own path template (`uriTagger`, `:739`) rather than from the templates of all endpoints — each `HttpClient` only ever calls its own path, so scoping the mapper removes by construction the chance of a request matching a FOREIGN template first and being counted under another endpoint's series. The template comes from the `app.mesh` triplet and is NOT re-declared here. A URI that does not match falls to the single `other` bucket, so a per-call path variable can NEVER mint a new series. Other tags: `method`, `status`, `remote.address` — `method` being its own tag is why two endpoints sharing a path but not a method stay in separate series. | **`response.time` p99 rising → sidecar/backend latency; correlate with the per-backend `resilience4j.timelimiter` timeouts (§3)** |
-| `reactor.netty.connection.provider.*` (`total` / `active` / `idle` / `pending` / `max` / `max.pending` connections) | gauges | Connection-pool metrics from the single shared `ConnectionProvider`, built in `ResilientWebClientFactory` and enabled via `.metrics(true)`. One pool is shared by **all** endpoints (per-backend isolation is owned by the Resilience4j bulkhead, not the pool). The `name` tag is `lap-webclient` (`ResilientWebClientFactory.POOL_NAME`); a per-remote-address sub-pool keeps distinct sidecar ports isolated within it. | **`pending` sustained `> 0` / `active` pinned at `max` → pool saturation; requests wait on connection acquisition (raise `app.mesh.defaults.transport.max-connections` or shorten the per-endpoint mesh timeouts)** |
+| `reactor.netty.connection.provider.*` (`total` / `active` / `idle` / `pending` / `max` / `max.pending` connections) | gauges | Connection-pool metrics from the single shared `ConnectionProvider`, built by the factory's Reactor Netty transport (`WebClientEngineTransports.kt`) when the first `reactor-netty` client is built, and enabled via `.metrics(true)`. One pool is shared by **all** `reactor-netty` endpoints (per-backend isolation is owned by the Resilience4j bulkhead, not the pool). The `name` tag is `lap-webclient` (`ResilientWebClientFactory.POOL_NAME`); a per-remote-address sub-pool keeps distinct sidecar ports isolated within it. | **`pending` sustained `> 0` / `active` pinned at `max` → pool saturation; requests wait on connection acquisition (raise `app.mesh.defaults.transport.max-connections` or shorten the per-endpoint mesh timeouts)** |
 
 ## 3. Framework-emitted — Resilience4j (instances driven here)
 

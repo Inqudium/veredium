@@ -28,8 +28,9 @@ class ResponseBodyLimitExceededException(
  * so a single degenerate response could take the pod down. The WebClient twin gets that bound for free from the
  * reactive codec; this module enforces it itself, at the one place every response passes through - the
  * exchange function in [ResilientRestClient] - so that the ceiling means the same thing on both stacks: the
- * DECODED bytes buffered per concurrently handled response. Apache HttpClient decompresses transparently, so the
- * count here is after decompression, exactly as the codec counts.
+ * DECODED bytes buffered per concurrently handled response. Every engine of this module decompresses
+ * transparently, so the count here is after decompression, exactly as the codec counts. The reader sees only an
+ * `InputStream`, which is what keeps it engine-agnostic.
  *
  * Two reads, for the two kinds of body:
  *  - [readOrNull] for a SUCCESS body, which has to arrive whole or not at all: a body that does not fit is
@@ -44,14 +45,15 @@ class ResponseBodyLimitExceededException(
  * The limit bounds what one response may cost, so the reader is careful not to multiply it. The bytes are read
  * straight into the array that is returned - no intermediate chunk, no `ByteArrayOutputStream` whose final
  * `toByteArray()` would double the peak. When the response declares a `Content-Length` (the usual case for a
- * JSON answer; Apache drops the header when it decompresses, so a declared length is the decoded one), the
+ * JSON answer; the engines drop the header when they decompress, so a declared length is the decoded one), the
  * array is allocated at that size up front, capped at the limit so a lying header cannot reserve more than the
  * limit allows; a body of exactly that length is then returned without a single copy. Without a declared length
  * the array starts at 8 KiB and doubles, capped at the limit, and is trimmed to size once at the end.
  *
  * The remainder of an over-limit body is NOT read here. Closing the response afterwards hands the stream back
- * to Apache HttpClient, which drains or discards the connection as its own rules dictate - that is the
- * transport's business, and the limit is about memory, not about the wire.
+ * to the engine, which drains or discards the connection as its own rules dictate (the Jetty and Reactor Netty
+ * engines discard it rather than read a body nobody wants) - that is the transport's business, and the limit is
+ * about memory, not about the wire.
  */
 object BoundedBodyReader {
     private const val CHUNK_SIZE = 8 * 1024

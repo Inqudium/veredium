@@ -6,8 +6,9 @@
 > **Dependency facts** (`rest-client/pom.xml`): `resilience4j-spring-boot4:2.4.0` pulls in
 > `resilience4j-micrometer:2.4.0` transitively, `micrometer-core` and `micrometer-observation` arrive through
 > `spring-boot-starter-actuator`, and `httpclient5-observation` (version from the Boot BOM, same as
-> `httpclient5`) supplies the pool binder. No `reactor-*` artifact is on the classpath, so nothing under
-> `reactor.netty.*` can ever appear for this module — see §7 if a dashboard still expects it.
+> `httpclient5`) supplies the pool binder. No `reactor-*` artifact reaches a consumer's classpath through this
+> module: `reactor-netty-http` is an optional dependency, present only when the host adds it to select the
+> `reactor-netty` engine — and only then can `reactor.netty.*` pool gauges appear (§2.1, §7).
 
 The metrics emitted by the blocking RestClient adapter layer in `eu.inqudium.veredium.restclient` —
 the resilient, pooled HTTP client (`ResilientRestClientFactory` / `ResilientRestClient`) that every outbound
@@ -44,7 +45,7 @@ per adapter, and keep the ceiling a comfortable factor above them.
 **What it cannot tell you.** Only bodies that fit are sampled — a response past the limit is never decoded,
 so it leaves no sample. For those, the one WARN line `Response body exceeded the buffer limit on
 backend '<alias>': limit=N bytes, Content-Length=M` carries the two numbers instead. `Content-Length` there is a
-**lower bound**: Apache strips the header after decompressing a gzip body, so under the default
+**lower bound**: the engines strip the header when they decompress a gzip body, so under the default
 `Accept-Encoding` the line reads `Content-Length=unknown` and only the limit is certain.
 
 **Why bytes after decompression, and why UTF-8.** The bounded reader counts what Apache hands it, which is the
@@ -65,8 +66,8 @@ log lines carry as `adapter_name`, so a meter and a log line correlate on sight.
 
 ## 2. Enabled here — the shared connection pool (`restclient.pool.*`)
 
-The factory builds one `PoolingHttpClientConnectionManager` for all endpoints and binds its gauges once, in
-its constructor, through Apache's `ConnPoolMeters` (`httpclient5-observation`). Micrometer's own
+The Apache engine (the default, §2.1 for the others) builds one `PoolingHttpClientConnectionManager` for all
+endpoints on it and binds its gauges once, when the factory is constructed, through Apache's `ConnPoolMeters` (`httpclient5-observation`). Micrometer's own
 `PoolingHttpClientConnectionManagerMetricsBinder` is deprecated in favour of exactly this binder, which is why
 the names are Apache's shape under this module's prefix rather than Micrometer's
 `httpcomponents.httpclient.pool.*`.
@@ -97,6 +98,25 @@ deployment runs two in one registry, so the name is not a property.
 **`max` is not a gauge.** The pool's capacity is configuration (`app.mesh.defaults.transport.max-connections`,
 default 100, applied as both `maxConnTotal` and `maxConnPerRoute`), and the factory logs it at startup; the
 binder exposes the three live counts only. A dashboard that wants the ratio reads the limit from config.
+
+### 2.1 Pool meters per engine
+
+The gauges above are the **Apache** engine's (`app.restclient.engine`, the default; [the guide's
+"Engines"](GUIDE.md#engines)). Each engine in use registers its own, in the host's `MeterRegistry` and never in
+Micrometer's global one; with no registry, none:
+
+| Engine | Pool meters |
+|---|---|
+| `apache` | `restclient.pool.{leased,available,pending}{pool=restclient-pool}` — registered only when a backend runs on Apache |
+| `jdk` | **none** — the JDK client exposes no pool statistics |
+| `jetty` | **none** — Jetty has no Micrometer binder |
+| `reactor-netty` | Reactor Netty's own family under its own names and tags: `reactor.netty.connection.provider.{total,active,idle,pending,max,max.pending}.connections`, tagged `name=restclient-reactor-netty`, `id`, `remote.address` — registered by the engine's registrar per remote address, removed when the pool is disposed |
+
+`restclient.pool.pending` and `reactor.netty.connection.provider.pending.connections` answer the same question for
+their engine. The JDK and Jetty engines leave the bulkheads (§4) as the only concurrency signal; the per-engine
+startup line says which engine a backend runs on and which pool settings it applies. Everything in §1, §3 and §4
+is engine-independent: the size summary, the `http.client.requests` observation and the Resilience4j meters sit
+above the request factory.
 
 ---
 
@@ -141,7 +161,10 @@ client recorded on the observation, which for I/O failures is Spring's wrapper, 
 | transport response timeout | `CLIENT_ERROR` | `UNKNOWN` | `ResourceAccessException` (cause `SocketTimeoutException`) |
 | cancelled — TimeLimiter expiry or interrupted caller | `CLIENT_ERROR` | `UNKNOWN` | `ResourceAccessException` (cause `SocketException: Closed by interrupt`) |
 
-The last two rows are indistinguishable on the timer: `status=CLIENT_ERROR` is the convention's value for "no
+The causes in the last two rows are the Apache engine's; on the other engines the response timeout's cause is
+`HttpTimeoutException` (`jdk`), `TimeoutException` (`jetty`) or `ReadTimeoutException` (`reactor-netty`), and a
+cancellation's an `IOException` over the interrupt - the tags are the same. The last two rows are
+indistinguishable on the timer: `status=CLIENT_ERROR` is the convention's value for "no
 response arrived", and the wrapper hides the cause. To split timeouts from cancellations, use
 `resilience4j.timelimiter.calls{kind=timeout}` (§4) and the exchange event's `adapter_outcome`
 (`timeout` versus `failure`, §5). Note also that a 2xx whose body does not fit is a `SUCCESS` here — the
@@ -238,8 +261,9 @@ the startup guard's two policy lines naming the aliases the verdicts were instal
 | `resilience4j.timelimiter.calls{kind=timeout}` = the reactive operator cancelled the chain | same name; = the caller was released and the worker interrupted | The blocking TimeLimiter needs a thread hand-off; the worker's exchange then ends as `Closed by interrupt` (§3). |
 | exchange event `adapter_outcome=cancelled` | `adapter_outcome=failure` | No `cancelled` on the blocking stack; `adapter.logging.events{outcome}` counts accordingly (§5). |
 
-**If a dashboard or alert references `reactor_netty_*` for this module**, it is permanently absent, not zero —
-the artifact is not on the classpath. Point pool panels at `restclient.pool.*` and latency panels at
+**If a dashboard or alert references `reactor_netty_*` for this module**, it is absent, not zero, unless a backend
+runs on the `reactor-netty` engine (§2.1) — then under `name=restclient-reactor-netty`, which keeps it apart from
+the reactive twin's pool. Point pool panels at `restclient.pool.*` for the Apache engine and latency panels at
 `http.client.requests`.
 
 **Related:** [rest-client — the blocking twin of web-client's `adapter/web`](restclient-vs-webclient.md).

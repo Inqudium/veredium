@@ -115,8 +115,9 @@ class ResilientRestClient(
      * was passed and the wire size the peer declared, and legatium's body capture is bounded by its own
      * `max-body-bytes`, which says nothing about this limit.
      *
-     * Sampled AFTER decompression, which is where the limit applies: Apache HttpClient inflates a compressed
-     * body transparently, so what the bounded reader counts and what this meter records are the same bytes.
+     * Sampled AFTER decompression, which is where the limit applies: every engine of this module inflates a
+     * compressed body transparently, so what the bounded reader counts and what this meter records are the same
+     * bytes.
      *
      * Recorded in UTF-8 BYTES ([ResponseBodyMetrics.utf8Size]) rather than `String.length`, so the sample and the
      * limit it informs are the same unit. For a UTF-8 body that is the byte count as read, taken without decoding

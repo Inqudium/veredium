@@ -23,7 +23,9 @@ Every call is wrapped as `CircuitBreaker( TimeLimiter( Bulkhead( exchange ) ) )`
 `BlockingResilienceDecorator` (a component of `veredium-core`, which this module instantiates as a bean in
 `RestClientConfiguration`), and the exchange underneath runs on Apache HttpClient 5 with its own three
 timeouts. Nothing in the call is unbounded; the question is only *which* bound fires, and that is a matter of
-which phase the call is in.
+which phase the call is in. The picture and §2-§3 describe the default engine; with `app.restclient.engine` set
+to `jdk`, `jetty` or `reactor-netty` the decorator, the ladder and the caller's side are unchanged and only the
+transport column differs - §9 says how.
 
 ```
 caller thread                                   worker thread (virtual, "restclient-call-N")
@@ -378,7 +380,8 @@ altogether, so the concern is bounded to the Java 21 line.
 
 ## 6. Shutdown
 
-`ResilientRestClientFactory.shutdown()` (`@PreDestroy`), in order:
+`ResilientRestClientFactory.shutdown()` (`@PreDestroy`) closes every engine in use against one deadline; for the
+Apache engine, in order:
 
 1. stop the pool's eviction scheduler;
 2. close every per-endpoint `CloseableHttpClient` (the manager is shared, so this closes nothing underneath);
@@ -390,7 +393,10 @@ altogether, so the concern is bounded to the Java 21 line.
    pool (`Connection pool '<name>' did not drain within …`), never an exception out of a destroy callback.
 
 Apache's own `close` discards leased connections on the spot — the drain wait exists because Apache has no
-"dispose when drained". After the factory, Spring destroys the decorator, whose `shutdownNow` interrupts any
+"dispose when drained". The other engines drain the same way before they are closed: Reactor Netty's pool waits
+for its leased connections and Jetty's client for its active and queued requests (the same WARN line, naming
+`restclient-reactor-netty` or `restclient-jetty`), the JDK client through its own `shutdown` + `awaitTermination`
+(`HTTP client 'restclient-jdk' did not terminate …`, then `shutdownNow`). After the factory, Spring destroys the decorator, whose `shutdownNow` interrupts any
 worker still running; those exchanges end as `Closed by interrupt`.
 
 ---
@@ -436,6 +442,48 @@ What each bound produces, for the caller, the breaker, the exchange event and th
 - **A caller's own budget belongs outside.** An adapter publishes `timeLimiterTimeout` and `responseTimeout`
   (`BaseAdapter`, `veredium-core`) so a caller can compose an end-to-end budget from them; a caller that needs less than the
   budget interrupts its waiting thread and gets the cancellation semantics of §5.3.
+
+---
+
+## 9. The other engines
+
+`app.restclient.engine` ([the guide's "Engines"](GUIDE.md#engines)) replaces the transport underneath the
+exchange and nothing above it: the caller still waits at most the TimeLimiter budget, the permit is still taken on
+the worker, the ladder is still derived as in §2. What changes is how each rung lands on the engine, and how an
+interrupted worker gets out.
+
+**The response-timeout rung.** The rung is the same number on every engine and stays below the TimeLimiter budget
+by construction; what it bounds differs:
+
+| Engine | The rung bounds | Pre-response phases |
+|---|---|---|
+| `apache` | every single read (the socket timeout) - a dripping body passes it, the TimeLimiter catches it (§3.2) | lease ≤ `pending-acquire-timeout-ms`, connect ≤ `connect-timeout-ms` |
+| `jdk` | head and body together, from sending the request until the body is closed | connect ≤ `connect-timeout-ms`; no lease - the JDK pool never makes a caller wait |
+| `jetty` | the whole request, from queueing for a connection to the end of the body; the same value bounds silence on the connection | connect ≤ `connect-timeout-ms`; a queued request waits within the rung, not within `pending-acquire-timeout-ms` |
+| `reactor-netty` | the longest silence between reads after the request was sent | lease ≤ `pending-acquire-timeout-ms`, connect ≤ `connect-timeout-ms` |
+
+On `jdk` and `jetty` a dripping body therefore ends at the rung - before the TimeLimiter - as a transport timeout
+(`HttpTimeoutException`, `TimeoutException`) rather than as the `TimeoutException` of §3.2. On `jetty` the
+TimeLimiter margin's share for the lease is unused, because the queue wait is inside the rung.
+
+**The interrupted worker.** The guarantee of §3 - the worker ends within milliseconds of the budget, its permit and
+its connection with it - holds on every engine, by its own route (the table in the guide's "Abandoned exchanges"):
+the JDK client cancels its exchange future or fails its body read; Jetty's request is aborted by the module because
+Spring only stops waiting for it; Reactor Netty's head wait cancels its subscription, and its body reads run on a
+short-lived virtual thread so that the interrupt reaches them - Spring's Reactor body stream ignores an interrupt
+and would otherwise keep the worker spinning until the next chunk. `RestClientEngineIntegrationTest` pins the head
+and the body phase, the caller's interrupt and the cancelled future for each engine.
+
+**Bulkheads and the pool.** The sizing invariant of §4 (`sum(max-concurrent-calls) <= max-connections`) is checked
+against `app.mesh.defaults.transport.max-connections` whatever the engine. On `apache`, `jetty` and `reactor-netty`
+that number is the pool's limit; on `jdk` nothing enforces it - the JDK pool is unbounded, so the bulkheads are the
+only concurrency limit in front of the sidecar.
+
+**Threads.** The worker stays a virtual thread on every engine. The engines bring their own threads besides: none
+for Apache; the JDK client's selector thread and a virtual-thread executor owned by the engine; Jetty's thread
+pool and scheduler; Reactor Netty's event loops (`restclient-reactor-netty-*`) and the virtual body-read threads.
+All are created only for an engine in use and stopped by the factory's shutdown (§6), which drains every engine in
+use against one deadline.
 
 **Related:** [metrics guide](metrics.md) · [what differs from the reactive twin](restclient-vs-webclient.md) ·
 [mesh ladder derivation (veredium-core)](../../veredium-core/docs/mesh-timeout.md).

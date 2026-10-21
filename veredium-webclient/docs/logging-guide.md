@@ -79,7 +79,10 @@ Product Agreement, Access Profile) and exposes a Kotlin interface of `suspend`
 functions to the calling service.
 
 Under the hood, each adapter uses Spring `WebClient` and Reactor Netty for the
-actual HTTP I/O, reached through a `ResilientWebClient` that applies the
+actual HTTP I/O (Reactor Netty is the default engine; `app.webclient.engine`
+can put a backend on the JDK client, Jetty or Apache HttpClient 5 instead -
+[configuration guide](webclient-config-guide.md) §1.6), reached through a
+`ResilientWebClient` that applies the
 Resilience4j primitives as reactive OPERATORS —
 `CircuitBreaker( TimeLimiter( Bulkhead( call ) ) )` — rather than as
 annotations. The coroutine boundary is a single `awaitSingle()` at the adapter.

@@ -9,8 +9,9 @@
 
 `veredium-core` is the stack-neutral core both client modules of the Veredium project build
 on. It holds everything that is identical by construction between the blocking client
-(`veredium-restclient`, Spring `RestClient` over Apache HttpClient 5) and the reactive one
-(`veredium-webclient`, Spring `WebClient` over Reactor Netty):
+(`veredium-restclient`, Spring `RestClient`, by default over Apache HttpClient 5) and the reactive one
+(`veredium-webclient`, Spring `WebClient`, by default over Reactor Netty). Each stack can switch its HTTP
+engine; see [Configuration](#configuration). The core is the same for every engine:
 
 - the **mesh timeout ladder** (`eu.inqudium.veredium.core.mesh`): the `app.mesh` tree, one
   entry per endpoint, from which every timeout rung, the client target and the alias derive;
@@ -160,6 +161,31 @@ One tree, `app.mesh`, documented key by key in the KDoc of `MeshProperties` and 
 it must name every derived alias under `timelimiter`, `circuitbreaker` and `bulkhead`
 `instances`; either client module's reference configuration (`src/test/resources/application.yml`)
 is the worked example.
+
+**The HTTP engine is a property of the client stack, not of the mesh.** `app.mesh` describes the timeout
+ladder whatever transport carries it. Which transport carries it is chosen under the stack's own tree, as a
+default plus an optional override per mesh alias:
+
+```yaml
+app:
+  restclient:
+    engine:
+      default: apache            # apache | jdk | jetty | reactor-netty
+  webclient:
+    engine:
+      default: reactor-netty     # reactor-netty | jdk | jetty | apache
+      endpoints:
+        apis-example-com-GET-v6-involved-parties: jdk   # this backend only; the key is its mesh alias
+```
+
+The setting reaches only the stack's own clients. Boot's global `spring.http.clients.*` switches, the
+host's own `RestClient`/`WebClient` beans and any other client in the process stay as they are. Not every
+engine can apply every rung of `app.mesh.defaults.transport`: the JDK client, for one, has no pool size and no
+pending-acquire timeout. Each stack logs what applies at startup. The per-engine tables, the dependency each
+engine needs and the fail-fast checks are in the
+[blocking client guide](../../veredium-restclient/docs/GUIDE.md#engines) and in the reactive client's
+[configuration guide](../../veredium-webclient/docs/webclient-config-guide.md) (section "`engine.*` — the HTTP
+engine").
 
 ## Guides
 

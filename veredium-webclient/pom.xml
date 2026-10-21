@@ -78,6 +78,34 @@
             <artifactId>spring-boot-configuration-processor</artifactId>
             <optional>true</optional>
         </dependency>
+        <!--
+            The non-default HTTP engines (app.webclient.engine.*). OPTIONAL on purpose: Reactor Netty, the default
+            engine, comes with starter-webflux; a host that selects another engine adds that engine's library
+            itself, and the factory fails the start naming these coordinates when it is missing. Versions from the
+            Spring Boot BOM. On the test classpath because the engine tests drive every engine.
+        -->
+        <!-- jetty: Spring's JettyClientHttpConnector over Jetty's HttpClient and its reactive adapter. -->
+        <dependency>
+            <groupId>org.eclipse.jetty</groupId>
+            <artifactId>jetty-reactive-httpclient</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.jetty</groupId>
+            <artifactId>jetty-client</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <!-- apache: Spring's HttpComponentsClientHttpConnector over Apache HttpClient 5's async client. -->
+        <dependency>
+            <groupId>org.apache.httpcomponents.client5</groupId>
+            <artifactId>httpclient5</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents.core5</groupId>
+            <artifactId>httpcore5-reactive</artifactId>
+            <optional>true</optional>
+        </dependency>
         <!-- One structured log event per outbound HTTP exchange, as an ExchangeFilterFunction on Boot's
              WebClient.Builder bean - the bean ResilientWebClientFactory clones per backend. -->
         <dependency>
@@ -162,6 +190,38 @@
                 <configuration>
                     <useModulePath>false</useModulePath>
                 </configuration>
+                <executions>
+                    <!--
+                        Two test JVMs, because the JDK HTTP client reads jdk.httpclient.allowRestrictedHeaders ONCE,
+                        when its classes initialise. The main run starts with it set to `host`, the documented host
+                        setup for the jdk engine (every client of this module sends a Host header), so the jdk engine
+                        is tested like the others. The second run starts WITHOUT it and holds only the test that pins
+                        the startup failure a host gets when it selects jdk and forgot the flag. Production code never
+                        sets the property: it is JVM-wide and would change every other java.net.http client.
+                    -->
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/JdkEngineRestrictedHostHeaderTest*</exclude>
+                            </excludes>
+                            <systemPropertyVariables>
+                                <jdk.httpclient.allowRestrictedHeaders>host</jdk.httpclient.allowRestrictedHeaders>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>jdk-restricted-host-header</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <includes combine.self="override">
+                                <include>**/JdkEngineRestrictedHostHeaderTest*</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>

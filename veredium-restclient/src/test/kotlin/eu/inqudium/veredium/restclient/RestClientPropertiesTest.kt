@@ -4,12 +4,15 @@ import eu.inqudium.veredium.core.Veredium
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatCode
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.assertj.core.api.Assertions.entry
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.springframework.boot.context.properties.bind.BindException
 import org.springframework.boot.context.properties.bind.Bindable
 import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.boot.context.properties.source.ConfigurationPropertySources
 import org.springframework.boot.env.YamlPropertySourceLoader
+import org.springframework.core.io.ByteArrayResource
 import org.springframework.core.io.ClassPathResource
 import org.springframework.util.unit.DataSize
 import java.time.Duration
@@ -186,6 +189,100 @@ class RestClientPropertiesTest {
             assertThatThrownBy { RestClientProperties(userAgent = "  ") }
                 .isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContaining("app.restclient.user-agent")
+        }
+    }
+
+    @Nested
+    inner class EngineSelection {
+        /** Binds `app.restclient` from [yaml] the way Boot binds an application.yml. */
+        private fun bind(yaml: String): RestClientProperties {
+            val sources = YamlPropertySourceLoader().load("engine", ByteArrayResource(yaml.trimIndent().toByteArray()))
+            return Binder(ConfigurationPropertySources.from(sources))
+                .bind("app.restclient", Bindable.of(RestClientProperties::class.java))
+                .orElseGet { RestClientProperties() }
+        }
+
+        @Test
+        fun `should default to the Apache engine for every backend`() {
+            // What is tested: the code default of `app.restclient.engine` and of the reference configuration.
+            // Success criteria: an unset block and the reference application.yml both resolve every alias to
+            //   APACHE, with no override.
+            // Why it matters: the default IS the module's wiring before the property existed; a host that does not
+            //   set the property must get exactly that, not a different engine.
+            //
+            // Given
+            val sources = YamlPropertySourceLoader().load(ConfigurationFiles.REFERENCE, ClassPathResource(ConfigurationFiles.REFERENCE))
+            val reference =
+                Binder(ConfigurationPropertySources.from(sources))
+                    .bind("app.restclient", Bindable.of(RestClientProperties::class.java))
+                    .orElseThrow { AssertionError("app.restclient did not bind from the reference application.yml") }
+
+            // When / Then
+            assertThat(RestClientProperties().engine.engineFor("any")).isEqualTo(RestClientEngine.APACHE)
+            assertThat(reference.engine).isEqualTo(RestClientProperties.Engine())
+        }
+
+        @Test
+        fun `should bind every engine by its YAML value, reactor-netty included`() {
+            // What is tested: Boot's relaxed enum binding against the documented values, the hyphenated one in
+            //   particular, and the constant name as an alternative spelling.
+            // Success criteria: `apache`, `jdk`, `jetty`, `reactor-netty` and `REACTOR_NETTY` bind to their
+            //   constants, and each constant's key is the documented value.
+            // Why it matters: `reactor-netty` is not a Java identifier; if Boot did not fold the hyphen, the one
+            //   value the docs give for that engine would fail every start.
+            //
+            // Given / When / Then
+            mapOf(
+                "apache" to RestClientEngine.APACHE,
+                "jdk" to RestClientEngine.JDK,
+                "jetty" to RestClientEngine.JETTY,
+                "reactor-netty" to RestClientEngine.REACTOR_NETTY,
+                "REACTOR_NETTY" to RestClientEngine.REACTOR_NETTY,
+            ).forEach { (value, engine) ->
+                assertThat(bind("app.restclient.engine.default: $value").engine.default).`as`(value).isEqualTo(engine)
+            }
+            assertThat(RestClientEngine.entries.map { it.key }).containsExactly("apache", "jdk", "jetty", "reactor-netty")
+        }
+
+        @Test
+        fun `should bind a per-backend override under the alias exactly as written`() {
+            // What is tested: the override map, keyed by mesh aliases - which carry upper-case HTTP methods.
+            // Success criteria: the alias `api-example-com-GET-accounts` keeps its case as a map key, resolves
+            //   to its override, and any other alias to the default; the key the failure messages name is the
+            //   full property key of the override, or of the default.
+            // Why it matters: the factory matches overrides against mesh aliases by equality; a key folded to
+            //   lower case by the binder would never match and fail the start as an unknown alias.
+            //
+            // Given
+            val engine =
+                bind(
+                    """
+                    app.restclient.engine:
+                      default: jdk
+                      endpoints:
+                        api-example-com-GET-accounts: reactor-netty
+                    """,
+                ).engine
+
+            // When / Then
+            assertThat(engine.endpoints).containsExactly(entry("api-example-com-GET-accounts", RestClientEngine.REACTOR_NETTY))
+            assertThat(engine.engineFor("api-example-com-GET-accounts")).isEqualTo(RestClientEngine.REACTOR_NETTY)
+            assertThat(engine.engineFor("api-example-com-GET-other")).isEqualTo(RestClientEngine.JDK)
+            assertThat(engine.keyFor("api-example-com-GET-accounts")).isEqualTo("app.restclient.engine.endpoints.api-example-com-GET-accounts")
+            assertThat(engine.keyFor("api-example-com-GET-other")).isEqualTo("app.restclient.engine.default")
+        }
+
+        @Test
+        fun `should reject an unknown engine at bind time, naming the key`() {
+            // What is tested: a value that is no engine.
+            // Success criteria: binding fails, and the failure names `app.restclient.engine.default`.
+            // Why it matters: a misspelt engine must not fall back to a default and run on something the
+            //   operator did not choose.
+            //
+            // Given / When / Then
+            assertThatThrownBy { bind("app.restclient.engine.default: netty") }
+                .isInstanceOf(BindException::class.java)
+                .hasMessageContaining("app.restclient.engine.default")
         }
     }
 }

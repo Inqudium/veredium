@@ -88,6 +88,17 @@ app:
     # The User-Agent every client sends. Unset = the library's token veredium/<version>; a host read per caller
     # in its peers' access logs names itself instead (an endpoint's static headers under app.mesh still win).
     # user-agent: my-service/2.3
+    # The HTTP engine of THIS module's clients: apache (the default - one pool with every knob below), jdk,
+    # jetty or reactor-netty, for all backends or per mesh alias. It reaches no other client of the host: Boot's
+    # spring.http.clients.imperative.factory is neither read nor written. jetty and reactor-netty need their
+    # library added by the host (org.eclipse.jetty:jetty-client, io.projectreactor.netty:reactor-netty-http);
+    # the start fails naming the coordinates otherwise, and names the key for an override whose alias is no
+    # mesh endpoint. What each engine applies of the mesh transport and the pool block is one startup line per
+    # engine (docs/GUIDE.md, "Engines"). Unset here, so the reference configuration runs on apache:
+    # engine:
+    #   default: apache
+    #   endpoints:
+    #     apis-example-com-GET-v6-involved-parties: jetty
     observability:
       # Whether Boot's ObservationRegistry stays on the cloned builder (client spans, the http.client.requests
       # timer, the outgoing traceparent) or is replaced by NOOP for these clients. The code default is OFF
