@@ -300,7 +300,7 @@ internal class JdkTransport(
             logger.warn("HTTP engine '{}' did not drain by the factory's shutdown deadline - closing it with exchanges still open", engine)
             client.shutdownNow()
             // shutdownNow() aborts the exchanges and returns before the client's threads have ended; a short,
-            // bounded wait makes [isReleased] true on return in the normal case without holding up a shutdown.
+            // bounded wait makes `isReleased` true on return in the normal case without holding up a shutdown.
             try {
                 client.awaitTermination(TERMINATION_AFTER_ABORT)
             } catch (_: InterruptedException) {
