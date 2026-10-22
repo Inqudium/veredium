@@ -571,11 +571,9 @@ wait for termination.
 of an interrupt**.
 
 **With veredium.**
-- Blocking: the module waits for active and queued requests to reach zero, up to the deadline, then stops. From an
-  interrupted thread, the stop runs on a thread of its own and is left to complete.
-- Reactive: the client is stopped right away, which aborts the exchanges still running. This is a **deviation**
-  from the expected behaviour: unlike the other reactive engines, and unlike Jetty on the blocking side, in-flight
-  calls are not drained, and their callers see the abort.
+- Both stacks: the module waits for active and queued requests to reach zero, up to the deadline, then stops; what
+  is still running then is aborted, with one WARN. From an interrupted thread, the wait ends at once and the stop
+  runs on a thread of its own and is left to complete.
 
 ### Reactor Netty
 
@@ -593,8 +591,8 @@ of an interrupt**.
 Pinned per engine by "should let an in-flight exchange finish before closing the engine", "should report an
 engine that does not drain by the deadline and close it anyway", "should stop waiting when the shutdown thread is
 interrupted and leave the flag set" and "should refuse a client requested after shutdown" (blocking), and by the
-reactive "Release against the shutdown deadline" cases. `EngineTransportLifecycleTest` and `EngineTransportsTest`
-pin the isolation of a failing release.
+reactive "Release against the shutdown deadline" and "Jetty's shutdown" cases. `EngineTransportLifecycleTest`
+and `EngineTransportsTest` pin the isolation of a failing release.
 
 ## Test infrastructure
 

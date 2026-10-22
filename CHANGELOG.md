@@ -89,6 +89,10 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-22T14-01-49.md`:
 - `veredium-webclient`: shutting down the reactive Apache engine cancels the exchanges still in flight, with a
   WARN giving their number. Their callers no longer wait out their budget, and Apache no longer logs a
   `ClosedSelectorException`.
+- `veredium-webclient`: releasing the Jetty engine waits for its in-flight exchanges until the shared shutdown
+  deadline, as every other engine (and Jetty on the blocking side) does, instead of stopping the client at once
+  and aborting them. What is still running at the deadline is aborted with one WARN; an interrupted shutdown
+  thread stops waiting at once and leaves the stop to a thread of its own.
 - `veredium-webclient`: Jetty's request queue is sized at `max-connections` plus `pool.pending-acquire-max-count`,
   because Jetty queues every request, including the ones about to get a connection. Before, a burst on a cold
   pool was rejected at half the concurrency Reactor Netty accepts.

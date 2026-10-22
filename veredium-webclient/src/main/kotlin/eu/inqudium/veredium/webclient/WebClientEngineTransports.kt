@@ -28,9 +28,11 @@ import org.apache.hc.core5.reactor.IOReactorConfig
 import org.apache.hc.core5.reactor.IOReactorStatus
 import org.apache.hc.core5.util.TimeValue
 import org.apache.hc.core5.util.Timeout
+import org.eclipse.jetty.client.AbstractConnectionPool
 import org.eclipse.jetty.client.ConnectionPool
 import org.eclipse.jetty.client.DuplexConnectionPool
 import org.eclipse.jetty.client.Request
+import org.eclipse.jetty.client.transport.HttpDestination
 import org.eclipse.jetty.http.HttpCookieStore
 import org.slf4j.Logger
 import org.springframework.core.io.buffer.DataBuffer
@@ -54,6 +56,7 @@ import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.LockSupport
 import java.util.concurrent.locks.ReentrantLock
 import java.util.function.Function
 import kotlin.concurrent.withLock
@@ -331,10 +334,14 @@ internal class JdkTransport(
  * Not applied: `pending-acquire-timeout-ms` - Jetty has no timeout for a request waiting in its queue - and
  * `pool.evict-in-background`, because Jetty closes an idle connection on that connection's own idle timer
  * rather than in a background sweep.
+ *
+ * Shutdown drains, as on every other engine: Jetty's `stop` aborts the exchanges still running, so [release] first
+ * waits for them - the same wait, on the same counters, as the blocking module's Jetty engine.
  */
 internal class JettyTransport(
     properties: WebClientProperties,
     meshTransport: MeshProperties.Transport,
+    private val logger: Logger,
 ) : EngineTransport {
     override val engine: WebClientEngine = WebClientEngine.JETTY
 
@@ -361,19 +368,54 @@ internal class JettyTransport(
     override fun connectorFor(endpoint: ResolvedTimeouts): ClientHttpConnector = JettyEndpointConnector(connector, endpoint.responseTimeout)
 
     /**
-     * Stops the client: its exchanges are aborted, its connections closed and its thread pool stopped. Jetty's
-     * stop does not wait, so the shared deadline is not consumed here.
+     * Waits until [deadlineNanos] for the exchanges in flight to finish, then stops the client - its connections
+     * closed, its thread pool stopped, and whatever is still running aborted, with one WARN saying how many.
+     *
+     * The wait also ends when the calling thread is INTERRUPTED; the flag is left for the caller. Jetty's stop then
+     * runs on a thread of its own and is left to complete: it waits for Jetty's own threads regardless of an
+     * interrupt, and the shutdown thread must not.
      */
     override fun release(
         deadlineNanos: Long,
         nanoTime: () -> Long,
-    ) = client.stop()
+    ) {
+        if (client.isStopped) return
+        while (exchangesInFlight() > 0 && nanoTime() - deadlineNanos < 0 && !Thread.currentThread().isInterrupted) {
+            LockSupport.parkNanos(DRAIN_POLL_NANOS)
+        }
+        val interrupted = Thread.currentThread().isInterrupted
+        val left = exchangesInFlight()
+        if (left > 0) {
+            logger.warn(
+                "HTTP engine '{}' did not drain {} - stopping it with {} exchange(s) still in flight",
+                engine,
+                if (interrupted) "because the shutdown thread was interrupted" else "by the factory's shutdown deadline",
+                left,
+            )
+        }
+        if (interrupted) {
+            Thread.ofVirtual().name("$THREAD_NAME_PREFIX-stop").start { client.stop() }
+        } else {
+            client.stop()
+        }
+    }
+
+    /** Exchanges holding a connection or queued for one, over every destination - what [release] waits on. */
+    internal fun exchangesInFlight(): Int =
+        client.destinations.sumOf { destination ->
+            val httpDestination = destination as? HttpDestination
+            val active = (httpDestination?.connectionPool as? AbstractConnectionPool)?.activeConnectionCount ?: 0
+            active + (httpDestination?.queuedRequestCount ?: 0)
+        }
 
     override fun isReleased(): Boolean = client.isStopped
 
     companion object {
         /** The client's name, and so the name prefix of this engine's I/O threads. */
         const val THREAD_NAME_PREFIX: String = "veredium-webclient-jetty"
+
+        /** How often [release] re-checks the exchanges in flight. */
+        val DRAIN_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(50)
 
         /**
          * The Jetty queue capacity that means what `pool.pending-acquire-max-count` means on Reactor Netty: how
