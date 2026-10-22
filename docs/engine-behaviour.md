@@ -399,8 +399,8 @@ engine reports after that is the expected end of an aborted exchange, not an err
 **Default (JDK 21+).**
 - Blocking: waiting for the head, Spring cancels the JDK's response future on an interrupt, which aborts the
   exchange. Reading the body, the JDK's stream closes itself and fails the read.
-- Reactive: cancelling the subscription cancels the client's future. The JDK then reports the exchange's failure
-  **after** the cancellation.
+- Reactive: cancelling the subscription cancels the client's future, which completes it at once. Whether the
+  exchange's own failure follows **after** the cancellation depends on timing: sometimes it does, sometimes not.
 
 **With veredium.** Nothing to add on the blocking side. Reactive: see "Errors after a cancellation" below.
 
@@ -502,7 +502,8 @@ pool off a client **builder** and hands back nothing to deregister with.
 ### JDK `java.net.http`
 
 **Default (JDK 21+).** Each client runs on an executor of its own, a cached platform-thread pool. Reactive bodies
-arrive on `ForkJoinPool.commonPool`, where `sendAsync` hands its completions. There are no pool statistics.
+arrive on the client's own worker threads (`HttpClient-<n>-Worker-<m>`) or on `ForkJoinPool.commonPool`, where
+`sendAsync` hands completions - which of the two varies from call to call. There are no pool statistics.
 
 **With veredium.** Blocking: a virtual-thread executor owned by the transport, which also serves as Spring's
 body writer. There are no pool meters, and the startup line says so.

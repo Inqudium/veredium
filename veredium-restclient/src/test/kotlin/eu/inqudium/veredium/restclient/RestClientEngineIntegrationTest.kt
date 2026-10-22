@@ -414,8 +414,9 @@ class RestClientEngineIntegrationTest {
             val client = factory.create("abandoned")
             assertThat(client.responseTimeout).isEqualTo(Duration.ofMillis(8_400))
             // A first exchange on the fresh engine, so its start, the connect and the class loading are behind
-            // the call the budget is measured on.
-            client.get(Greeting::class.java) { it.uri("/warm") }
+            // the call the budget is measured on. Its outcome does not matter - under load it may itself exceed the
+            // 300 ms budget; the engine is initialised either way.
+            catchThrowable { client.get(Greeting::class.java) { it.uri("/warm") } }
 
             // When
             val startNanos = System.nanoTime()
