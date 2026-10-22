@@ -216,7 +216,8 @@ binds the same key under `app.restclient.user-agent`.
 ### 1.6 `engine.*` — the HTTP engine (`WebClientProperties.Engine`, `WebClientEngine`)
 
 Which library carries a backend's exchanges. A shared default with per-alias overrides, the same shape as
-`validation.*` (§1.4):
+`validation.*` (§1.4). What each engine does on its own, and what the module does about it, is collected in
+[HTTP engine behaviour](../../docs/engine-behaviour.md).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|

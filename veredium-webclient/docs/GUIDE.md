@@ -109,6 +109,7 @@ Every detail, with the mapping table per engine: [configuration guide](webclient
 - [Configuration guide](webclient-config-guide.md)
 - [Metrics](metrics.md)
 - [Logging guide](logging-guide.md)
+- [HTTP engine behaviour - what each engine does on its own](../../docs/engine-behaviour.md) (both clients)
 
 ## Provenance
 
