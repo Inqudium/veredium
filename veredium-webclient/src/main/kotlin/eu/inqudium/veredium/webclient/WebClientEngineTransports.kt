@@ -50,6 +50,7 @@ import reactor.core.publisher.Mono
 import reactor.netty.resources.ConnectionProvider
 import reactor.netty.resources.LoopResources
 import java.net.URI
+import java.nio.channels.ClosedSelectorException
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
@@ -510,11 +511,16 @@ internal class ApacheTransport(
             ).setDefaultTlsConfig(TlsConfig.custom().setVersionPolicy(HttpVersionPolicy.FORCE_HTTP_1).build())
             .build()
 
+    /** Set when [release] starts - from then on a closed selector is the expected end of a worker, not a fault. */
+    @Volatile
+    private var releasing = false
+
     private val client: AbortableAsyncClient =
         AbortableAsyncClient(
             HttpAsyncClients
                 .custom()
                 .setConnectionManager(connectionManager)
+                .setIoReactorExceptionCallback(::onReactorException)
                 // Named after the module, like the other engines' threads, so a thread dump (and a test) tells
                 // this engine's I/O threads from a host's own Apache client; daemons, as Apache's default ones.
                 .setThreadFactory(DefaultThreadFactory(THREAD_NAME_PREFIX, true))
@@ -558,6 +564,7 @@ internal class ApacheTransport(
         deadlineNanos: Long,
         nanoTime: () -> Long,
     ) {
+        releasing = true
         evictor?.let { running ->
             running.shutdown()
             try {
@@ -587,10 +594,8 @@ internal class ApacheTransport(
         } else if (aborted > 0) {
             logger.warn("HTTP engine '{}' shut down with {} exchange(s) still in flight - cancelling them", engine, aborted)
         }
-        // Once nothing holds it, the reactor can end by itself; it is closed hard only if it still has not.
-        // Assumption: closing a reactor whose workers are still shutting down closes their selector under them,
-        // which Apache logs at ERROR as a ClosedSelectorException (httpcore5 5.4) - noise at the moment someone
-        // reads the shutdown log, avoided whenever the reactor can end by itself.
+        // Once nothing holds it, the reactor can end by itself; it is closed hard only if it still has not. A worker
+        // still shutting down then finds its selector closed under it - `onReactorException` takes that.
         if (client.status != IOReactorStatus.SHUT_DOWN) {
             try {
                 client.awaitShutdown(TimeValue.of(SHUTDOWN_AFTER_ABORT))
@@ -599,6 +604,24 @@ internal class ApacheTransport(
             }
         }
         client.close(if (client.status == IOReactorStatus.SHUT_DOWN) CloseMode.GRACEFUL else CloseMode.IMMEDIATE)
+    }
+
+    /**
+     * The I/O reactor's exception callback, in place of Apache's default, which logs every exception at ERROR.
+     *
+     * Assumption: closing the multi-core reactor while one of its workers is still shutting down closes that
+     * worker's selector under it, and the worker's termination (`closePendingChannels`) reports a
+     * [ClosedSelectorException] to this callback (httpcore5 5.4). The multi-core reactor reports `SHUT_DOWN` only
+     * once it is closed, so [release] cannot tell a worker that already ended from one that has not - on a slow
+     * machine the hard close regularly meets one that has not. During [release] that exception is the expected end
+     * of the worker, logged at DEBUG; any other exception, and one outside a release, stays an ERROR.
+     */
+    private fun onReactorException(ex: Exception) {
+        if (releasing && ex is ClosedSelectorException) {
+            logger.debug("HTTP engine '{}': an I/O worker ended on its closed selector during the release", engine)
+        } else {
+            logger.error("HTTP engine '{}': I/O reactor failure", engine, ex)
+        }
     }
 
     override fun isReleased(): Boolean = client.status == IOReactorStatus.SHUT_DOWN && evictor?.isRunning != true

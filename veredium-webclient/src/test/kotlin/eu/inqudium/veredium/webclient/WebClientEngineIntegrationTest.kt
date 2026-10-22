@@ -755,8 +755,9 @@ class WebClientEngineIntegrationTest {
             //   passed;
             //   for Apache with the deadline ahead either that line or "exchange(s) still in flight", because
             //   whether its graceful reactor shutdown ends before the deadline with the exchange's connection
-            //   still open varies from run to run; and Apache logs no ERROR (a reactor closed hard while still shutting
-            //   down logs a ClosedSelectorException).
+            //   still open varies from run to run; and no ERROR is logged, neither by Apache nor by the factory (a
+            //   reactor closed hard while a worker is still shutting down reports a ClosedSelectorException, which
+            //   during the release is the worker's expected end).
             // Why it matters: the bound is the whole point of a draining shutdown - a context close must not wait
             //   for an exchange the backend never ends, and the caller of that exchange must not be left waiting
             //   for its budget either (Apache's hard close completes no callback of an exchange in flight). A deadline already spent by an engine released before
@@ -799,6 +800,7 @@ class WebClientEngineIntegrationTest {
                     assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
                     assertThat(catchThrowable { held.get(2, TimeUnit.SECONDS) }).isNotNull().isNotInstanceOf(TimeoutException::class.java)
                     assertThat(engineLines.events.filter { it.level == Level.ERROR }.map { it.throwableProxy?.className }).isEmpty()
+                    assertThat(lines.events.filter { it.level == Level.ERROR }.map { it.formattedMessage }).isEmpty()
                 }
             } finally {
                 logger.detachAppender(lines)

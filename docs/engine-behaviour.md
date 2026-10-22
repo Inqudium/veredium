@@ -555,7 +555,10 @@ on shutdown".
 - Blocking: the module waits for the leased count to reach zero, polling every 50 ms up to the deadline, then
   closes the pool.
 - Reactive: in-flight exchanges are cancelled on release (one WARN with their number). The reactor is closed hard
-  only if it does not end by itself.
+  only if it does not end by itself. The multi-core reactor reports `SHUT_DOWN` only once it is closed, so the
+  module cannot tell whether every worker already ended. A worker that has not finds its selector closed and
+  reports a `ClosedSelectorException`; the module's own reactor exception callback logs that one at DEBUG during
+  the release, and every other reactor exception at ERROR, as Apache's default callback would.
 
 ### JDK `java.net.http`
 
