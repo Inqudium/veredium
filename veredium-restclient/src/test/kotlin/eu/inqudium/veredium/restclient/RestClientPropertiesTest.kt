@@ -116,18 +116,23 @@ class RestClientPropertiesTest {
     @Nested
     inner class PoolSettings {
         @Test
-        fun `should reject a negative lifecycle duration on every pool knob`() {
+        fun `should reject a negative lifecycle duration on every pool knob, and a zero idle time`() {
             // What is tested: all three durations, because each is passed on to Apache's pool, which accepts a
             //   negative one and then means by it something no operator intended - a connection due for
             //   eviction the moment it is created.
             // Success criteria: each of the three throws, naming its own key. Asserting them one by one
             //   rather than as a group is what catches a guard that was copied but not adapted.
+            //   A zero max-idle-time throws as well, naming the key and why.
             // Why it matters: a negative value is accepted by Apache and read as "already expired"; caught at
-            //   binding, it names the key, caught nowhere, it shows as connections that never live.
+            //   binding, it names the key, caught nowhere, it shows as connections that never live. A zero idle
+            //   time means no keep-alive at all on Reactor Netty and no idle timeout on Jetty - two opposite
+            //   readings of one value, depending on the engine.
             //
             // Given / When / Then
             assertThatThrownBy { RestClientProperties.Pool(maxIdleTime = Duration.ofSeconds(-1)) }
                 .hasMessageContaining("app.restclient.pool.max-idle-time")
+            assertThatThrownBy { RestClientProperties.Pool(maxIdleTime = Duration.ZERO) }
+                .hasMessageContainingAll("app.restclient.pool.max-idle-time must be positive", "no keep-alive on Reactor Netty")
             assertThatThrownBy { RestClientProperties.Pool(maxLifeTime = Duration.ofSeconds(-1)) }
                 .hasMessageContaining("app.restclient.pool.max-life-time")
             assertThatThrownBy { RestClientProperties.Pool(evictInBackground = Duration.ofSeconds(-1)) }
@@ -135,16 +140,17 @@ class RestClientPropertiesTest {
         }
 
         @Test
-        fun `should accept zero durations, which the factory reads as off`() {
+        fun `should accept zero durations where they mean off, and a millisecond of idle time`() {
             // What is tested: the lower end of the admitted range of the three pool durations.
-            // Success criteria: Duration.ZERO for all three constructs without an exception.
+            // Success criteria: Duration.ZERO for max-life-time and evict-in-background, and one millisecond for
+            //   max-idle-time, construct without an exception.
             // Why it matters: zero means "no background eviction" and "no lifetime bound" - documented settings;
-            //   the guard must draw its line at negative, not at zero.
+            //   the guard must draw its line at negative there, and at zero only for the idle time.
             //
             // Given / When / Then
             assertThatCode {
                 RestClientProperties.Pool(
-                    maxIdleTime = Duration.ZERO,
+                    maxIdleTime = Duration.ofMillis(1),
                     maxLifeTime = Duration.ZERO,
                     evictInBackground = Duration.ZERO,
                 )
@@ -194,12 +200,16 @@ class RestClientPropertiesTest {
 
     @Nested
     inner class EngineSelection {
-        /** Binds `app.restclient` from [yaml] the way Boot binds an application.yml. */
+        /**
+         * Binds `app.restclient` from [yaml] the way Boot binds an application.yml. A YAML that binds nothing fails
+         * here instead of falling back to the defaults, which would let a case for the default value pass on a
+         * binding that never happened.
+         */
         private fun bind(yaml: String): RestClientProperties {
             val sources = YamlPropertySourceLoader().load("engine", ByteArrayResource(yaml.trimIndent().toByteArray()))
             return Binder(ConfigurationPropertySources.from(sources))
                 .bind("app.restclient", Bindable.of(RestClientProperties::class.java))
-                .orElseGet { RestClientProperties() }
+                .orElseThrow { AssertionError("nothing bound under app.restclient from: $yaml") }
         }
 
         @Test

@@ -51,8 +51,10 @@ internal object WebClientEngineChecks {
     }
 
     /**
-     * Jetty queues EVERY request before it gets a connection, so the "never queue" value `0` of
-     * `pool.pending-acquire-max-count` cannot be carried over: it would reject every request of the engine.
+     * The "no call waits" value `0` of `pool.pending-acquire-max-count` cannot be expressed on Jetty: its request
+     * queue holds a request until it is ON a connection, including while a new connection is opened for it, so
+     * a capacity small enough to let nothing wait behind busy connections would also reject a burst the pool
+     * could serve - and a capacity of 0 rejects every request ([JettyTransport.jettyQueueCapacity]).
      */
     fun requireJettyQueue(
         engineByBackend: Map<String, WebClientEngine>,
@@ -60,8 +62,9 @@ internal object WebClientEngineChecks {
     ) {
         require(WebClientEngine.JETTY !in engineByBackend.values || pool.pendingAcquireMaxCount != 0) {
             "app.webclient.pool.pending-acquire-max-count=0 cannot be honoured by the jetty engine selected by $KEY " +
-                "for ${backendsOf(WebClientEngine.JETTY, engineByBackend)}: Jetty queues every request before it gets " +
-                "a connection, so 0 would reject all of them. Use -1 or a positive bound, or another engine."
+                "for ${backendsOf(WebClientEngine.JETTY, engineByBackend)}: Jetty's request queue also holds the requests " +
+                "a connection is being opened for, so it has no setting for \"no call waits\". Use -1 or a positive " +
+                "bound, or another engine."
         }
     }
 
@@ -150,7 +153,7 @@ internal object WebClientEngineChecks {
                         listOf(
                             connect,
                             "the response timeout per endpoint (read inactivity)",
-                            "$maxConnections (per remote address)",
+                            "$maxConnections (per backend: Reactor Netty keeps a sub-pool per remote address and client configuration)",
                             pendingAcquire,
                             queue,
                             maxIdle,
@@ -180,7 +183,7 @@ internal object WebClientEngineChecks {
                             connect,
                             "the response timeout per endpoint (per-request idle timeout)",
                             "$maxConnections (per destination)",
-                            "$queue (as the request queue per destination)",
+                            "$queue (waiting beyond max-connections, in the request queue per destination)",
                             "$maxIdle (connection idle timeout)",
                             "$maxLife (connection max duration)",
                             "gzip",
@@ -199,13 +202,17 @@ internal object WebClientEngineChecks {
                             connect,
                             "the response timeout per endpoint (socket inactivity)",
                             "$maxConnections (per route)",
-                            "$pendingAcquire (connection-request timeout)",
                             "$maxLife (time to live)",
                             maxIdle.takeIf { evictorRuns },
                             evict.takeIf { evictorRuns },
                             "gzip",
                         ),
-                    notApplied = listOfNotNull(queue, maxIdle.takeUnless { evictorRuns }),
+                    notApplied =
+                        listOfNotNull(
+                            "$pendingAcquire (set as the connection-request timeout, but Apache's async pool checks it only when the pool is next used; the TimeLimiter bounds the wait)",
+                            queue,
+                            maxIdle.takeUnless { evictorRuns },
+                        ),
                     meters = none,
                     cancellation = "cancels the exchange's future, which aborts it",
                 )

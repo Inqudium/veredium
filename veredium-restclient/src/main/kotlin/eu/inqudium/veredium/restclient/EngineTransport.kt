@@ -6,12 +6,17 @@ import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.Logger
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
+import org.springframework.http.HttpStatusCode
 import org.springframework.http.StreamingHttpOutputMessage
 import org.springframework.http.client.ClientHttpRequest
 import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.http.client.ClientHttpResponse
+import java.io.FilterInputStream
+import java.io.IOException
+import java.io.InputStream
 import java.io.OutputStream
 import java.net.URI
+import java.nio.channels.AsynchronousCloseException
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.LockSupport
@@ -133,6 +138,49 @@ internal abstract class EngineTransport(
             deadlineNanos: Long,
             nanoTime: () -> Long,
         ): Duration = Duration.ofNanos(maxOf(0L, deadlineNanos - nanoTime()))
+
+        /**
+         * Shuts down every one of [transports] against the one deadline, each on its own: a shutdown that throws is
+         * reported on [logger] and does not keep the engines after it open. This runs from a destroy callback,
+         * where an exception would only end the shutdown early and leave a stack trace in place of the line.
+         */
+        fun shutdownAll(
+            transports: Collection<EngineTransport>,
+            deadlineNanos: Long,
+            nanoTime: () -> Long,
+            window: Duration,
+            logger: Logger,
+        ) {
+            transports.forEach { transport ->
+                try {
+                    transport.shutdown(deadlineNanos, nanoTime, window, logger)
+                } catch (e: Exception) {
+                    logger.warn("HTTP engine '{}' failed to release its resources", transport.engine, e)
+                }
+            }
+        }
+
+        /**
+         * One transport per engine in [engines], created in order by [create]. When a creation fails, the transports
+         * created before it are shut down at once - nothing can be in flight on them yet - and the failure is
+         * rethrown: it fails the factory's construction, so no destroy callback would ever release them, and a
+         * started Jetty client's non-daemon threads would keep the JVM of a failed start alive.
+         */
+        fun createAll(
+            engines: Collection<RestClientEngine>,
+            logger: Logger,
+            create: (RestClientEngine) -> EngineTransport,
+        ): Map<RestClientEngine, EngineTransport> {
+            val created = LinkedHashMap<RestClientEngine, EngineTransport>()
+            try {
+                engines.forEach { engine -> created[engine] = create(engine) }
+            } catch (e: Throwable) {
+                val now = System.nanoTime()
+                shutdownAll(created.values, now, { now }, Duration.ZERO, logger)
+                throw e
+            }
+            return created
+        }
     }
 }
 
@@ -164,4 +212,79 @@ internal open class ForwardingClientHttpRequest(
     }
 
     override fun execute(): ClientHttpResponse = delegate.execute()
+}
+
+/**
+ * A request whose exchange [abort]s when it fails, and whose response aborts it when a body read fails and when it
+ * is closed before its body was read to the end ([AbortingResponse]) - the decorator of the engines whose own close
+ * would otherwise DRAIN the rest of an unwanted body (Apache, the JDK client: Spring's responses of both read it to
+ * the end in `close`) or leave the exchange in flight (Jetty).
+ *
+ * [abort] receives the response once there is one (`null` while the request failed before it), and must be a no-op
+ * on an exchange that already ended; the engines' aborts are.
+ */
+internal class AbortingRequest(
+    delegate: ClientHttpRequest,
+    private val abort: (response: ClientHttpResponse?, cause: Throwable) -> Unit,
+) : ForwardingClientHttpRequest(delegate) {
+    override fun execute(): ClientHttpResponse {
+        val response =
+            try {
+                delegate.execute()
+            } catch (e: IOException) {
+                // An interrupted wait for the head, a timeout, a transport failure: Spring stopped waiting, the
+                // engine's exchange may still be in flight.
+                abort(null, e)
+                throw e
+            }
+        return AbortingResponse(response) { cause -> abort(response, cause) }
+    }
+}
+
+/**
+ * The response of an [AbortingRequest]. "Read to the end" means a read returned `-1`; a body never opened counts as
+ * not read, because the engine would otherwise drain it on close just the same.
+ *
+ * The abort runs BEFORE the delegate's close: Spring's Apache and JDK responses read the rest of the body in their
+ * close, so aborting afterwards would come too late.
+ */
+internal class AbortingResponse(
+    private val delegate: ClientHttpResponse,
+    private val abort: (Throwable) -> Unit,
+) : ClientHttpResponse {
+    @Volatile
+    private var endOfBody = false
+
+    private val guardedBody: InputStream by lazy {
+        object : FilterInputStream(delegate.body) {
+            override fun read(): Int = guarded { super.read() }
+
+            override fun read(
+                b: ByteArray,
+                off: Int,
+                len: Int,
+            ): Int = guarded { super.read(b, off, len) }
+
+            private fun guarded(read: () -> Int): Int =
+                try {
+                    read().also { if (it < 0) endOfBody = true }
+                } catch (e: IOException) {
+                    abort(e)
+                    throw e
+                }
+        }
+    }
+
+    override fun getBody(): InputStream = guardedBody
+
+    override fun getHeaders(): HttpHeaders = delegate.headers
+
+    override fun getStatusCode(): HttpStatusCode = delegate.statusCode
+
+    override fun getStatusText(): String = delegate.statusText
+
+    override fun close() {
+        if (!endOfBody) abort(AsynchronousCloseException())
+        delegate.close()
+    }
 }

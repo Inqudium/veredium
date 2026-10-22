@@ -166,20 +166,34 @@ class WebClientPropertiesTest {
         }
 
         @Test
-        fun `should accept zero durations, which the pool reads as off`() {
-            // What is tested: zero on all three pool durations.
+        fun `should accept zero on the two durations every engine reads as off`() {
+            // What is tested: zero on max-life-time and evict-in-background.
             // Success criteria: the Pool constructs without an exception.
-            // Why it matters: Duration.ZERO is Reactor Netty's documented "background eviction disabled"; the
-            //   guard must draw its line at negative, not at zero, or it would outlaw the one way to switch it off.
+            // Why it matters: Duration.ZERO is "unbounded" for the life time and "background eviction disabled"
+            //   for the sweep on every engine; the guard must draw its line at negative for these two, or it
+            //   would outlaw the one way to switch them off.
             //
             // Given / When / Then
             assertThatCode {
                 WebClientProperties.Pool(
-                    maxIdleTime = Duration.ZERO,
                     maxLifeTime = Duration.ZERO,
                     evictInBackground = Duration.ZERO,
                 )
             }.doesNotThrowAnyException()
+        }
+
+        @Test
+        fun `should reject a zero max-idle-time, which the engines read in opposite ways`() {
+            // What is tested: max-idle-time = 0.
+            // Success criteria: binding fails, naming the key and saying it must be positive.
+            // Why it matters: Reactor Netty evicts every released connection at an idle limit of 0 (no
+            //   keep-alive, a connection per call) while Jetty reads it as "never close an idle connection" -
+            //   the same line of YAML would mean the opposite on two engines, without a word at startup.
+            //
+            // Given / When / Then
+            assertThatThrownBy { WebClientProperties.Pool(maxIdleTime = Duration.ZERO) }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContaining("app.webclient.pool.max-idle-time must be positive")
         }
     }
 

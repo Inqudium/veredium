@@ -1,6 +1,8 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
+import io.micrometer.core.instrument.Meter
+import io.micrometer.core.instrument.MeterRegistry
 import org.apache.hc.client5.http.config.ConnectionConfig
 import org.apache.hc.client5.http.config.RequestConfig
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient
@@ -9,12 +11,17 @@ import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder
 import org.apache.hc.client5.http.observation.MetricConfig
 import org.apache.hc.client5.http.observation.binder.ConnPoolMeters
+import org.apache.hc.core5.concurrent.Cancellable
+import org.apache.hc.core5.http.ClassicHttpRequest
 import org.apache.hc.core5.io.CloseMode
 import org.apache.hc.core5.util.TimeValue
 import org.apache.hc.core5.util.Timeout
 import org.slf4j.Logger
+import org.springframework.http.HttpMethod
+import org.springframework.http.client.ClientHttpRequest
 import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory
+import java.net.URI
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
@@ -50,6 +57,14 @@ import java.util.concurrent.TimeUnit
  * blocking socket read reacts to the interrupt by closing the socket, the read fails at once with
  * `SocketException: Closed by interrupt`, and a pool lease and a connect are interruptible too. Apache then
  * discards the half-used connection.
+ *
+ * **A body not read to its end.** Apache does NOT discard it on close - it reads it to the end, to keep the
+ * connection: Spring's response close consumes the entity, and Apache's content streams drain the rest of the
+ * message in their own close. For a body refused at the buffer limit that is the rest of a body nobody wants,
+ * read on the worker with its permit and its connection, for as long as the peer takes - past the TimeLimiter
+ * budget, a client-side refusal would end as a timeout the breaker records. [requestFactory] therefore hands out
+ * an [AbortingRequest]: a response closed before its end cancels the Apache request first, which discards the
+ * connection at once.
  */
 internal class ApacheEngineTransport(
     settings: Settings,
@@ -114,12 +129,15 @@ internal class ApacheEngineTransport(
                     }
             }
 
-    init {
-        // Pool metrics: the same question the reactor twin's `.metrics(true)` answers - how full is the pool.
-        // Apache's own binder (httpclient5-observation; Micrometer deprecated its hc5 binder in favour of it)
-        // reads the manager off a client BUILDER, so a throwaway builder over the shared manager is handed to
-        // it once, here - never per endpoint, which would register the same gauges once per client.
+    /** The pool gauges registered in the host's registry, removed again in [shutdown]. */
+    private val boundPoolMeters: List<Meter> =
         settings.meterRegistry?.let { registry ->
+            val before = registry.meters.toSet()
+            // Pool metrics: the same question the reactor twin's `.metrics(true)` answers - how full is the pool.
+            // Apache's own binder (httpclient5-observation; Micrometer deprecated its hc5 binder in favour of it)
+            // reads the manager off a client BUILDER, so a throwaway builder over the shared manager is handed to
+            // it once, here - never per endpoint, which would register the same gauges once per client. The binder
+            // hands back nothing to deregister with, so what it registered is read off the registry.
             ConnPoolMeters.bindTo(
                 HttpClients.custom().setConnectionManager(connectionManager),
                 registry,
@@ -129,8 +147,10 @@ internal class ApacheEngineTransport(
                     .addCommonTag(RestClientMetrics.POOL_TAG, poolName)
                     .build(),
             )
-        }
-    }
+            registry.meters.filterNot { it in before }
+        } ?: emptyList()
+
+    private val meterRegistry: MeterRegistry? = settings.meterRegistry
 
     /** The per-endpoint transports, kept so [shutdown] can close them ahead of the pool they share. */
     private val httpClients = CopyOnWriteArrayList<CloseableHttpClient>()
@@ -139,7 +159,7 @@ internal class ApacheEngineTransport(
      * One HttpClient per endpoint over the shared pool, carrying that endpoint's response timeout, in Spring's
      * request factory. The request factory's own timeouts stay unset, so the client's `RequestConfig` stands.
      */
-    override fun requestFactory(endpoint: ResolvedTimeouts): ClientHttpRequestFactory = HttpComponentsClientHttpRequestFactory(buildHttpClient(endpoint).also { httpClients += it })
+    override fun requestFactory(endpoint: ResolvedTimeouts): ClientHttpRequestFactory = AbortingRequestFactory(buildHttpClient(endpoint).also { httpClients += it })
 
     /**
      * The per-endpoint responseTimeout is tighter than that endpoint's TimeLimiter budget by construction, so it
@@ -202,7 +222,8 @@ internal class ApacheEngineTransport(
      * statement it is (the pool did not drain in time and is being dropped anyway), never as an exception out
      * of a destroy callback, where Spring could only log a stack trace at the moment someone is looking for one.
      *
-     * Idempotent: a closed pool reports no leased connections and closes again without complaint.
+     * Idempotent: a closed pool reports no leased connections and closes again without complaint. The pool
+     * gauges leave the host's registry with the pool, as Reactor Netty's do.
      */
     override fun shutdown(
         deadlineNanos: Long,
@@ -214,5 +235,42 @@ internal class ApacheEngineTransport(
         httpClients.forEach { it.close(CloseMode.GRACEFUL) }
         drainOrReport(poolName, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
         connectionManager.close(CloseMode.GRACEFUL)
+        boundPoolMeters.forEach { meterRegistry?.remove(it) }
+    }
+
+    /**
+     * Spring's request factory, handing out [AbortingRequest]s whose abort cancels the Apache request (class KDoc,
+     * "A body not read to its end"). Still an [HttpComponentsClientHttpRequestFactory], so everything Spring
+     * derives from the client - its request config, the context - stays as it was.
+     */
+    private class AbortingRequestFactory(
+        httpClient: CloseableHttpClient,
+    ) : HttpComponentsClientHttpRequestFactory(httpClient) {
+        private val created = ThreadLocal<Cancellable>()
+
+        override fun createRequest(
+            uri: URI,
+            httpMethod: HttpMethod,
+        ): ClientHttpRequest {
+            val request = super.createRequest(uri, httpMethod)
+            // Assumption: HttpComponentsClientHttpRequestFactory.createRequest builds its Apache request with
+            // createHttpUriRequest on the calling thread, and that request is an HttpUriRequestBase (spring-web
+            // 7.0). If that changes, the capture comes back empty and the exchange fails here, naming the cause,
+            // rather than silently draining every refused body again.
+            val apacheRequest =
+                checkNotNull(created.get().also { created.remove() }) {
+                    "HttpComponentsClientHttpRequestFactory no longer creates a cancellable request through " +
+                        "createHttpUriRequest; veredium's Apache engine cannot abort unfinished responses"
+                }
+            // Assumption: cancelling an HttpUriRequestBase whose response is being read discards its connection
+            // (httpclient5 5.6: InternalExecRuntime.cancel -> discardEndpoint), and is a no-op once the connection
+            // went back to the pool.
+            return AbortingRequest(request) { _, _ -> apacheRequest.cancel() }
+        }
+
+        override fun createHttpUriRequest(
+            httpMethod: HttpMethod,
+            uri: URI,
+        ): ClassicHttpRequest = super.createHttpUriRequest(httpMethod, uri).also { created.set(it as? Cancellable) }
     }
 }

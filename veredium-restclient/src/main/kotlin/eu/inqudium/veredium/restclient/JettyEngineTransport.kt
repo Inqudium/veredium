@@ -10,16 +10,10 @@ import org.eclipse.jetty.client.transport.HttpDestination
 import org.eclipse.jetty.http.HttpCookieStore
 import org.slf4j.Logger
 import org.springframework.http.HttpMethod
-import org.springframework.http.HttpStatusCode
 import org.springframework.http.client.ClientHttpRequest
 import org.springframework.http.client.ClientHttpRequestFactory
-import org.springframework.http.client.ClientHttpResponse
 import org.springframework.http.client.JettyClientHttpRequestFactory
-import java.io.FilterInputStream
-import java.io.IOException
-import java.io.InputStream
 import java.net.URI
-import java.nio.channels.AsynchronousCloseException
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 
@@ -36,7 +30,7 @@ import java.util.concurrent.TimeUnit
  * | per-endpoint response timeout    | Spring's read timeout, which Jetty applies as the request's TOTAL timeout (queueing for a connection, connect, head and body together), plus the request's idle timeout set here to the same value, so a silent connection in use fails at the rung as on Apache |
  * | `max-connections`                | `maxConnectionsPerDestination` (every endpoint behind the sidecar is one destination) |
  * | `pending-acquire-timeout-ms`     | none - Jetty queues a request for a connection without a time bound of its own; the total timeout above bounds the wait. The queue is bounded in COUNT instead, at Jetty's default of 1024 per destination |
- * | `pool.max-idle-time`             | `HttpClient.idleTimeout` - for idle pooled connections; an exchange in flight uses the request's idle timeout above. `0` is Jetty's "no idle timeout" |
+ * | `pool.max-idle-time`             | `HttpClient.idleTimeout` - for idle pooled connections; an exchange in flight uses the request's idle timeout above. Never `0`, which would be Jetty's "no idle timeout": the binding requires a positive value |
  * | `pool.max-life-time`             | the connection pool's `maxDuration`, which Jetty enforces when a connection is LEASED (`0` = unbounded) |
  * | `pool.evict-in-background`       | none - Jetty closes an idle connection on its own scheduler the moment the idle timeout passes; there is no interval |
  * | pool meters                      | none - Jetty has no Micrometer binder                                        |
@@ -50,9 +44,9 @@ import java.util.concurrent.TimeUnit
  * Both blocking points of Spring's Jetty request honour an interrupt - waiting for the head, and reading the body
  * - so an interrupted worker ends at once. But Spring only stops WAITING: the Jetty request itself stays in flight,
  * holding its connection until the response arrives or the total timeout expires. The decorator returned by
- * [requestFactory] closes that gap: it aborts the Jetty request when the exchange fails, when a body read fails
- * (an interrupt included), and when the response is closed before its body was read to the end - the moment
- * Apache would discard its connection. The Jetty request is captured where Spring creates it,
+ * [requestFactory] closes that gap ([AbortingRequest], shared with the Apache engine): it aborts the Jetty request
+ * when the exchange fails, when a body read fails (an interrupt included), and when the response is closed before
+ * its body was read to the end. The Jetty request is captured where Spring creates it,
  * `HttpClient.newRequest(URI)`, on the thread that runs the exchange ([RequestCapturingHttpClient]).
  */
 internal class JettyEngineTransport(
@@ -105,7 +99,7 @@ internal class JettyEngineTransport(
                     "veredium's Jetty engine cannot abort abandoned exchanges"
             }
         jettyRequest.idleTimeout(responseTimeout.toMillis(), TimeUnit.MILLISECONDS)
-        return AbortingRequest(request, jettyRequest)
+        return AbortingRequest(request) { _, cause -> jettyRequest.abort(cause) }
     }
 
     override val applied: List<String> =
@@ -142,6 +136,10 @@ internal class JettyEngineTransport(
     /**
      * Waits until the deadline for the exchanges in flight to finish, then stops the client - which aborts what
      * is left and stops Jetty's own threads. Same shape and same line as the Apache pool's drain.
+     *
+     * A shutdown thread that was interrupted does not block on the stop: Jetty's stop waits for its own threads
+     * regardless of the interrupt, so it is started on a thread of its own and left to complete - as Reactor
+     * Netty's disposal is.
      */
     override fun shutdown(
         deadlineNanos: Long,
@@ -151,7 +149,11 @@ internal class JettyEngineTransport(
     ) {
         if (httpClient.isStopped) return
         drainOrReport(POOL_NAME, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
-        httpClient.stop()
+        if (Thread.currentThread().isInterrupted) {
+            Thread.ofVirtual().name("$POOL_NAME-stop").start { httpClient.stop() }
+        } else {
+            httpClient.stop()
+        }
     }
 
     /**
@@ -165,70 +167,6 @@ internal class JettyEngineTransport(
         override fun newRequest(uri: URI): Request = super.newRequest(uri).also(created::set)
 
         fun takeCreated(): Request? = created.get().also { created.remove() }
-    }
-
-    /** Spring's Jetty request; a failed exchange aborts [jettyRequest], a response comes back abort-aware. */
-    private class AbortingRequest(
-        delegate: ClientHttpRequest,
-        private val jettyRequest: Request,
-    ) : ForwardingClientHttpRequest(delegate) {
-        override fun execute(): ClientHttpResponse {
-            val response =
-                try {
-                    delegate.execute()
-                } catch (e: IOException) {
-                    // An interrupted wait for the head, a timeout, a transport failure: Spring stopped waiting,
-                    // the Jetty request may still be in flight. Abort is a no-op on a request that already ended.
-                    jettyRequest.abort(e)
-                    throw e
-                }
-            return AbortingResponse(response, jettyRequest)
-        }
-    }
-
-    /**
-     * The response; aborts [jettyRequest] when a body read fails and when it is closed before the body was read
-     * to its end, so the connection is released now instead of at the request's total timeout.
-     */
-    private class AbortingResponse(
-        private val delegate: ClientHttpResponse,
-        private val jettyRequest: Request,
-    ) : ClientHttpResponse {
-        @Volatile
-        private var endOfBody = false
-
-        private val guardedBody: InputStream by lazy {
-            object : FilterInputStream(delegate.body) {
-                override fun read(): Int = guarded { super.read() }
-
-                override fun read(
-                    b: ByteArray,
-                    off: Int,
-                    len: Int,
-                ): Int = guarded { super.read(b, off, len) }
-
-                private fun guarded(read: () -> Int): Int =
-                    try {
-                        read().also { if (it < 0) endOfBody = true }
-                    } catch (e: IOException) {
-                        jettyRequest.abort(e)
-                        throw e
-                    }
-            }
-        }
-
-        override fun getBody(): InputStream = guardedBody
-
-        override fun getHeaders() = delegate.headers
-
-        override fun getStatusCode(): HttpStatusCode = delegate.statusCode
-
-        override fun getStatusText(): String = delegate.statusText
-
-        override fun close() {
-            delegate.close()
-            if (!endOfBody) jettyRequest.abort(AsynchronousCloseException())
-        }
     }
 
     companion object {

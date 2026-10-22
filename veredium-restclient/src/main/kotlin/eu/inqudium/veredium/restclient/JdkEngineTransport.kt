@@ -3,6 +3,8 @@ package eu.inqudium.veredium.restclient
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import org.slf4j.Logger
 import org.springframework.http.HttpHeaders
+import org.springframework.http.HttpMethod
+import org.springframework.http.client.ClientHttpRequest
 import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.http.client.JdkClientHttpRequestFactory
 import java.net.URI
@@ -50,6 +52,11 @@ import java.util.concurrent.Executors
  * **Cancellation.** Both blocking points honour an interrupt: waiting for the response head, Spring cancels the
  * JDK's response future, which aborts the exchange; reading the body, the JDK's stream closes itself and fails
  * the read. The worker ends at once either way.
+ *
+ * **A body not read to its end.** Spring's response DRAINS the rest of the body in its close, for as long as the
+ * peer takes, up to the response deadline - for a body refused at the buffer limit, the rest of a body nobody
+ * wants, read on the worker with its permit. [requestFactory] therefore hands out an [AbortingRequest] whose abort
+ * closes the JDK's body stream first, which cancels the exchange and drops its connection.
  */
 internal class JdkEngineTransport(
     settings: Settings,
@@ -75,7 +82,7 @@ internal class JdkEngineTransport(
             .executor(executor)
             .build()
 
-    override fun requestFactory(endpoint: ResolvedTimeouts): ClientHttpRequestFactory = JdkClientHttpRequestFactory(httpClient, executor).apply { setReadTimeout(endpoint.responseTimeout) }
+    override fun requestFactory(endpoint: ResolvedTimeouts): ClientHttpRequestFactory = AbortingRequestFactory(httpClient, executor).apply { setReadTimeout(endpoint.responseTimeout) }
 
     override val applied: List<String> =
         listOf(
@@ -127,6 +134,23 @@ internal class JdkEngineTransport(
             httpClient.shutdownNow()
         }
         executor.shutdownNow()
+    }
+
+    /**
+     * Spring's request factory, handing out [AbortingRequest]s whose abort closes the JDK's body stream (class
+     * KDoc, "A body not read to its end"). Still a [JdkClientHttpRequestFactory], with its read timeout.
+     */
+    private class AbortingRequestFactory(
+        httpClient: HttpClient,
+        executor: ExecutorService,
+    ) : JdkClientHttpRequestFactory(httpClient, executor) {
+        override fun createRequest(
+            uri: URI,
+            httpMethod: HttpMethod,
+        ): ClientHttpRequest =
+            // Assumption: closing the InputStream of a JDK HttpResponse before its end cancels the exchange and
+            // closes its connection (java.net.http, JDK 21+), and Spring's response hands out that stream as its body.
+            AbortingRequest(super.createRequest(uri, httpMethod)) { response, _ -> response?.body?.close() }
     }
 
     companion object {

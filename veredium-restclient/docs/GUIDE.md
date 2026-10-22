@@ -118,6 +118,10 @@ ignored silently:
 | pool meters | `restclient.pool.{leased,available,pending}` | none | none | `reactor.netty.connection.provider.*{name=restclient-reactor-netty}` |
 | response timeout surfaces as (under `ResourceAccessException`) | `SocketTimeoutException` | `HttpTimeoutException` | `TimeoutException` | `ReadTimeoutException` |
 
+`pool.max-idle-time` must be positive: a zero would mean "evict every idle connection at once" to Reactor Netty
+(no keep-alive), "no idle timeout" to Jetty and "close every idle connection at each sweep" to Apache, so the binding
+refuses it. Zero keeps its meaning for `pool.max-life-time` (unbounded) and `pool.evict-in-background` (off).
+
 Every one of those four is classified as `timeout` by legatium's exchange event. The JDK's pool knobs exist only
 as JVM-wide system properties (`jdk.httpclient.keepalive.timeout`, `jdk.httpclient.connectionPoolSize`), which
 the module does not set. With `jdk`, size the bulkheads knowing that no pool bounds the connections behind them.
@@ -152,9 +156,12 @@ with it - by four different routes:
 The two module-side measures close gaps of Spring's request factories (spring-web 7.0): without them an abandoned
 Jetty exchange keeps its connection until its total timeout, and an abandoned Reactor Netty body read keeps its
 worker spinning - and its permit - until the next chunk or the response timeout. A response closed before its body
-was read to the end is aborted (Jetty) or cancelled (Reactor Netty) instead of drained, the moment Apache would
-discard its connection. `RestClientEngineIntegrationTest` pins all four cases per engine. The exchange event of an
-abandoned call is `failure` on every engine: what the worker sees is an I/O failure over the interrupt, which is not
+was read to the end - a body refused at the buffer limit - is cancelled (Apache), has its body stream closed (JDK,
+Reactor Netty) or is aborted (Jetty) instead of drained. Spring's Apache and JDK responses would otherwise read the
+rest of the body on close, to keep the connection: for a large or slow body that holds the worker, its permit and
+its connection, and past the TimeLimiter budget turns the client-side refusal into a timeout the breaker records.
+`RestClientEngineIntegrationTest` pins all four cases per engine, and the refused body per engine with a body that
+drips far longer than the call may take. The exchange event of an abandoned call is `failure` on every engine: what the worker sees is an I/O failure over the interrupt, which is not
 one of legatium's timeout types.
 
 ### Shutdown
@@ -163,7 +170,9 @@ one of legatium's timeout types.
 longest response timeout + connect + pending-acquire + 1 s): the Apache pool and the Reactor Netty pool wait for
 their leased connections, the Jetty client for its active and queued requests, the JDK client through its own
 `shutdown`/`awaitTermination`. An engine that does not drain in time is reported in one WARN line and closed
-anyway.
+anyway; an engine whose shutdown fails is reported as well and does not keep the others open. The Apache pool's
+gauges leave the host's registry with the pool. A client requested after `shutdown()` is refused with an
+`IllegalStateException` instead of being built on a closed engine.
 
 ## Guides
 

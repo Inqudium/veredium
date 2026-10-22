@@ -1,5 +1,7 @@
 package eu.inqudium.veredium.core.resilience
 
+import eu.inqudium.veredium.core.mesh.MeshConnectionPool
+import eu.inqudium.veredium.core.mesh.MeshConnectionPools
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.github.resilience4j.bulkhead.Bulkhead
@@ -57,16 +59,20 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  *
  * ## What it warns about
  *
- * Once every alias is wired, the bulkheads are checked against the shared connection pool:
- * `sum(max-concurrent-calls)` over the mesh aliases must not exceed `app.mesh.defaults.transport.max-connections`.
+ * Once every alias is wired, the bulkheads are checked against the connection pool they share:
+ * `sum(max-concurrent-calls)` over the aliases on a pool must not exceed its `max-connections`
+ * (`app.mesh.defaults.transport.max-connections`).
  * The bulkheads are sized as a PARTITION of that pool; if together they admit more calls than it has
  * connections, the excess does not shed at the bulkhead with a named `BulkheadFullException` but queues for a
  * connection, and a pending-acquire timeout is a FAILURE on the breaker of whichever backend happened to be
  * waiting - not necessarily the one holding the connections. That is a sizing decision, not a wiring fault, and
  * a deliberately over-committed pool can be right for a host whose backends are never busy at once, so it is a
- * WARN naming both numbers and every alias, not a failed start. The sum runs over ALL mesh aliases, which is
- * exact for the blocking stack (one Apache pool, its total cap shared by every route) and conservative for the
- * reactive one (Reactor Netty caps per remote address, and endpoints with their own `base-url` get their own).
+ * WARN naming both numbers and every alias, not a failed start. Which aliases share a pool is the client
+ * modules' knowledge - each engine of a client factory has a pool of its own - so the pools come from the
+ * [MeshConnectionPools] beans the factories are; a pool without a bound (the JDK client) is not
+ * checked. Without such a bean the sum runs over ALL mesh aliases against one pool, as before the engines were
+ * selectable. Per engine the sum is exact for Apache's blocking pool (one total cap for every route) and
+ * conservative where the cap is per remote address and an endpoint has a `base-url` of its own.
  * The values are read off the registry's instances, i.e. after base config and instance properties were
  * merged; the wiring check guarantees there is one per alias by then.
  *
@@ -91,6 +97,11 @@ class MeshResilienceStartupGuard(
     private val circuitBreakerRegistry: CircuitBreakerRegistry,
     private val timeLimiterRegistry: TimeLimiterRegistry,
     private val bulkheadRegistry: BulkheadRegistry,
+    /**
+     * The pools the client factories built, read when [verify] runs - after every singleton exists, so the
+     * factories are there to ask. Empty: the single shared pool of the mesh transport.
+     */
+    private val connectionPools: () -> List<MeshConnectionPool> = { emptyList() },
 ) : SmartInitializingSingleton {
     private val log: Logger = LoggerFactory.getLogger(MeshResilienceStartupGuard::class.java)
 
@@ -204,20 +215,32 @@ class MeshResilienceStartupGuard(
      * every alias has a bulkhead instance in the registry - the merged values, not the declared fragments.
      */
     private fun warnIfBulkheadsOvercommitThePool(endpoints: List<ResolvedTimeouts>) {
-        val maxConnections = meshProperties.defaults.transport.maxConnections
-        val permits = endpoints.associate { it.alias to bulkheadRegistry.bulkhead(it.alias).bulkheadConfig.maxConcurrentCalls }
-        val total = permits.values.sumOf { it.toLong() }
-        if (total <= maxConnections) return
-        log.warn(
-            "The mesh bulkheads admit more concurrent calls than the shared connection pool holds: " +
-                "sum(resilience4j.bulkhead.instances.<alias>.max-concurrent-calls)={} > " +
-                "app.mesh.defaults.transport.max-connections={} ({}). The excess queues for a connection instead of " +
-                "being shed by its bulkhead, and a pending-acquire timeout is recorded as a failure on the breaker " +
-                "of whichever backend is waiting. Lower the bulkheads or raise max-connections.",
-            total,
-            maxConnections,
-            permits.entries.joinToString(", ") { (alias, calls) -> "$alias=$calls" },
-        )
+        val aliases = endpoints.map { it.alias }.toSet()
+        val pools =
+            connectionPools().ifEmpty {
+                listOf(MeshConnectionPool(SHARED_POOL, meshProperties.defaults.transport.maxConnections, aliases))
+            }
+        pools.forEach { pool ->
+            val maxConnections = pool.maxConnections ?: return@forEach
+            val permits =
+                pool.aliases
+                    .filter { it in aliases }
+                    .sorted()
+                    .associateWith { bulkheadRegistry.bulkhead(it).bulkheadConfig.maxConcurrentCalls }
+            val total = permits.values.sumOf { it.toLong() }
+            if (total <= maxConnections) return@forEach
+            log.warn(
+                "The mesh bulkheads admit more concurrent calls than the connection pool '{}' holds: " +
+                    "sum(resilience4j.bulkhead.instances.<alias>.max-concurrent-calls)={} > " +
+                    "app.mesh.defaults.transport.max-connections={} ({}). The excess queues for a connection instead " +
+                    "of being shed by its bulkhead, and a pending-acquire timeout is recorded as a failure on the " +
+                    "breaker of whichever backend is waiting. Lower the bulkheads or raise max-connections.",
+                pool.name,
+                total,
+                maxConnections,
+                permits.entries.joinToString(", ") { (alias, calls) -> "$alias=$calls" },
+            )
+        }
     }
 
     private fun decisionOf(endpoint: ResolvedTimeouts): String {
@@ -233,6 +256,9 @@ class MeshResilienceStartupGuard(
     }
 
     private companion object {
+        /** The pool's name when no client factory names its pools: the one the mesh transport describes. */
+        const val SHARED_POOL = "shared"
+
         // The layer spellings match Resilience4j's own property prefixes, so a message names the key verbatim.
         const val LAYER_CIRCUIT_BREAKER = "circuitbreaker"
         const val LAYER_TIME_LIMITER = "timelimiter"
