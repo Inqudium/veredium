@@ -16,7 +16,8 @@ Versions, as the Spring Boot BOM resolves them today:
 
 | Engine | Library | Version |
 |---|---|---|
-| Apache | Apache HttpClient 5 / HttpCore 5 (classic for `veredium-restclient`, async for `veredium-webclient`) | 5.6.4 / 5.4.3 |
+| Apache, classic (`veredium-restclient`) | `httpclient5` / `httpcore5` / `httpclient5-observation` (pool meters) | 5.6.4 / 5.4.3 / 5.6.4 |
+| Apache, async (`veredium-webclient`) | `httpclient5` / `httpcore5` / `httpcore5-reactive` (Spring's reactive adapter) | 5.6.4 / 5.4.3 / 5.4.3 |
 | JDK | `java.net.http` | JDK 21+ (the build runs on 25 and 26) |
 | Jetty | Jetty client / jetty-io | 12.1.12 |
 | Reactor Netty | Reactor Netty / Reactor Pool | 1.3.7 / 1.2.7 |
@@ -33,7 +34,7 @@ margin assumes makes the mesh ladder wrong.
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).** `ConnectionConfig` connect timeout: 3 minutes.
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).** `ConnectionConfig` connect timeout: 3 minutes.
 
 **With veredium.** `ConnectionConfig.connectTimeout` = `connect-timeout-ms`, on both stacks.
 
@@ -70,7 +71,7 @@ TimeLimiter has to. Two backends on the same engine keep their own values.
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).**
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).**
 - Blocking (classic): no response timeout of its own; reads use the socket timeout, 3 minutes by default
   (`SocketConfig`), applied to **each read**.
 - Reactive (async): socket timeout 0 (none). Apache checks socket and connect timeouts only when its selector
@@ -119,7 +120,7 @@ factory reports (`MeshConnectionPools`).
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).** Pool of 25 connections in total and **5 per route**, on both stacks. A `maxConnTotal` of zero
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).** Pool of 25 connections in total and **5 per route**, on both stacks. A `maxConnTotal` of zero
 or less is ignored, and the pool keeps its default.
 
 **With veredium.**
@@ -167,7 +168,7 @@ that. Ideally, though, nobody waits: the bulkheads shed load before the pool's q
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).** Connection-request timeout: 3 minutes. The pending queue is bounded in time only, not in
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).** Connection-request timeout: 3 minutes. The pending queue is bounded in time only, not in
 count.
 - Blocking (classic pool): the timeout is enforced.
 - Reactive (async pool, `StrictConnPool`): a waiting lease's deadline is checked only when the next lease or
@@ -213,7 +214,7 @@ key.
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).**
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).**
 - No eviction unless configured.
 - `closeIdle(0)` closes **every** idle connection.
 - `HttpClientBuilder.evictIdleConnections` starts a thread **per client**: here that would be one per endpoint,
@@ -259,7 +260,7 @@ straight to the sidecar on loopback, with no proxy.
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).** A failed idempotent request is retried automatically, redirects are followed and cookies are
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).** A failed idempotent request is retried automatically, redirects are followed and cookies are
 stored. The async client may negotiate HTTP/2.
 
 **With veredium.** `disableAutomaticRetries`, `disableRedirectHandling`, `disableCookieManagement`. Reactive:
@@ -297,7 +298,7 @@ and exactly one `User-Agent` (`veredium/<version>`, or the host's `user-agent`).
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).** An explicit `Host` is sent as given. Without one, Apache sends `Apache-HttpClient/<version>`
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).** An explicit `Host` is sent as given. Without one, Apache sends `Apache-HttpClient/<version>`
 as `User-Agent`.
 
 **With veredium.** The module's headers replace the engine's.
@@ -341,7 +342,7 @@ engine tests.
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).**
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).**
 - Blocking: compression is on (`Accept-Encoding: gzip, x-gzip, deflate`), and bodies are decoded transparently.
 - Reactive: asks for gzip and decodes it.
 
@@ -380,7 +381,7 @@ engine reports after that is the expected end of an aborted exchange, not an err
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).**
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).**
 - Blocking: on the decorator's virtual-thread workers, a blocking socket read reacts to an interrupt by closing the
   socket. The read fails at once with `SocketException: Closed by interrupt`, and Apache discards the connection.
   A pool lease and a connect are interruptible too.
@@ -449,7 +450,7 @@ refusal, which the breaker ignores, would turn into a `TimeoutException`, which 
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).** Blocking: Spring's `HttpComponentsClientHttpResponse.close()` consumes the entity, and
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).** Blocking: Spring's `HttpComponentsClientHttpResponse.close()` consumes the entity, and
 Apache's content streams (`ContentLengthInputStream`, `ChunkedInputStream`) **read the rest** of the message in
 their `close`, to keep the connection. The source says so: "this assumes that closing the stream will consume the
 remainder" (`ResponseEntityProxy`).
@@ -492,7 +493,7 @@ not shared with the host's other clients, not registered in a JVM-global place, 
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).** Pool meters come from the `ConnPoolMeters` binder (httpclient5-observation). It reads the
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).** Pool meters come from the `ConnPoolMeters` binder (httpclient5-observation). It reads the
 pool off a client **builder** and hands back nothing to deregister with.
 
 **With veredium.** The binder runs once per pool, over a throwaway builder, in the host's registry
@@ -543,7 +544,7 @@ on shutdown".
 
 ### Apache HttpClient 5
 
-**Default (5.6.4).**
+**Default (httpclient5 5.6.4, httpcore5 5.4.3).**
 - Blocking: `close` discards leased connections on the spot. There is no "dispose when drained".
 - Reactive: the graceful reactor shutdown and a hard close both close the connections of running exchanges
   **without completing their callbacks**, so a caller's `Mono` waits for its TimeLimiter.
