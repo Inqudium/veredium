@@ -29,6 +29,7 @@ import org.springframework.boot.http.client.reactive.ClientHttpConnectorBuilder
 import org.springframework.boot.http.client.reactive.ReactorClientHttpConnectorBuilder
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.springframework.boot.webclient.WebClientCustomizer
 import org.springframework.boot.webclient.autoconfigure.WebClientAutoConfiguration
 import org.springframework.http.client.reactive.ClientHttpConnector
 import org.springframework.http.client.reactive.JdkClientHttpConnector
@@ -37,6 +38,7 @@ import org.springframework.web.reactive.function.client.WebClient
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import java.util.function.Supplier
 
 /**
@@ -47,8 +49,13 @@ import java.util.function.Supplier
  * How "which engine served a request" is observed: on the HOST's side by the `User-Agent` an engine sends when
  * the caller sets none - `ReactorNetty/...`, `Jetty/...`, `Apache-HttpAsyncClient/...`, `Java-http-client/...`
  * - read off the request WireMock received. That is evidence from the wire, independent of how Boot wires its
- * connector. On THIS module's side, where every request carries Veredium's own User-Agent, by the connector
- * the factory built the backend's client with.
+ * connector. On THIS module's side, where every request carries Veredium's own User-Agent, by the THREAD the
+ * response arrives on, which a filter on Boot's builder (a `WebClientCustomizer`, as a host would declare one)
+ * records per path: each engine of this module answers on threads it owns and names - the factory's own Reactor
+ * Netty loops, Jetty's and Apache's named pools, the common fork-join pool the JDK client completes on - so the thread says which engine
+ * actually carried the exchange, whatever the factory believes it configured. The factory's own record of the
+ * connector it built is checked as well, but only as a supplement: it is written before the connector is put
+ * on the client, so it cannot tell a connector that was set from one that was not.
  *
  * The context holds Boot's `HttpClientAutoConfiguration`, `ReactiveHttpClientAutoConfiguration` (Boot's
  * `ClientHttpConnector`, its builder and the `ReactorResourceFactory`) and `WebClientAutoConfiguration` (the
@@ -74,6 +81,22 @@ class WebClientEngineIsolationTest {
             wireMock.stop()
         }
 
+        /**
+         * The threads each engine of THIS module answers on, as a regex: the factory's own Reactor Netty loops
+         * (named after its pool - Boot's global ones are `reactor-http-...`), Jetty's and Apache's pools named
+         * after the module, and for the JDK client the common fork-join pool it completes on (this module's JDK
+         * client is the only one in the cases where it is selected).
+         */
+        private val MODULE_ENGINE_THREAD =
+            mapOf(
+                WebClientEngine.REACTOR_NETTY to "${ResilientWebClientFactory.POOL_NAME}-.*",
+                WebClientEngine.JETTY to "${JettyTransport.THREAD_NAME_PREFIX}-.*",
+                WebClientEngine.APACHE to "${ApacheTransport.THREAD_NAME_PREFIX}-.*",
+                // The JDK client hands every completion to the common fork-join pool (HttpClientImpl.sendAsync);
+                // no other engine, Boot's included, delivers a response there.
+                WebClientEngine.JDK to "ForkJoinPool\\.commonPool-worker-\\d+",
+            )
+
         /** The User-Agent prefix each engine sends on its own - the wire evidence of which engine served a call. */
         private val ENGINE_USER_AGENT =
             mapOf(
@@ -97,7 +120,8 @@ class WebClientEngineIsolationTest {
         // What is tested: a host WebClient built from Boot's WebClient.Builder bean, next to this module's
         //   factory configured with a non-default engine.
         // Success criteria: the host's call reaches WireMock with Reactor Netty's own User-Agent - Boot's
-        //   auto-detected connector - while this module's backend runs on the selected engine; the context holds
+        //   auto-detected connector - while this module's backend's response body arrives on threads of the
+        //   selected engine; the context holds
         //   exactly one ClientHttpConnector bean and one ClientHttpConnectorBuilder bean, both Boot's Reactor
         //   ones; and Boot's switch spring.http.clients.reactive.connector is still unset.
         // Why it matters: the requirement of the engine switch is that it changes nothing outside this module.
@@ -118,6 +142,7 @@ class WebClientEngineIsolationTest {
                 wireMock.verify(getRequestedFor(urlEqualTo("/host")).withHeader("User-Agent", matching(ENGINE_USER_AGENT.getValue("reactor"))))
                 wireMock.verify(getRequestedFor(urlEqualTo("/$BACKEND")).withHeader("User-Agent", equalTo(Veredium.userAgent())))
                 assertThat(factory.engineOf(BACKEND)).isEqualTo(engine)
+                assertThat(responseThreads(context, "/$BACKEND")).isNotEmpty().allMatch { it.matches(Regex(MODULE_ENGINE_THREAD.getValue(engine))) }
                 assertThat(factory.connectorOf(BACKEND)).isNotInstanceOf(ReactorClientHttpConnector::class.java)
                 assertThat(context.getBeansOfType(ClientHttpConnector::class.java).values)
                     .singleElement()
@@ -138,8 +163,9 @@ class WebClientEngineIsolationTest {
         // What is tested: the reverse direction - a host that moves its own WebClients to another engine with
         //   Boot's spring.http.clients.reactive.connector.
         // Success criteria: the host's call carries the User-Agent of the engine Boot was told to use, and this
-        //   module's backend is still built on the engine app.webclient.engine names (Reactor Netty, or the JDK
-        //   client), not on Boot's.
+        //   module's backend's response body arrives on threads of the engine app.webclient.engine names (the
+        //   factory's own Reactor Netty loops, or the JDK client's workers), not on one of Boot's engine; the
+        //   factory's record of the connector agrees.
         // Why it matters: the factory clones Boot's builder, which now carries Boot's chosen connector; only
         //   the factory replacing it on the clone keeps the host's switch from deciding the mesh clients' engine
         //   - and with it their pool, timeouts and meters.
@@ -159,8 +185,10 @@ class WebClientEngineIsolationTest {
                 wireMock.verify(
                     getRequestedFor(urlEqualTo("/host")).withHeader("User-Agent", matching(ENGINE_USER_AGENT.getValue(bootConnector))),
                 )
+                val engine = WebClientEngine.entries.single { it.propertyValue == moduleEngine }
+                assertThat(responseThreads(context, "/$BACKEND")).isNotEmpty().allMatch { it.matches(Regex(MODULE_ENGINE_THREAD.getValue(engine))) }
                 val expected =
-                    if (moduleEngine == "jdk") JdkClientHttpConnector::class.java else ReactorClientHttpConnector::class.java
+                    if (engine == WebClientEngine.JDK) JdkClientHttpConnector::class.java else ReactorClientHttpConnector::class.java
                 assertThat(factory.connectorOf(BACKEND)).isInstanceOf(expected)
             }
     }
@@ -168,6 +196,12 @@ class WebClientEngineIsolationTest {
     // ---------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------
+
+    /** The threads the response bodies of [path] arrived on, as the context's recording filter saw them. */
+    private fun responseThreads(
+        context: AssertableApplicationContext,
+        path: String,
+    ): List<String> = context.getBean(ResponseThreads::class.java).of(path)
 
     /** The module's client: one call through the factory's backend. */
     private fun callThroughModule(factory: ResilientWebClientFactory) {
@@ -222,7 +256,34 @@ class WebClientEngineIsolationTest {
                     )
                 },
             ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
+            // A host's customizer on Boot's builder - the factory's clone carries it like every other client.
+            .withBean(ResponseThreads::class.java)
             .withBean(ResilientWebClientFactory::class.java)
+
+    /**
+     * A host's [WebClientCustomizer]: a filter that records, per request path, the threads the response BODY
+     * arrived on. Boot applies it to its builder bean, so it is on the host's clients and on the factory's clones
+     * alike. The body rather than the head, so the evidence is the thread the data itself was delivered on.
+     */
+    class ResponseThreads : WebClientCustomizer {
+        private val threads = ConcurrentHashMap<String, MutableSet<String>>()
+
+        fun of(path: String): List<String> = threads[path].orEmpty().toList()
+
+        override fun customize(builder: WebClient.Builder) {
+            builder.filter { request, next ->
+                next.exchange(request).map { response ->
+                    response
+                        .mutate()
+                        .body { chunks ->
+                            chunks.doOnNext {
+                                threads.computeIfAbsent(request.url().path) { ConcurrentHashMap.newKeySet() } += Thread.currentThread().name
+                            }
+                        }.build()
+                }
+            }
+        }
+    }
 
     /** The `app.webclient` binding alone, as in `LegatiumExchangeLoggingIntegrationTest`. */
     @EnableConfigurationProperties(WebClientProperties::class)

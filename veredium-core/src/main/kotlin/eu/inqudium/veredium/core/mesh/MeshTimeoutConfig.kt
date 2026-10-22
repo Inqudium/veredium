@@ -9,6 +9,7 @@ import io.github.resilience4j.spring6.bulkhead.configure.BulkheadConfigurationPr
 import io.github.resilience4j.spring6.circuitbreaker.configure.CircuitBreakerConfigurationProperties
 import io.github.resilience4j.spring6.timelimiter.configure.TimeLimiterConfigurationProperties
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -47,6 +48,7 @@ class MeshTimeoutConfig {
         circuitBreakerRegistry: CircuitBreakerRegistry,
         timeLimiterRegistry: TimeLimiterRegistry,
         bulkheadRegistry: BulkheadRegistry,
+        connectionPools: ObjectProvider<MeshConnectionPools>,
     ): MeshResilienceStartupGuard =
         MeshResilienceStartupGuard(
             meshProperties,
@@ -57,5 +59,5 @@ class MeshTimeoutConfig {
             circuitBreakerRegistry,
             timeLimiterRegistry,
             bulkheadRegistry,
-        )
+        ) { connectionPools.orderedStream().toList().flatMap { it.connectionPools() } }
 }

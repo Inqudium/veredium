@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.webclient
 
+import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
@@ -137,26 +138,32 @@ class WebClientEngineConfigTest {
                 .hasMessageContainingAll("app.webclient.engine.endpoints", "[orderz]", "[orders, payments]")
         }
 
-        @Test
-        fun `should name the coordinates to add when a selected engine's library is missing`() {
-            // What is tested: the classpath check, against a class loader that hides Jetty.
-            // Success criteria: construction with the jetty engine fails naming app.webclient.engine, the backend
-            //   and both Maven coordinates jetty-client and jetty-reactive-httpclient.
-            // Why it matters: the engine libraries are optional dependencies of this module; without the check
-            //   the omission surfaces as a NoClassDefFoundError at the first client, naming a Jetty class and no
-            //   configuration.
+        @ParameterizedTest(name = "{0} without {1}")
+        @CsvSource(
+            "JETTY, org.eclipse.jetty.reactive, org.eclipse.jetty:jetty-reactive-httpclient",
+            "APACHE, org.apache.hc.core5.reactive, org.apache.httpcomponents.core5:httpcore5-reactive",
+        )
+        fun `should name the coordinates to add when a selected engine's reactive adapter is missing`(
+            engine: WebClientEngine,
+            hiddenPackage: String,
+            coordinates: String,
+        ) {
+            // What is tested: the classpath check, against a class loader that hides ONLY the reactive adapter
+            //   of an engine whose client library stays visible (jetty-client without jetty-reactive-httpclient,
+            //   httpclient5 without httpcore5-reactive).
+            // Success criteria: construction fails naming app.webclient.engine, the engine, the backend and the
+            //   adapter's Maven coordinates.
+            // Why it matters: the half-present engine is the likely real mistake - the client library often
+            //   arrives transitively, the adapter never does - and a check satisfied by ANY one of the required
+            //   classes would pass it, leaving a NoClassDefFoundError at the first client.
             //
             // Given
-            val hidden = DefaultResourceLoader(FilteredClassLoader("org.eclipse.jetty"))
+            val hidden = DefaultResourceLoader(FilteredClassLoader(hiddenPackage))
 
             // When/Then
-            assertThatThrownBy { factory(WebClientProperties.Engine(default = WebClientEngine.JETTY), resourceLoader = hidden) }
+            assertThatThrownBy { factory(WebClientProperties.Engine(default = engine), resourceLoader = hidden) }
                 .isInstanceOf(IllegalArgumentException::class.java)
-                .hasMessageContainingAll(
-                    "app.webclient.engine selects 'jetty' for [orders]",
-                    "org.eclipse.jetty:jetty-client",
-                    "org.eclipse.jetty:jetty-reactive-httpclient",
-                )
+                .hasMessageContainingAll("app.webclient.engine selects '$engine' for [orders]", coordinates)
         }
 
         @Test
@@ -176,12 +183,13 @@ class WebClientEngineConfigTest {
         }
 
         @Test
-        fun `should refuse a request queue of 0 on Jetty, which would reject every request`() {
+        fun `should refuse a pending-acquire count of 0 on Jetty, which has no setting for no call waits`() {
             // What is tested: app.webclient.pool.pending-acquire-max-count=0 with the jetty engine.
             // Success criteria: construction fails naming the pool key, the engine key and the backend; the same
             //   value on reactor-netty constructs.
-            // Why it matters: Reactor Netty reads 0 as "never queue"; Jetty puts every request into its queue
-            //   before it gets a connection, so the carried-over 0 would make every call of the backend fail.
+            // Why it matters: Reactor Netty reads 0 as "never queue"; Jetty's queue also holds the requests a
+            //   connection is being opened for, so no capacity means that - a carried-over 0 would make every call
+            //   of the backend fail, a larger one would let calls wait.
             //
             // Given
             val pool = WebClientProperties.Pool(pendingAcquireMaxCount = 0)
@@ -191,6 +199,24 @@ class WebClientEngineConfigTest {
                 .isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContainingAll("app.webclient.pool.pending-acquire-max-count=0", "app.webclient.engine", "[orders]")
             assertThatCode { factory(WebClientProperties.Engine(), pool = pool) }.doesNotThrowAnyException()
+        }
+
+        @ParameterizedTest(name = "max-connections {0}, pending-acquire-max-count {1} -> {2}")
+        @CsvSource("100, 100, 200", "1, 5, 6", "100, -1, 2147483647", "2147483647, 5, 2147483647")
+        fun `should size Jetty's queue as the connections plus the calls that may wait`(
+            maxConnections: Int,
+            pendingAcquireMaxCount: Int,
+            expected: Int,
+        ) {
+            // What is tested: the Jetty queue capacity derived from the mesh and pool settings.
+            // Success criteria: connections + count, saturating at Int.MAX_VALUE; -1 (unbounded) is
+            //   Int.MAX_VALUE.
+            // Why it matters: Jetty enqueues every request before it gets a connection; a capacity of the count
+            //   alone would reject a burst on a cold pool at half the concurrency Reactor Netty accepts for the
+            //   same settings, and the sum must not wrap to a negative capacity.
+            //
+            // Given/When/Then
+            assertThat(JettyTransport.jettyQueueCapacity(maxConnections, pendingAcquireMaxCount)).isEqualTo(expected)
         }
 
         @Test
@@ -227,6 +253,34 @@ class WebClientEngineConfigTest {
             // Given/When/Then
             assertThat(System.getProperty(WebClientEngineChecks.JDK_RESTRICTED_HEADERS_PROPERTY)).isEqualTo("host")
             assertThat(WebClientEngineChecks.jdkAllowsHostHeader()).isTrue()
+        }
+
+        @Test
+        fun `should report a pool per Reactor Netty backend and one per Jetty or Apache engine for the startup guard`() {
+            // What is tested: connectionPools() - what the factory tells the core's startup guard about the pools
+            //   the bulkheads are sized against.
+            // Success criteria: two backends on reactor-netty give two pools of one backend each; two on apache
+            //   share one pool, one on jetty has its own; every pool carries max-connections (100).
+            // Why it matters: Reactor Netty keeps a sub-pool per backend (each backend's client is configured on
+            //   its own), Jetty and Apache one per destination - which all backends behind the sidecar are. A guard
+            //   that summed every bulkhead against one pool would warn about a correctly sized configuration.
+            //
+            // Given
+            val engine =
+                WebClientProperties.Engine(
+                    endpoints = mapOf("stock" to WebClientEngine.JETTY, "billing" to WebClientEngine.APACHE, "ledger" to WebClientEngine.APACHE),
+                )
+
+            // When
+            val pools = factory(engine, aliases = listOf("orders", "payments", "stock", "billing", "ledger")).connectionPools()
+
+            // Then
+            assertThat(pools).containsExactlyInAnyOrder(
+                MeshConnectionPool("webclient-reactor-netty-orders", 100, setOf("orders")),
+                MeshConnectionPool("webclient-reactor-netty-payments", 100, setOf("payments")),
+                MeshConnectionPool("webclient-jetty", 100, setOf("stock")),
+                MeshConnectionPool("webclient-apache", 100, setOf("billing", "ledger")),
+            )
         }
 
         private fun factory(

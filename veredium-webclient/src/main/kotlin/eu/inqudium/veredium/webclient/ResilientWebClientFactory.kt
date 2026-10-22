@@ -2,6 +2,8 @@ package eu.inqudium.veredium.webclient
 
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
+import eu.inqudium.veredium.core.mesh.MeshConnectionPool
+import eu.inqudium.veredium.core.mesh.MeshConnectionPools
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.validation.ResponseValidation
@@ -87,7 +89,7 @@ class ResilientWebClientFactory(
     // the class loader the context was started with (which is what a test with a filtered class loader varies).
     // Absent -> this class's own loader.
     resourceLoader: ResourceLoader? = null,
-) {
+) : MeshConnectionPools {
     private val logger: Logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java)
 
     /** Which backends validate, with which validator, and whether a violation fails the call - see [ResponseValidation]. */
@@ -166,13 +168,13 @@ class ResilientWebClientFactory(
         EngineTransports(engineByBackend.values.toSet(), logger) { engine ->
             when (engine) {
                 WebClientEngine.REACTOR_NETTY -> {
-                    ReactorNettyTransport(properties, meshTransport, POOL_NAME, poolDisposeTimeout) { disposal ->
-                        drain(disposal, Schedulers.parallel()).block()
+                    ReactorNettyTransport(properties, meshTransport, POOL_NAME, poolDisposeTimeout) { disposal, left ->
+                        drain(disposal, Schedulers.parallel(), left).block()
                     }
                 }
 
                 WebClientEngine.JDK -> {
-                    JdkTransport(meshTransport, poolDisposeTimeout, logger)
+                    JdkTransport(meshTransport, logger)
                 }
 
                 WebClientEngine.JETTY -> {
@@ -180,7 +182,7 @@ class ResilientWebClientFactory(
                 }
 
                 WebClientEngine.APACHE -> {
-                    ApacheTransport(properties, meshTransport, poolDisposeTimeout, logger)
+                    ApacheTransport(properties, meshTransport, logger)
                 }
             }
         }
@@ -203,7 +205,8 @@ class ResilientWebClientFactory(
      * whose alias equals [backendName].
      *
      * @throws IllegalStateException if no mesh endpoint with that alias is configured - failing fast at
-     *         startup beats a confusing 404/connection error at the first call.
+     *         startup beats a confusing 404/connection error at the first call - and for a client not built
+     *         before [shutdown]: building it would create engine resources that nothing releases any more.
      */
     fun create(backendName: String): ResilientWebClient = cache.computeIfAbsent(backendName, ::build)
 
@@ -284,6 +287,23 @@ class ResilientWebClientFactory(
                 .register(registry)
         }
 
+    /**
+     * The connection pools the bulkheads are sized against, for the startup guard: Reactor Netty keeps a sub-pool
+     * per backend (each backend's client has a configuration of its own), so one pool per backend; Jetty and Apache
+     * share one per engine (every backend behind the sidecar is one destination / route); the JDK client has no
+     * connection bound.
+     */
+    override fun connectionPools(): List<MeshConnectionPool> =
+        engineByBackend.entries
+            .groupBy({ it.value }, { it.key })
+            .flatMap { (engine, aliases) ->
+                when (engine) {
+                    WebClientEngine.REACTOR_NETTY -> aliases.map { MeshConnectionPool("webclient-$engine-$it", meshTransport.maxConnections, setOf(it)) }
+                    WebClientEngine.JDK -> listOf(MeshConnectionPool("webclient-$engine", null, aliases.toSet()))
+                    WebClientEngine.JETTY, WebClientEngine.APACHE -> listOf(MeshConnectionPool("webclient-$engine", meshTransport.maxConnections, aliases.toSet()))
+                }
+            }
+
     /** The engine of [backendName] as resolved at construction, or `null` for a name with no mesh endpoint. */
     internal fun engineOf(backendName: String): WebClientEngine? = engineByBackend[backendName]
 
@@ -294,11 +314,12 @@ class ResilientWebClientFactory(
     internal fun startedEngines(): Map<WebClientEngine, EngineTransport> = transports.started()
 
     /**
-     * Releases the resources of every engine in use on context shutdown, each bounded by [poolDisposeTimeout]:
-     * Reactor Netty's pool is disposed (below) and its event loops once the bound has passed, the JDK client shut
-     * down in order, Jetty's client stopped (which
-     * aborts its exchanges), Apache's I/O reactor shut down gracefully. An engine that never built a client has
-     * nothing to release.
+     * Releases the resources of every engine in use on context shutdown, all of them against ONE deadline
+     * [poolDisposeTimeout] from now - the engines are released one after another, and a bound per engine would
+     * let the shutdown take that bound once per engine. Reactor Netty's pool is disposed (below) and its event
+     * loops once the bound has passed, the JDK client shut down in order, Jetty's client stopped (which aborts
+     * its exchanges), Apache's I/O reactor shut down gracefully. An engine that never built a client has nothing
+     * to release; afterwards, no client can be built any more ([create]).
      *
      * For Reactor Netty, what the disposal waits for is narrower than "drain": the pool is built without Reactor
      * Netty's `disposeTimeout`, so `disposeLater()` is not a graceful shutdown. It fails pending acquires, closes the
@@ -312,15 +333,16 @@ class ResilientWebClientFactory(
      * someone is looking for one, saying nothing about what actually happened. `timeout` + `onErrorResume`
      * turns it into the statement it is: the pool did not drain in time, and it is being dropped anyway.
      *
-     * The bare `block()` afterwards cannot hang - [poolDisposeTimeout] guarantees a terminal signal.
+     * The bare `block()` afterwards cannot hang - the timeout guarantees a terminal signal.
      */
     @PreDestroy
     fun shutdown() {
-        transports.release()
+        transports.release(System.nanoTime() + poolDisposeTimeout.toNanos(), System::nanoTime)
     }
 
     /**
-     * [shutdown]'s bounded wait for [disposal], with the WARN for a disposal that outlives [poolDisposeTimeout].
+     * [shutdown]'s bounded wait for [disposal], with the WARN for a disposal that outlives [timeout] - what is
+     * left of the shutdown deadline when the Reactor Netty engine's turn comes.
      *
      * Separate from [shutdown] for the one reason that the timeout branch can only be tested with a disposal
      * that never ends and a clock that can be advanced: the real pool's disposal finishes in milliseconds, and
@@ -331,14 +353,15 @@ class ResilientWebClientFactory(
     internal fun drain(
         disposal: Mono<Void>,
         timer: Scheduler,
+        timeout: Duration = poolDisposeTimeout,
     ): Mono<Void> =
         disposal
-            .timeout(poolDisposeTimeout, timer)
+            .timeout(timeout, timer)
             .onErrorResume(TimeoutException::class.java) {
                 logger.warn(
                     "Connection pool '{}' did not drain within {} - dropping it with connections still open",
                     POOL_NAME,
-                    poolDisposeTimeout,
+                    timeout,
                 )
                 Mono.empty()
             }

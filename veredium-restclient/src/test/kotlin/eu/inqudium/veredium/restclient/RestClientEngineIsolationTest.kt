@@ -34,6 +34,9 @@ import org.springframework.web.client.RestClient
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.function.Supplier
 
 /**
@@ -44,7 +47,10 @@ import java.util.function.Supplier
  * the factory, and a RestClient the HOST builds from Boot's `RestClient.Builder` bean. Which engine carried a
  * request is read off the wire, where each engine announces itself: the host's client sets no User-Agent, so
  * WireMock sees the engine's default token (`Apache-HttpClient/...`, `Java-http-client/...`), while the module's
- * clients send `veredium/<version>`. No reflection on Spring's client internals, no mocks.
+ * clients send `veredium/<version>` on every engine. The module's side is therefore read off two other traces: its
+ * `Accept-Encoding` (Apache offers `gzip, x-gzip, deflate`, Jetty and Reactor Netty `gzip`, the JDK client none),
+ * and the selected engine's own pool, which counts the connection of an exchange held in flight. Neither depends on
+ * what the factory records about itself. No reflection on Spring's client internals, no mocks.
  */
 class RestClientEngineIsolationTest {
     companion object {
@@ -78,8 +84,9 @@ class RestClientEngineIsolationTest {
         // What is tested: the property's reach - a module default other than Apache, and the host's own RestClient
         //   from the same Boot builder bean the factory clones.
         // Success criteria: the host's request reaches WireMock with Apache HttpClient's User-Agent (Boot's
-        //   auto-detected engine with httpclient5 on the classpath), while the module's client ran on the selected
-        //   engine and sent the module's token.
+        //   auto-detected engine with httpclient5 on the classpath), while the module's client sent the module's
+        //   token and an Accept-Encoding other than Apache's, and - where the engine counts connections - its
+        //   held exchange shows as the one connection in use of the selected engine.
         // Why it matters: the requirement is that the engine switch must not affect any other client of the host.
         //   A factory that set the request factory on Boot's builder rather than on its clone, or registered an
         //   engine bean Boot's auto-configuration picks up, would move the host's clients along with its own.
@@ -100,7 +107,11 @@ class RestClientEngineIsolationTest {
             // Then: the host's request went out on Apache, the module's on the selected engine
             assertThat(userAgentOf("/host")).startsWith("Apache-HttpClient/")
             assertThat(userAgentOf("/module")).isEqualTo(Veredium.userAgent())
-            assertThat(factory.engineTransports.keys).containsExactly(engine)
+            assertThat(acceptEncodingOf("/module")).`as`("the module's request must not have gone out on Apache").isNotEqualTo(acceptEncodingOf("/host"))
+            val transport = factory.engineTransports.getValue(engine)
+            if (transport.connectionsInUse() != null) {
+                assertThat(connectionsInUseDuringHeldCall(factory, transport)).isEqualTo(1)
+            }
         }
     }
 
@@ -109,8 +120,9 @@ class RestClientEngineIsolationTest {
         // What is tested: the other direction - Boot's `spring.http.clients.imperative.factory`, set by the host,
         //   against the module's default engine.
         // Success criteria: the host's client runs on the JDK client Boot's switch selects (its User-Agent on the
-        //   wire), the module's client on Apache - its request factory is Spring's HttpComponents one, built by
-        //   the factory, not the one Boot's switch put on the builder.
+        //   wire), the module's client on Apache - Apache's Accept-Encoding on the wire, its held exchange the one
+        //   connection in use of the factory's Apache pool, and its request factory Spring's HttpComponents one,
+        //   built by the factory, not the one Boot's switch put on the builder.
         // Why it matters: the module neither reads Boot's switch nor lets it in through the builder it clones; a
         //   host that moves its own clients must not move the mesh clients, whose timeouts and pool the switch
         //   knows nothing about.
@@ -135,6 +147,8 @@ class RestClientEngineIsolationTest {
                 assertThat(userAgentOf("/host")).startsWith("Java-http-client/")
                 assertThat(factory.requestFactoryOf(BACKEND)).isInstanceOf(HttpComponentsClientHttpRequestFactory::class.java)
                 assertThat(userAgentOf("/module")).isEqualTo(Veredium.userAgent())
+                assertThat(acceptEncodingOf("/module")).contains("x-gzip")
+                assertThat(connectionsInUseDuringHeldCall(factory, factory.engineTransports.getValue(RestClientEngine.APACHE))).isEqualTo(1)
             }
     }
 
@@ -181,6 +195,32 @@ class RestClientEngineIsolationTest {
             .single()
             .header("User-Agent")
             .firstValue()
+
+    /** The Accept-Encoding of the one request WireMock received on [path], empty when it sent none. */
+    private fun acceptEncodingOf(path: String): String =
+        wireMock
+            .findAll(getRequestedFor(urlEqualTo(path)))
+            .single()
+            .header("Accept-Encoding")
+            .let { if (it.isPresent) it.values().joinToString(", ") else "" }
+
+    /**
+     * The connections in use of [transport] while one call of the module's [BACKEND] is held in flight by the
+     * backend - read once the request has reached WireMock, then the call is let finish.
+     */
+    private fun connectionsInUseDuringHeldCall(
+        factory: ResilientRestClientFactory,
+        transport: EngineTransport,
+    ): Int? {
+        val arrived = CountDownLatch(1)
+        wireMock.stubFor(get(urlEqualTo("/held")).willReturn(okJson("""{"message":"held"}""").withFixedDelay(500)))
+        wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/held") arrived.countDown() }
+        val call = CompletableFuture.supplyAsync { factory.create(BACKEND).get(Map::class.java) { it.uri("/held") } }
+        assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the held call must have reached the backend").isTrue()
+        val inUse = transport.connectionsInUse()
+        call.get(5, TimeUnit.SECONDS)
+        return inUse
+    }
 
     /** A client the HOST builds from Boot's builder bean, against WireMock - nothing of the module on it. */
     private fun hostClient(context: AssertableApplicationContext): RestClient =

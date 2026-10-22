@@ -93,6 +93,16 @@ data class WebClientProperties(
         }
     }
 
+    /**
+     * The lifecycle knobs of each engine's connection pool, in Reactor Netty's terms.
+     *
+     * @property pendingAcquireMaxCount How many calls may wait for a connection beyond the ones holding one;
+     *   `-1` = unbounded, `0` = none wait.
+     * @property maxIdleTime Close a pooled connection that sat idle for longer than this. Must be positive: zero
+     *   has no common meaning across the engines (see `init`).
+     * @property maxLifeTime Close a connection older than this regardless of use; `0` = unbounded.
+     * @property evictInBackground How often idle and expired connections are swept; `0` = off.
+     */
     data class Pool(
         val pendingAcquireMaxCount: Int = 100,
         val maxIdleTime: Duration = Duration.ofSeconds(30),
@@ -108,9 +118,18 @@ data class WebClientProperties(
                     "but was $pendingAcquireMaxCount"
             }
             // Negative durations are accepted by the pool builder and then quietly mean something no operator
-            // intended: a connection that is due for eviction the moment it is created. Zero is left alone -
-            // for evictInBackground it is Reactor Netty's documented "off".
-            require(!maxIdleTime.isNegative) { "app.webclient.pool.max-idle-time must not be negative, but was $maxIdleTime" }
+            // intended: a connection that is due for eviction the moment it is created. Zero is left alone where
+            // every engine reads it the same way - for evictInBackground it is "off", for maxLifeTime "unbounded".
+            //
+            // Not for maxIdleTime: the engines read a zero idle time in OPPOSITE ways. Reactor Netty evicts every
+            // connection whose idle time is >= the limit, i.e. every released one, so keep-alive is silently gone
+            // and each call opens a new connection; Jetty reads 0 as "no idle timeout" and never closes an idle
+            // connection; Apache's evictor closes every idle connection on each sweep. There is no one meaning to
+            // give the value, so it is refused, naming the key.
+            require(!maxIdleTime.isNegative && !maxIdleTime.isZero) {
+                "app.webclient.pool.max-idle-time must be positive, but was $maxIdleTime " +
+                    "(0 would disable keep-alive on reactor-netty and never close an idle connection on jetty)"
+            }
             require(!maxLifeTime.isNegative) { "app.webclient.pool.max-life-time must not be negative, but was $maxLifeTime" }
             require(!evictInBackground.isNegative) {
                 "app.webclient.pool.evict-in-background must not be negative, but was $evictInBackground"

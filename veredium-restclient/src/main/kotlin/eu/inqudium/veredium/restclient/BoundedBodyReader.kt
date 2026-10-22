@@ -51,9 +51,9 @@ class ResponseBodyLimitExceededException(
  * the array starts at 8 KiB and doubles, capped at the limit, and is trimmed to size once at the end.
  *
  * The remainder of an over-limit body is NOT read here. Closing the response afterwards hands the stream back
- * to the engine, which drains or discards the connection as its own rules dictate (the Jetty and Reactor Netty
- * engines discard it rather than read a body nobody wants) - that is the transport's business, and the limit is
- * about memory, not about the wire.
+ * to the engine, and every engine of this module discards the connection rather than read the rest of a body
+ * nobody wants - Spring's Apache and JDK responses would drain it, which is why their engines decorate the
+ * response ([AbortingResponse]). That is the transport's business; the limit here is about memory.
  */
 object BoundedBodyReader {
     private const val CHUNK_SIZE = 8 * 1024

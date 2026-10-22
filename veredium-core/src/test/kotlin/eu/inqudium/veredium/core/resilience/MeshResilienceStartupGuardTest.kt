@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
+import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
@@ -362,6 +363,39 @@ class MeshResilienceStartupGuardTest {
             // Then
             assertThat(appender.list.filter { it.level == Level.WARN }).isEmpty()
         }
+
+        @Test
+        fun `should check each pool the client factories report against its own backends only`() {
+            // What is tested: the pool check over the pools a client factory reports (MeshConnectionPools) - two
+            //   engines, each with its own pool of 30: one pool carries both aliases (10 + 25), the other one alias
+            //   (25), and a third, unbounded pool (the JDK client) carries an alias as well.
+            // Success criteria: exactly one WARN, naming the over-committed pool, the sum 35 and both of its
+            //   aliases; the pool with 25 of 30 permits and the unbounded pool raise nothing.
+            // Why it matters: with selectable engines every engine has a pool of its own; a sum over ALL aliases
+            //   against one pool warns about a split that is correctly sized, and checking an unbounded pool
+            //   warns about a limit that does not exist - both teach operators to ignore the line.
+            //
+            // Given
+            val props = propsFor(secondTriplet, maxConnections = 30)
+            val wiring = wired(props)
+            wiring.bulkheads.remove(alias)
+            wiring.bulkheads.bulkhead(alias, BulkheadConfig.custom().maxConcurrentCalls(10).build())
+            val pools =
+                listOf(
+                    MeshConnectionPool("apache", 30, setOf(alias, secondAlias)),
+                    MeshConnectionPool("jetty", 30, setOf(secondAlias)),
+                    MeshConnectionPool("jdk", null, setOf(alias, secondAlias)),
+                )
+
+            // When
+            guardOver(props, wiring) { pools }.verify()
+
+            // Then
+            val warning = appender.list.filter { it.level == Level.WARN }.map { it.formattedMessage }
+            assertThat(warning).hasSize(1)
+            assertThat(warning.single())
+                .contains("connection pool 'apache'", "max-concurrent-calls)=35", "max-connections=30", "$alias=10", "$secondAlias=25")
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -400,6 +434,7 @@ class MeshResilienceStartupGuardTest {
     private fun guardOver(
         props: MeshProperties,
         wiring: Wiring,
+        connectionPools: () -> List<MeshConnectionPool> = { emptyList() },
     ): MeshResilienceStartupGuard =
         MeshResilienceStartupGuard(
             props,
@@ -410,6 +445,7 @@ class MeshResilienceStartupGuardTest {
             wiring.circuitBreakers,
             wiring.timeLimiters,
             wiring.bulkheads,
+            connectionPools,
         )
 
     /**

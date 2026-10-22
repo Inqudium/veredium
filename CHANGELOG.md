@@ -60,6 +60,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-22T14-01-49.md`:
+
+- `veredium-restclient`: a body refused at the buffer limit is no longer read to its end on the Apache engine
+  (the default) or the JDK engine. Spring's responses of both drain the rest of the body in `close`; for a large
+  or slow body that held the worker, its permit and its connection, and past the TimeLimiter budget the
+  client-side refusal ended as a `TimeoutException` the breaker records. Both engines now abort the exchange
+  instead (Apache: the request is cancelled; JDK: the body stream is closed), as Jetty and Reactor Netty already
+  did, through one shared decorator. A per-engine test with a backend that keeps dripping pins it; on Apache it
+  took 30 s and ended at the budget before the fix.
+- `veredium-restclient`: the factory's shutdown releases every engine even when one of them throws, reporting
+  the failure in a WARN line; a Reactor Netty disposal past its wait is reported instead of thrown out of the
+  destroy callback; a Jetty client stopped from an interrupted shutdown thread no longer blocks the shutdown.
+  Engines created before one that fails to construct are shut down before the failure is rethrown.
+- `veredium-restclient`: `create()` after `shutdown()` is refused with an `IllegalStateException` instead of
+  building a client on a closed engine.
+- `veredium-restclient`: the Apache pool's gauges (`restclient.pool.*`) leave the host's registry on shutdown,
+  as Reactor Netty's do.
+- `veredium-core`: the startup guard checks the bulkheads against each connection pool the client factories
+  report (`MeshConnectionPools`, one pool per engine; the JDK client has no bound and is not checked), instead
+  of against one pool over all mesh aliases.
+- Tests: per-engine pins for `max-connections`, the connect timeout, per-backend response timeouts on a shared
+  engine, the drain / deadline / interrupt branches of shutdown, and the isolation of the module's engine read
+  off the wire and the engine's own pool instead of the factory's record.
+- `veredium-webclient`: `shutdown()` releases all engines against one shared deadline instead of one bound per
+  engine, and waits for Apache's idle-connection evictor to end. After `shutdown()`, `create()` for a client
+  not yet built fails with an `IllegalStateException` instead of creating engine resources nothing releases.
+- `veredium-webclient`: shutting down the reactive Apache engine cancels the exchanges still in flight, with a
+  WARN giving their number. Their callers no longer wait out their budget, and Apache no longer logs a
+  `ClosedSelectorException`.
+- `veredium-webclient`: Jetty's request queue is sized at `max-connections` plus `pool.pending-acquire-max-count`,
+  because Jetty queues every request, including the ones about to get a connection. Before, a burst on a cold
+  pool was rejected at half the concurrency Reactor Netty accepts.
+- `veredium-webclient`: only errors dropped after the exchange was cancelled are downgraded to DEBUG. Any other
+  dropped error goes on to the caller's own hook or to Reactor's global handling.
+- `veredium-webclient`: the guide and the startup line say that reactor-netty's `max-connections` applies per
+  backend: Reactor Netty keeps a sub-pool per remote address and client configuration, and every backend's
+  client has its own. The startup guard sizes the bulkheads accordingly.
+
 Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
 
 - An empty 2xx body (204, empty 200) now fails the call with `EmptyResponseBodyException` on both stacks,
@@ -102,6 +140,17 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
 
 ### Changed
 
+- `pool.max-idle-time` must be positive on both stacks (`app.restclient.pool`, `app.webclient.pool`); zero is
+  refused at binding, naming the key. Zero meant opposite things per engine: no keep-alive at all on Reactor
+  Netty, no idle timeout on Jetty, every idle connection closed at each sweep on Apache.
+- `veredium-webclient`: the reactive Apache engine's startup line lists `pending-acquire-timeout-ms` under
+  "does NOT apply": Apache's async pool checks a waiting lease's deadline only on its next lease or release, so
+  the TimeLimiter bounds the wait.
+- `veredium-webclient`: the Jetty and Apache engines name their I/O threads `veredium-webclient-jetty-*` and
+  `veredium-webclient-apache-*`.
+- `veredium-core`: `MeshResilienceStartupGuard` takes the connection pools the client factories report
+  (`MeshConnectionPools`, implemented by both factories); without one it keeps checking the single pool of
+  `app.mesh.defaults.transport.max-connections`.
 - `veredium-webclient`: the default Reactor Netty engine now runs on factory-owned event loops and a
   factory-owned resolver, instead of Reactor Netty's global `HttpResources`. Its connection pool is created on
   the first client. The new resolver resolves through `InetAddress`, so a remote (non-localhost) base URL means

@@ -13,6 +13,7 @@ import org.apache.hc.client5.http.impl.async.HttpAsyncClients
 import org.apache.hc.client5.http.impl.nio.PoolingAsyncClientConnectionManager
 import org.apache.hc.client5.http.impl.nio.PoolingAsyncClientConnectionManagerBuilder
 import org.apache.hc.client5.http.protocol.HttpClientContext
+import org.apache.hc.core5.concurrent.DefaultThreadFactory
 import org.apache.hc.core5.concurrent.FutureCallback
 import org.apache.hc.core5.function.Supplier
 import org.apache.hc.core5.http.HttpHost
@@ -48,11 +49,14 @@ import reactor.netty.resources.ConnectionProvider
 import reactor.netty.resources.LoopResources
 import java.net.URI
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 import java.util.function.Function
+import kotlin.concurrent.withLock
 import org.eclipse.jetty.client.HttpClient as JettyHttpClient
 import reactor.netty.http.client.HttpClient as ReactorHttpClient
 
@@ -70,18 +74,35 @@ internal interface EngineTransport {
     /** The connector for one backend - created once per backend, on the shared resources of this engine. */
     fun connectorFor(endpoint: ResolvedTimeouts): ClientHttpConnector
 
-    /** Releases the shared resources; bounded, never throws for an outcome the transport can report itself. */
-    fun release()
+    /**
+     * Releases the shared resources, waiting for in-flight exchanges no later than [deadlineNanos] on [nanoTime]'s
+     * clock - a deadline SHARED by every engine of the factory, so that releasing several engines one after
+     * another takes the drain bound once, not once per engine. Never throws for an outcome the transport can
+     * report itself.
+     */
+    fun release(
+        deadlineNanos: Long,
+        nanoTime: () -> Long,
+    )
 
     /** Whether [release] has completed - for the tests that pin the lifecycle. */
     fun isReleased(): Boolean
+
+    companion object {
+        /** The time left until [deadlineNanos], never negative. */
+        fun remaining(
+            deadlineNanos: Long,
+            nanoTime: () -> Long,
+        ): Duration = Duration.ofNanos(maxOf(0L, deadlineNanos - nanoTime()))
+    }
 }
 
 /**
  * The engines in use by one factory, each created on first use and released together.
  *
  * Only the engines named in [enginesInUse] can ever be created; asking for another one is a programming
- * error, because the factory resolved every backend's engine at construction.
+ * error, because the factory resolved every backend's engine at construction. Once [release] ran, no engine is
+ * created any more: one created then would own threads and sockets that nothing releases.
  */
 internal class EngineTransports(
     enginesInUse: Set<WebClientEngine>,
@@ -90,25 +111,47 @@ internal class EngineTransports(
 ) {
     private val transports: Map<WebClientEngine, Lazy<EngineTransport>> = enginesInUse.associateWith { engine -> lazy { create(engine) } }
 
+    /**
+     * Guards the creation of an engine against a concurrent [release]: without it, a client built while the
+     * factory shuts down could create its engine after release() took its snapshot of the started ones. A lock
+     * rather than `synchronized`, because the first client may be built on a virtual thread.
+     */
+    private val lifecycle = ReentrantLock()
+
+    /** Set by [release]; afterwards [connectorFor] refuses instead of creating an engine nobody would release. */
+    private var released = false
+
     fun connectorFor(
         engine: WebClientEngine,
         endpoint: ResolvedTimeouts,
-    ): ClientHttpConnector {
-        val transport = transports[engine] ?: error("Engine '$engine' was not resolved for any backend of this factory")
-        return transport.value.connectorFor(endpoint)
-    }
+    ): ClientHttpConnector =
+        lifecycle.withLock {
+            check(!released) {
+                "The ResilientWebClientFactory was shut down; no client can be built after it released its HTTP engines"
+            }
+            val transport = transports[engine] ?: error("Engine '$engine' was not resolved for any backend of this factory")
+            transport.value.connectorFor(endpoint)
+        }
 
     /** The transports created so far - an engine that is in use but has not built a client yet is absent. */
     fun started(): Map<WebClientEngine, EngineTransport> = transports.filterValues { it.isInitialized() }.mapValues { it.value.value }
 
     /**
-     * Releases every transport created so far, each on its own: a failing release is logged and does not keep
-     * the others from releasing theirs.
+     * Releases every transport created so far, each on its own against the one shared [deadlineNanos]: a failing
+     * release is logged and does not keep the others from releasing theirs. Idempotent.
      */
-    fun release() {
-        started().values.forEach { transport ->
+    fun release(
+        deadlineNanos: Long,
+        nanoTime: () -> Long,
+    ) {
+        val toRelease =
+            lifecycle.withLock {
+                released = true
+                started().values
+            }
+        toRelease.forEach { transport ->
             try {
-                transport.release()
+                transport.release(deadlineNanos, nanoTime)
             } catch (e: Exception) {
                 logger.warn("HTTP engine '{}' failed to release its resources", transport.engine, e)
             }
@@ -120,8 +163,11 @@ internal class EngineTransports(
  * Reactor Netty: one [ConnectionProvider] and one event-loop group for every backend of the engine, one
  * [ReactorHttpClient] per backend carrying that backend's response timeout and its URI tagger.
  *
- * Reactor Netty keeps a separate sub-pool per remote address inside the provider, so distinct sidecar ports
- * stay isolated; `maxConnections` and the pending-acquire limits therefore apply per remote address.
+ * Reactor Netty keeps a separate sub-pool inside the provider per remote address AND per client configuration
+ * (`PooledConnectionProvider` keys it by the address and the client's `channelHash`), and every backend's
+ * [ReactorHttpClient] is configured on its own - its response timeout, its URI tagger. So `maxConnections` and
+ * the pending-acquire limits apply per BACKEND (and per remote address), not to the engine as a whole: two
+ * backends behind the same sidecar never share a connection (`WebClientEngineIntegrationTest` pins it).
  *
  * Nothing here is Reactor Netty's process-wide `HttpResources`, which every other Reactor Netty client of the
  * JVM shares - and which Boot's `ReactorResourceFactory` manages for the host's own clients: the loops are
@@ -141,7 +187,8 @@ internal class ReactorNettyTransport(
     private val meshTransport: MeshProperties.Transport,
     poolName: String,
     private val loopDisposeDelay: Duration,
-    private val dispose: (Mono<Void>) -> Unit,
+    /** Waits for the pool's disposal, bounded by the time given - the factory's drain, which reports an expiry. */
+    private val dispose: (Mono<Void>, Duration) -> Unit,
 ) : EngineTransport {
     override val engine: WebClientEngine = WebClientEngine.REACTOR_NETTY
 
@@ -186,8 +233,11 @@ internal class ReactorNettyTransport(
             .metrics(true) { uri -> uriTag(uri) }
     }
 
-    override fun release() {
-        dispose(connectionProvider.disposeLater())
+    override fun release(
+        deadlineNanos: Long,
+        nanoTime: () -> Long,
+    ) {
+        dispose(connectionProvider.disposeLater(), EngineTransport.remaining(deadlineNanos, nanoTime))
         if (loopsScheduled.compareAndSet(false, true)) {
             Mono
                 .delay(loopDisposeDelay)
@@ -216,7 +266,6 @@ internal class ReactorNettyTransport(
  */
 internal class JdkTransport(
     meshTransport: MeshProperties.Transport,
-    private val releaseTimeout: Duration,
     private val logger: Logger,
 ) : EngineTransport {
     override val engine: WebClientEngine = WebClientEngine.JDK
@@ -233,21 +282,36 @@ internal class JdkTransport(
 
     /**
      * An orderly shutdown: no new exchange is accepted, in-flight ones run to completion, and the wait for that is
-     * bounded by the factory's drain timeout - past it the client is shut down hard, with a WARN.
+     * bounded by the factory's shutdown deadline - past it the client is shut down hard, with a WARN.
      */
-    override fun release() {
+    override fun release(
+        deadlineNanos: Long,
+        nanoTime: () -> Long,
+    ) {
         client.shutdown()
         val terminated =
             try {
-                client.awaitTermination(releaseTimeout)
+                client.awaitTermination(EngineTransport.remaining(deadlineNanos, nanoTime))
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 false
             }
         if (!terminated) {
-            logger.warn("HTTP engine '{}' did not drain within {} - closing it with exchanges still open", engine, releaseTimeout)
+            logger.warn("HTTP engine '{}' did not drain by the factory's shutdown deadline - closing it with exchanges still open", engine)
             client.shutdownNow()
+            // shutdownNow() aborts the exchanges and returns before the client's threads have ended; a short,
+            // bounded wait makes [isReleased] true on return in the normal case without holding up a shutdown.
+            try {
+                client.awaitTermination(TERMINATION_AFTER_ABORT)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
         }
+    }
+
+    private companion object {
+        /** How long [release] waits for the client to terminate after it aborted the exchanges in flight. */
+        val TERMINATION_AFTER_ABORT: Duration = Duration.ofSeconds(1)
     }
 
     override fun isReleased(): Boolean = client.isTerminated
@@ -259,7 +323,8 @@ internal class JdkTransport(
  * timeout.
  *
  * Mapped: connect timeout, `max-connections` (per destination, i.e. per remote address like Reactor Netty's
- * sub-pools), `pool.pending-acquire-max-count` (as the per-destination request queue), `pool.max-idle-time`
+ * sub-pools), `pool.pending-acquire-max-count` (as the per-destination request queue beyond the connections,
+ * see [jettyQueueCapacity]), `pool.max-idle-time`
  * (the connection idle timeout) and `pool.max-life-time` (the connection pool's maximum connection duration).
  * Redirects are not followed and no cookie is stored, as with Reactor Netty.
  *
@@ -275,11 +340,12 @@ internal class JettyTransport(
 
     private val client: JettyHttpClient =
         JettyHttpClient().apply {
-            name = "veredium-webclient-jetty"
+            // Jetty names its thread pool after the client: the prefix of this engine's I/O threads.
+            name = THREAD_NAME_PREFIX
             connectTimeout = meshTransport.connectTimeoutMs
             idleTimeout = properties.pool.maxIdleTime.toMillis()
             maxConnectionsPerDestination = meshTransport.maxConnections
-            maxRequestsQueuedPerDestination = jettyQueueCapacity(properties.pool.pendingAcquireMaxCount)
+            maxRequestsQueuedPerDestination = jettyQueueCapacity(meshTransport.maxConnections, properties.pool.pendingAcquireMaxCount)
             isFollowRedirects = false
             httpCookieStore = HttpCookieStore.Empty()
             val maxLifeMillis = properties.pool.maxLifeTime.toMillis()
@@ -294,18 +360,45 @@ internal class JettyTransport(
 
     override fun connectorFor(endpoint: ResolvedTimeouts): ClientHttpConnector = JettyEndpointConnector(connector, endpoint.responseTimeout)
 
-    /** Stops the client: its exchanges are aborted, its connections closed and its thread pool stopped. */
-    override fun release() = client.stop()
+    /**
+     * Stops the client: its exchanges are aborted, its connections closed and its thread pool stopped. Jetty's
+     * stop does not wait, so the shared deadline is not consumed here.
+     */
+    override fun release(
+        deadlineNanos: Long,
+        nanoTime: () -> Long,
+    ) = client.stop()
 
     override fun isReleased(): Boolean = client.isStopped
 
     companion object {
+        /** The client's name, and so the name prefix of this engine's I/O threads. */
+        const val THREAD_NAME_PREFIX: String = "veredium-webclient-jetty"
+
         /**
-         * The Jetty queue capacity for `pool.pending-acquire-max-count`: `-1` (unbounded) becomes the largest
-         * capacity Jetty accepts. `0` is rejected before this is ever reached (see the factory's engine checks),
-         * because Jetty queues EVERY request before it gets a connection, so a capacity of 0 would reject all.
+         * The Jetty queue capacity that means what `pool.pending-acquire-max-count` means on Reactor Netty: how
+         * many calls may WAIT beyond the [maxConnections] that hold a connection.
+         *
+         * Assumption: Jetty puts EVERY request into the destination's queue first and keeps it there until it is
+         * on a connection - including while a new connection is being opened for it - and rejects a request once
+         * the queue holds `maxRequestsQueuedPerDestination` (`HttpDestination.send` -> `enqueue`, jetty-client
+         * 12.1). A capacity of the count alone would therefore reject a burst on a cold pool at the count, though
+         * the pool would serve connections + count of it, as Reactor Netty does. So the capacity is
+         * [maxConnections] + [pendingAcquireMaxCount], saturating at `Int.MAX_VALUE`; `-1` (unbounded) is the
+         * largest capacity Jetty accepts. The price, stated rather than hidden: once every connection is busy,
+         * up to [maxConnections] more calls than the count may wait - the overshoot the bulkheads exist to shed
+         * before it is reached. `0` cannot be expressed at all and is refused at startup
+         * ([WebClientEngineChecks.requireJettyQueue]).
          */
-        fun jettyQueueCapacity(pendingAcquireMaxCount: Int): Int = if (pendingAcquireMaxCount < 0) Int.MAX_VALUE else pendingAcquireMaxCount
+        fun jettyQueueCapacity(
+            maxConnections: Int,
+            pendingAcquireMaxCount: Int,
+        ): Int =
+            if (pendingAcquireMaxCount < 0) {
+                Int.MAX_VALUE
+            } else {
+                (maxConnections.toLong() + pendingAcquireMaxCount).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            }
     }
 }
 
@@ -338,14 +431,17 @@ internal class JettyEndpointConnector(
  * request's `RequestConfig`.
  *
  * Mapped: connect timeout and `pool.max-life-time` (connection config), `max-connections` (per route, i.e. per
- * remote address like Reactor Netty's sub-pools; no total cap across routes, again like Reactor Netty),
- * `pending-acquire-timeout-ms` (the connection-request timeout), and `pool.max-idle-time` swept every
+ * remote address, shared by the backends behind it; no total cap across routes), and `pool.max-idle-time` swept every
  * `pool.evict-in-background` by an idle-connection evictor this transport owns. Retries, redirects and cookie
  * management are switched off, and the client speaks HTTP/1.1 only - each of these is on by default in Apache
  * and off in Reactor Netty, and an automatic retry would spend the mesh budget behind the TimeLimiter's back.
  *
  * Not applied: `pool.pending-acquire-max-count` - the Apache pool has no bound on its waiting requests - and,
  * with `pool.evict-in-background: 0`, `pool.max-idle-time` (no evictor runs, as with Reactor Netty's "off").
+ * `pending-acquire-timeout-ms` is set as the connection-request timeout but does not hold on its own.
+ * Assumption: Apache's async pool (`StrictConnPool`, httpcore5 5.4) checks a waiting lease's deadline only
+ * while it processes a lease or a release, and no timer fails it in between - with nothing else happening on
+ * the route, a call waiting for a connection waits until its TimeLimiter ends it.
  *
  * Cancellation needs this transport's help: Spring's `HttpComponentsClientHttpConnector` drops the `Future` of
  * the exchange it starts, so a cancelled subscription would leave the exchange running until the response or the
@@ -354,7 +450,6 @@ internal class JettyEndpointConnector(
 internal class ApacheTransport(
     properties: WebClientProperties,
     private val meshTransport: MeshProperties.Transport,
-    private val releaseTimeout: Duration,
     private val logger: Logger,
 ) : EngineTransport {
     override val engine: WebClientEngine = WebClientEngine.APACHE
@@ -378,6 +473,9 @@ internal class ApacheTransport(
             HttpAsyncClients
                 .custom()
                 .setConnectionManager(connectionManager)
+                // Named after the module, like the other engines' threads, so a thread dump (and a test) tells
+                // this engine's I/O threads from a host's own Apache client; daemons, as Apache's default ones.
+                .setThreadFactory(DefaultThreadFactory(THREAD_NAME_PREFIX, true))
                 .disableAutomaticRetries()
                 .disableRedirectHandling()
                 .disableCookieManagement()
@@ -409,28 +507,70 @@ internal class ApacheTransport(
         )
 
     /**
-     * A graceful shutdown of the I/O reactor, bounded by the factory's drain timeout; past it the client is closed
-     * immediately, with a WARN. The evictor is stopped first.
+     * A graceful shutdown of the I/O reactor, bounded by the factory's shutdown deadline; past it the client is
+     * closed immediately, with a WARN. Exchanges still in flight are cancelled - with a WARN naming how many -
+     * so their callers do not wait out their budget for a connection that is gone. The evictor is stopped first,
+     * and waited for (briefly) so that [isReleased] means its thread is gone.
      */
-    override fun release() {
-        evictor?.shutdown()
-        val started = System.nanoTime()
+    override fun release(
+        deadlineNanos: Long,
+        nanoTime: () -> Long,
+    ) {
+        evictor?.let { running ->
+            running.shutdown()
+            try {
+                // Assumption: shutdown() only interrupts the evictor's thread, which leaves its sleep at once
+                // (httpclient5 5.6); the join is bounded because a Timeout of 0 would mean "forever" to it.
+                running.awaitTermination(EVICTOR_JOIN)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
         client.initiateShutdown()
         try {
-            client.awaitShutdown(TimeValue.of(releaseTimeout))
+            client.awaitShutdown(TimeValue.of(EngineTransport.remaining(deadlineNanos, nanoTime)))
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
         // Assumption: the multi-core reactor reports SHUTTING_DOWN until it is closed, and its awaitShutdown
-        // returns either when every worker ended or at the deadline - so the elapsed time, not the status, says
-        // whether the reactor drained.
-        if (Duration.ofNanos(System.nanoTime() - started) >= releaseTimeout) {
-            logger.warn("HTTP engine '{}' did not drain within {} - closing it with exchanges still open", engine, releaseTimeout)
+        // returns either when every worker ended or at the deadline - so whether the deadline has passed, not the
+        // status, says whether the reactor drained.
+        val timedOut = nanoTime() - deadlineNanos >= 0
+        // Assumption: Apache's graceful reactor shutdown closes the connections of exchanges still in flight
+        // without completing their callbacks, and so does a hard close (httpclient5 5.6) - the caller's Mono would
+        // wait for its TimeLimiter. Cancelling them hands each caller its cancellation now.
+        val aborted = client.abortInFlight()
+        if (timedOut) {
+            logger.warn("HTTP engine '{}' did not drain by the factory's shutdown deadline - closing it with exchanges still open", engine)
+        } else if (aborted > 0) {
+            logger.warn("HTTP engine '{}' shut down with {} exchange(s) still in flight - cancelling them", engine, aborted)
         }
-        client.close(CloseMode.IMMEDIATE)
+        // Once nothing holds it, the reactor can end by itself; it is closed hard only if it still has not.
+        // Assumption: closing a reactor whose workers are still shutting down closes their selector under them,
+        // which Apache logs at ERROR as a ClosedSelectorException (httpcore5 5.4) - noise at the moment someone
+        // reads the shutdown log, avoided whenever the reactor can end by itself.
+        if (client.status != IOReactorStatus.SHUT_DOWN) {
+            try {
+                client.awaitShutdown(TimeValue.of(SHUTDOWN_AFTER_ABORT))
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+        client.close(if (client.status == IOReactorStatus.SHUT_DOWN) CloseMode.GRACEFUL else CloseMode.IMMEDIATE)
     }
 
     override fun isReleased(): Boolean = client.status == IOReactorStatus.SHUT_DOWN && evictor?.isRunning != true
+
+    companion object {
+        /** The name prefix of this engine's I/O threads. */
+        const val THREAD_NAME_PREFIX: String = "veredium-webclient-apache"
+
+        /** How long [release] waits for the interrupted evictor thread to end. */
+        private val EVICTOR_JOIN: Timeout = Timeout.ofSeconds(1)
+
+        /** How long [release] lets the reactor finish by itself once the exchanges in flight were cancelled. */
+        private val SHUTDOWN_AFTER_ABORT: Duration = Duration.ofSeconds(1)
+    }
 }
 
 /**
@@ -506,11 +646,22 @@ internal class AbortableExchange {
 
 /**
  * The shared Apache client, delegating everything and recording each exchange's `Future` in the
- * [AbortableExchange] of its context - the `Future` Spring's connector does not keep.
+ * [AbortableExchange] of its context - the `Future` Spring's connector does not keep - and in the set of
+ * exchanges in flight, which [abortInFlight] cancels.
  */
 internal class AbortableAsyncClient(
     private val delegate: CloseableHttpAsyncClient,
 ) : CloseableHttpAsyncClient() {
+    /** The exchanges started and not yet completed; each removes itself when its callback fires. */
+    private val inFlight: MutableSet<Future<*>> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * Cancels every exchange still in flight, so its caller receives the cancellation now, and returns how many
+     * it cancelled. A cancelled future completes the callback of Spring's connector with a
+     * `CancellationException`, which ends the call at once (see [ApacheTransport.release] for why that is needed).
+     */
+    fun abortInFlight(): Int = inFlight.toList().count { it.cancel(true) }
+
     override fun start() = delegate.start()
 
     override fun getStatus(): IOReactorStatus = delegate.status
@@ -538,12 +689,30 @@ internal class AbortableAsyncClient(
         callback: FutureCallback<T>?,
     ): Future<T> {
         val exchange = context?.getAttribute(AbortableExchange.CONTEXT_ATTRIBUTE) as? AbortableExchange
-        return if (exchange == null) {
-            delegate.execute(target, requestProducer, responseConsumer, pushHandlerFactory, context, callback)
-        } else {
-            delegate
-                .execute(target, requestProducer, responseConsumer, pushHandlerFactory, context, callback)
-                .also(exchange::attach)
-        }
+        val started = AtomicReference<Future<*>?>()
+        val untracking =
+            object : FutureCallback<T> {
+                override fun completed(result: T) {
+                    started.get()?.let(inFlight::remove)
+                    callback?.completed(result)
+                }
+
+                override fun failed(ex: Exception) {
+                    started.get()?.let(inFlight::remove)
+                    callback?.failed(ex)
+                }
+
+                override fun cancelled() {
+                    started.get()?.let(inFlight::remove)
+                    callback?.cancelled()
+                }
+            }
+        val future = delegate.execute(target, requestProducer, responseConsumer, pushHandlerFactory, context, untracking)
+        started.set(future)
+        inFlight += future
+        // An exchange that completed before it was registered would otherwise stay in the set for good.
+        if (future.isDone) inFlight -= future
+        exchange?.attach(future)
+        return future
     }
 }

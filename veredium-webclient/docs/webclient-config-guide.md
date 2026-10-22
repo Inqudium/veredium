@@ -87,24 +87,30 @@ default maximum of 100 concurrent connections, the new ceiling bounds simultaneo
   decoding aborts first; their WARN line therefore reports the configured limit and `Content-Length` when the
   backend supplied it.
 
-### 1.2 `pool.*` — the shared connection pool (`WebClientProperties.Pool`)
+### 1.2 `pool.*` — the connection pool (`WebClientProperties.Pool`)
 
-One Reactor-Netty pool is shared by every endpoint's `HttpClient` (they all talk to the same local sidecar over
-loopback, so per-endpoint isolation is not worth the lost connection reuse; per-backend isolation is the R4j
-bulkhead's job instead). Reactor Netty keeps a separate sub-pool per remote address, so distinct sidecar ports
-stay isolated. The keys are written in Reactor Netty's terms, the default engine; another engine (§1.6) has one
-pool of its own for its backends and applies what it has an equivalent for - the table in §1.6 says which.
+One Reactor-Netty `ConnectionProvider` serves every endpoint's `HttpClient`, but it does **not** make them share
+connections: Reactor Netty keeps a separate sub-pool per remote address *and* per client configuration, and each
+endpoint's `HttpClient` is configured on its own (its response timeout, its URI tagger). On `reactor-netty` the
+pool limits (`max-connections`, the pending-acquire limits) therefore apply **per backend**; two backends behind
+the same sidecar never share a connection (`WebClientEngineIntegrationTest` pins this). The other engines
+(§1.6) share one pool between their backends, per destination. Per-backend isolation is the R4j bulkhead's job
+on every engine. The keys are written in Reactor Netty's terms, the default engine; another engine applies
+what it has an equivalent for - the table in §1.6 says which.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `pending-acquire-max-count` | `Int` | `100` | Max callers queued waiting for a connection. `-1` = unbounded, `0` = never queue (fail fast on exhaustion). |
-| `max-idle-time` | `Duration` | `30s` | Evict a connection idle for longer than this. |
+| `max-idle-time` | `Duration` | `30s` | Evict a connection idle for longer than this. Must be positive. |
 | `max-life-time` | `Duration` | `5m` | Evict a connection older than this regardless of use. |
 | `evict-in-background` | `Duration` | `30s` | Background eviction interval. `0` = off (Reactor Netty's documented value). |
 
 - **Guards:** `pending-acquire-max-count >= -1` (below `-1` means nothing); the three durations must **not be
   negative** (a negative duration is accepted by the pool builder and then quietly means "evict the moment it is
-  created"). Zero is allowed for all of them.
+  created"). Zero is allowed for `max-life-time` (unbounded) and `evict-in-background` (off), but **not** for
+  `max-idle-time`: the engines read a zero idle time in opposite ways - Reactor Netty evicts every released
+  connection (no keep-alive at all, a new connection per call), Jetty never closes an idle connection, Apache's
+  evictor closes all of them on every sweep - so there is no one meaning to give it, and binding refuses it.
 - **Note the split:** `max-connections` and `pending-acquire-timeout` are **not** here — they belong to the mesh
   transport (`app.mesh.defaults.transport`, §2.5), because they are part of the timeout ladder's accounting. This
   `Pool` block owns only the lifecycle knobs that have no mesh equivalent.
@@ -271,9 +277,9 @@ next to a line naming the engine of every backend in alias order
 |---|---|---|---|---|
 | `transport.connect-timeout-ms` | `CONNECT_TIMEOUT_MILLIS` | client `connectTimeout` | client `connectTimeout` | `ConnectionConfig.connectTimeout` |
 | response timeout (per endpoint, §2.7) | `responseTimeout` - read inactivity | `HttpRequest.timeout` - until the response headers arrive | per-request `idleTimeout` - inactivity | `RequestConfig.responseTimeout` - socket inactivity |
-| `transport.max-connections` | per remote address | **not applied** | per destination | per route |
-| `transport.pending-acquire-timeout-ms` | pending-acquire timeout | **not applied** | **not applied** (no queue timeout) | connection-request timeout |
-| `pool.pending-acquire-max-count` | pending-acquire queue | **not applied** | requests queued per destination (`-1` = unbounded; `0` is rejected at startup, since Jetty queues every request) | **not applied** (no bound) |
+| `transport.max-connections` | per backend (sub-pool per remote address and client configuration) | **not applied** | per destination | per route |
+| `transport.pending-acquire-timeout-ms` | pending-acquire timeout | **not applied** | **not applied** (no queue timeout) | **not applied by itself**: set as the connection-request timeout, but Apache's async pool checks a waiting lease's deadline only when the pool is next used, so the TimeLimiter bounds the wait |
+| `pool.pending-acquire-max-count` | pending-acquire queue | **not applied** | requests waiting beyond `max-connections` per destination: Jetty's queue capacity is `max-connections` + the count, because Jetty keeps every request in its queue until it is on a connection (`-1` = unbounded; `0` is rejected at startup - no capacity means "none wait") | **not applied** (no bound) |
 | `pool.max-idle-time` | max idle time | **not applied** | connection idle timeout | idle-connection eviction (only with `evict-in-background` > 0) |
 | `pool.max-life-time` | max life time | **not applied** | pool `maxDuration` | connection time-to-live |
 | `pool.evict-in-background` | background eviction | **not applied** | **not applied** (idle connections close on their own timer) | interval of the idle-connection evictor |
@@ -330,15 +336,21 @@ Apache connector drops the `Future` of the exchange it starts, so a cancellation
 running until the response timeout; the module keeps that `Future` per exchange and cancels it - while waiting
 for the response and while reading the body. Some engines report the aborted exchange as a failure after the
 cancellation; with no one left to receive it, Reactor would log it at ERROR as a dropped error, so the client
-writes it at DEBUG instead (`Exchange of backend '...' ended after cancellation: ...`).
+writes it at DEBUG instead (`Exchange of backend '...' ended after cancellation: ...`). Only that case: an error
+an operator drops while the exchange was *not* cancelled still goes to the caller's own `onErrorDropped` hook
+or to Reactor's global handling.
 
-**Shutdown.** `shutdown()` releases each engine in use, bounded by the timeout the Reactor Netty pool drain
-already used (the longest response timeout of any endpoint + connect + pending-acquire + 1 s): Reactor Netty's
+**Shutdown.** `shutdown()` releases each engine in use against ONE deadline (the longest response timeout of
+any endpoint + connect + pending-acquire + 1 s from the start of the shutdown), shared by the engines released
+one after another - so a factory on several engines does not take the bound once per engine: Reactor Netty's
 pool closes its idle connections and lets in-flight calls finish on theirs, and its event loops are disposed
 once the bound has passed (daemon threads, so an exiting JVM is not held up); the JDK client shuts down in order -
-in-flight exchanges run to completion within the bound, then it is shut down hard with a WARN; Jetty's client
-stops, which aborts its exchanges; Apache's I/O reactor shuts down gracefully within the bound and is then
-closed, with a WARN when the bound ran out.
+in-flight exchanges run to completion until the deadline, then it is shut down hard with a WARN; Jetty's client
+stops, which aborts its exchanges; Apache's I/O reactor shuts down gracefully until the deadline and is then
+closed, with a WARN when the deadline ran out - and the exchanges it still had in flight are cancelled (WARN
+with their number), because closing the reactor completes none of their callers, who would otherwise wait out
+their budget. After `shutdown()` no new client can be built (`IllegalStateException`): it would create engine
+resources nothing releases.
 
 **Fail-fast** (§5): an override key that names no mesh alias, a selected engine whose library is missing (the
 message names the coordinates), `jdk` without the Host flag, and `jetty` with `pool.pending-acquire-max-count: 0`.
@@ -455,7 +467,7 @@ only the TimeLimiter covers them.
 | `sidecar-base-url` | `String` | `http://localhost:8042` | Default base URL when an endpoint sets none. |
 | `connect-timeout-ms` | `Long` | `100` | TCP connect timeout of the engine (small because app→sidecar is localhost + plaintext). |
 | `pending-acquire-timeout-ms` | `Long` | `200` | Fail fast on pool exhaustion. |
-| `max-connections` | `Int` | `100` | Cap on the shared pool. |
+| `max-connections` | `Int` | `100` | Cap on the pool: per destination on `jetty` and `apache`, per backend on `reactor-netty` (§1.2), not applied on `jdk`. |
 
 > **Computed, not configurable:** `timeLimiterMargin = connectTimeoutMs + pendingAcquireTimeoutMs + 100`
 > headroom. Because it is derived from *these* caps, the TimeLimiter always overshoots the worst-case
@@ -575,8 +587,8 @@ resilience4j:
   the breaker of whichever backend is waiting. `ResilienceConfigContractTest` fails the build when the reference
   configuration or the test fixture breaks the rule; for a host's own configuration `MeshResilienceStartupGuard`
   (veredium-core) logs a **WARN** at startup naming the sum, the pool size and every alias - not a failed start,
-  since an over-committed pool can be deliberate. The sum is conservative on this stack: Reactor Netty caps
-  connections per remote address, so an endpoint with its own `base-url` has a sub-pool of its own.
+  since an over-committed pool can be deliberate. The sum is conservative on `reactor-netty`, where each backend
+  has a sub-pool of its own (see above), and exact for the engines that share one pool per destination.
 - **Why `max-wait-duration: 0`.** A bulkhead that waits for a permit does so inside `subscribe()`, on the
   subscribing thread, *before* the TimeLimiter's timer starts (Resilience4j's reactive bulkhead acquires before it
   passes its subscription on; Reactor's `timeout` starts counting on that subscription). A waiting caller

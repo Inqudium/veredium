@@ -2,6 +2,8 @@ package eu.inqudium.veredium.restclient
 
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
+import eu.inqudium.veredium.core.mesh.MeshConnectionPool
+import eu.inqudium.veredium.core.mesh.MeshConnectionPools
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
@@ -93,7 +95,7 @@ class ResilientRestClientFactory(
      * is reached by a test that says an engine is absent instead of one that builds a classpath without it.
      */
     private val engineLibraryPresent: (RestClientEngine) -> Boolean = RestClientEngine::isPresent,
-) {
+) : MeshConnectionPools {
     private val logger: Logger = LoggerFactory.getLogger(ResilientRestClientFactory::class.java)
 
     /** Which backends validate, with which validator, and whether a violation fails the call - see [ResponseValidation]. */
@@ -163,17 +165,22 @@ class ResilientRestClientFactory(
      * the factory does.
      */
     private val transports: Map<RestClientEngine, EngineTransport> =
-        engineByBackend.values
-            .toSortedSet()
-            .associateWith { engine ->
-                val settings = EngineTransport.Settings(meshTransport, properties.pool, meterRegistry)
-                when (engine) {
-                    RestClientEngine.APACHE -> ApacheEngineTransport(settings)
-                    RestClientEngine.JDK -> JdkEngineTransport(settings)
-                    RestClientEngine.JETTY -> JettyEngineTransport(settings)
-                    RestClientEngine.REACTOR_NETTY -> ReactorNettyEngineTransport(settings)
-                }
+        EngineTransport.createAll(engineByBackend.values.toSortedSet(), logger) { engine ->
+            val settings = EngineTransport.Settings(meshTransport, properties.pool, meterRegistry)
+            when (engine) {
+                RestClientEngine.APACHE -> ApacheEngineTransport(settings)
+                RestClientEngine.JDK -> JdkEngineTransport(settings)
+                RestClientEngine.JETTY -> JettyEngineTransport(settings)
+                RestClientEngine.REACTOR_NETTY -> ReactorNettyEngineTransport(settings)
             }
+        }
+
+    /**
+     * Set by [shutdown]. A client built afterwards would run on an engine that is already closed - the engines are
+     * created with the factory and never again - so [create] refuses it with a message instead.
+     */
+    @Volatile
+    private var shutDown = false
 
     init {
         // The engine of every backend, and per engine what of the mesh ladder and the pool settings it applies.
@@ -188,6 +195,19 @@ class ResilientRestClientFactory(
             logger.info(transport.settingsLine(engineByBackend.filterValues { it == engine }.keys.sorted()))
         }
     }
+
+    /**
+     * One pool per engine in use, with the backends on it - what the startup guard sizes the bulkheads against.
+     * The JDK client has no connection bound, so its pool carries none.
+     */
+    override fun connectionPools(): List<MeshConnectionPool> =
+        transports.keys.map { engine ->
+            MeshConnectionPool(
+                name = "restclient-${engine.key}",
+                maxConnections = meshTransport.maxConnections.takeUnless { engine == RestClientEngine.JDK },
+                aliases = engineByBackend.filterValues { it == engine }.keys,
+            )
+        }
 
     /** The Apache engine's background eviction, when Apache is in use - see [ApacheEngineTransport.evictor]. */
     internal val evictor: ScheduledExecutorService? get() = (transports[RestClientEngine.APACHE] as? ApacheEngineTransport)?.evictor
@@ -258,11 +278,15 @@ class ResilientRestClientFactory(
      * entry whose alias equals [backendName] and from its `app.restclient.engine` selection.
      *
      * @throws IllegalStateException if no mesh endpoint with that alias is configured - failing fast at
-     *         startup beats a confusing 404/connection error at the first call.
+     *         startup beats a confusing 404/connection error at the first call - or if the factory was already
+     *         shut down and the client was not built before.
      */
     fun create(backendName: String): ResilientRestClient = cache.computeIfAbsent(backendName, ::build)
 
     private fun build(backendName: String): ResilientRestClient {
+        check(!shutDown) {
+            "ResilientRestClientFactory was shut down; a client for backend '$backendName' would run on a closed HTTP engine"
+        }
         val endpoint =
             meshByBackend[backendName]
                 ?: error(
@@ -349,14 +373,16 @@ class ResilientRestClientFactory(
      * An engine that does not drain in time is an OUTCOME, not a failure - reported as the statement it is and
      * closed anyway, never as an exception out of a destroy callback, where Spring could only log a stack trace at
      * the moment someone is looking for one. The wait also ends when the calling thread is INTERRUPTED (a
-     * container tearing the context down under a deadline of its own); the flag is left for the caller.
+     * container tearing the context down under a deadline of its own); the flag is left for the caller. An engine
+     * whose shutdown throws is reported as such and does not keep the engines after it open.
      *
      * Idempotent: Spring calls it once, tests may call it twice; a closed engine closes again without complaint.
      */
     @PreDestroy
     fun shutdown() {
+        shutDown = true
         val deadline = nanoTime() + poolDisposeTimeout.toNanos()
-        transports.values.forEach { it.shutdown(deadline, nanoTime, poolDisposeTimeout, logger) }
+        EngineTransport.shutdownAll(transports.values, deadline, nanoTime, poolDisposeTimeout, logger)
     }
 }
 

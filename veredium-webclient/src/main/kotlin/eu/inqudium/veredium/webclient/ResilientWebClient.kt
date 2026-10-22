@@ -16,9 +16,12 @@ import org.slf4j.event.Level
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.WebClientResponseException
 import reactor.core.publisher.Mono
+import reactor.core.publisher.Operators
+import reactor.util.context.Context
 import tools.jackson.databind.ObjectMapper
 import java.time.Duration
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.function.Consumer
 
 /**
@@ -225,7 +228,11 @@ class ResilientWebClient(
 
                 // The source produces only the raw JSON string - all the CircuitBreaker, TimeLimiter and
                 // Bulkhead observe. Deserialisation is deliberately kept off this inner mono (see below).
-                val rawMono = spec.retrieve().bodyToMono(String::class.java)
+                // Set when the exchange itself is cancelled - by the TimeLimiter, the breaker's or the caller's
+                // cancellation travelling up - which is what makes a failure the engine reports afterwards the
+                // expected end of an aborted exchange (see the onErrorDropped hook at the end).
+                val exchangeCancelled = AtomicBoolean(false)
+                val rawMono = spec.retrieve().bodyToMono(String::class.java).doOnCancel { exchangeCancelled.set(true) }
 
                 // Deserialisation runs AFTER the decoration: a parse failure is a client-side error, so the
                 // CircuitBreaker must not see it as a failure and open the circuit while the backend is healthy.
@@ -267,20 +274,38 @@ class ResilientWebClient(
                     // dropped-error hook, which logs it at ERROR as if it had been lost. It is the expected end of
                     // an aborted exchange, so it is written at DEBUG instead. Outermost on purpose: the context
                     // reaches every operator above it, the decoration's included, and those are where it drops.
+                    //
+                    // ONLY that case: an error dropped while the exchange was NOT cancelled is a genuine anomaly of
+                    // some operator, and goes on to whatever would have handled it without this hook - a hook the
+                    // caller put in the context further down, or else Reactor's global handling (its hook, or its
+                    // ERROR line).
                     // Assumption: the key is Reactor's per-subscription onErrorDropped hook
                     // (`Hooks.KEY_ON_ERROR_DROPPED`, package-private, unchanged since Reactor 3.3); should it change,
                     // the line goes back to Reactor's ERROR, which WebClientEngineIntegrationTest pins against.
                     .contextWrite { context ->
+                        val downstream: Consumer<Throwable>? = context.getOrDefault(ON_ERROR_DROPPED_KEY, null)
                         context.put(
                             ON_ERROR_DROPPED_KEY,
                             Consumer<Throwable> { dropped ->
-                                ClientCallLog.withMdc(callerMdc) {
-                                    calls.log(
-                                        Level.DEBUG,
-                                        "Exchange of backend '{}' ended after cancellation: {}",
-                                        backendName,
-                                        dropped.toString(),
-                                    )
+                                when {
+                                    exchangeCancelled.get() -> {
+                                        ClientCallLog.withMdc(callerMdc) {
+                                            calls.log(
+                                                Level.DEBUG,
+                                                "Exchange of backend '{}' ended after cancellation: {}",
+                                                backendName,
+                                                dropped.toString(),
+                                            )
+                                        }
+                                    }
+
+                                    downstream != null -> {
+                                        downstream.accept(dropped)
+                                    }
+
+                                    else -> {
+                                        Operators.onErrorDropped(dropped, Context.empty())
+                                    }
                                 }
                             },
                         )

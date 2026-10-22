@@ -111,6 +111,10 @@ data class RestClientProperties(
         /**
          * Evict a connection that sat idle in the pool for longer than this. Enforced by the factory's eviction
          * schedule (`closeIdle`), every [evictInBackground].
+         *
+         * Must be positive. Zero has no reading the engines agree on: Reactor Netty evicts every idle connection at
+         * once (no keep-alive at all), Jetty takes it as "no idle timeout", Apache closes all idle connections at
+         * every sweep - so it is refused at binding rather than meaning three things.
          */
         val maxIdleTime: Duration = Duration.ofSeconds(30),
         /**
@@ -126,9 +130,13 @@ data class RestClientProperties(
     ) {
         init {
             // Negative durations are accepted by Apache's builders and then quietly mean something no operator
-            // intended: a connection that is due for eviction the moment it is created. Zero is left alone -
-            // for evictInBackground it is "off", for maxLifeTime it is "unbounded".
-            require(!maxIdleTime.isNegative) { "app.restclient.pool.max-idle-time must not be negative, but was $maxIdleTime" }
+            // intended: a connection that is due for eviction the moment it is created. Zero is left alone where
+            // every engine reads it alike - for evictInBackground it is "off", for maxLifeTime it is "unbounded" -
+            // and refused for maxIdleTime, where the engines read it in opposite ways (see its KDoc).
+            require(maxIdleTime.isPositive) {
+                "app.restclient.pool.max-idle-time must be positive (0 would mean no keep-alive on Reactor Netty and " +
+                    "no idle timeout on Jetty), but was $maxIdleTime"
+            }
             require(!maxLifeTime.isNegative) { "app.restclient.pool.max-life-time must not be negative, but was $maxLifeTime" }
             require(!evictInBackground.isNegative) {
                 "app.restclient.pool.evict-in-background must not be negative, but was $evictInBackground"

@@ -11,6 +11,7 @@ import org.springframework.http.HttpStatusCode
 import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.http.client.ClientHttpResponse
 import org.springframework.http.client.ReactorClientHttpRequestFactory
+import reactor.core.publisher.Mono
 import reactor.netty.Metrics
 import reactor.netty.http.client.HttpClient
 import reactor.netty.resources.ConnectionPoolMetrics
@@ -26,6 +27,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeoutException
 
 /**
  * The Reactor Netty engine ([RestClientEngine.REACTOR_NETTY]): one Reactor Netty `HttpClient` for every backend
@@ -63,7 +65,7 @@ import java.util.concurrent.Executors
  * thread while the worker waits for them interruptibly ([HandOffInputStream]): on an interrupt the worker closes
  * Spring's stream, which wakes the reader and cancels the inbound, and fails the read with an
  * `InterruptedIOException`. Closing a response whose body was not read to its end closes the stream first, so
- * the connection is released instead of drained - the moment Apache would discard its connection.
+ * the connection is released instead of drained.
  */
 internal class ReactorNettyEngineTransport(
     settings: Settings,
@@ -148,6 +150,10 @@ internal class ReactorNettyEngineTransport(
      * Waits until the deadline for the leased connections to come back (the same drain and line as the Apache
      * pool's), then disposes the pool and the event loops. A shutdown thread that was interrupted does not block
      * on the disposal: it is triggered and left to complete.
+     *
+     * A disposal that does not complete within [DISPOSE_WAIT] is an outcome, reported on [logger] - not the
+     * `IllegalStateException` a `block(Duration)` would throw out of the destroy callback, skipping the rest of
+     * the shutdown. The offload executor is shut down whatever happens before it.
      */
     override fun shutdown(
         deadlineNanos: Long,
@@ -156,15 +162,34 @@ internal class ReactorNettyEngineTransport(
         logger: Logger,
     ) {
         if (isClosed) return
-        drainOrReport(POOL_NAME, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
-        if (Thread.currentThread().isInterrupted) {
-            provider.dispose()
-            loops.dispose()
-        } else {
-            provider.disposeLater().block(DISPOSE_WAIT)
-            loops.disposeLater(Duration.ZERO, DISPOSE_WAIT).block(DISPOSE_WAIT)
+        try {
+            drainOrReport(POOL_NAME, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
+            if (Thread.currentThread().isInterrupted) {
+                provider.dispose()
+                loops.dispose()
+            } else {
+                awaitDisposal("connection pool", provider.disposeLater(), logger)
+                // The loops' own graceful timeout is shorter than the wait, so a loop group that takes all of it
+                // still completes before the wait ends.
+                awaitDisposal("event loops", loops.disposeLater(Duration.ZERO, LOOP_SHUTDOWN_TIMEOUT), logger)
+            }
+        } finally {
+            offload.shutdownNow()
         }
-        offload.shutdownNow()
+    }
+
+    /** Waits at most [DISPOSE_WAIT] for [disposal]; an expiry is reported, the resource is left to finish on its own. */
+    private fun awaitDisposal(
+        what: String,
+        disposal: Mono<Void>,
+        logger: Logger,
+    ) {
+        disposal
+            .timeout(DISPOSE_WAIT)
+            .onErrorResume(TimeoutException::class.java) {
+                logger.warn("HTTP engine '{}': {} not disposed within {} - leaving it to finish on its own", engine, what, DISPOSE_WAIT)
+                Mono.empty()
+            }.block()
     }
 
     /**
@@ -308,7 +333,10 @@ internal class ReactorNettyEngineTransport(
         /** The pool's name: its `name` tag, the event-loop and offload threads' prefix, the shutdown line's pool. */
         const val POOL_NAME: String = "restclient-reactor-netty"
 
-        /** How long [shutdown] blocks on the disposal after the drain, which has already waited for the exchanges. */
+        /** How long [shutdown] waits for each disposal after the drain, which has already waited for the exchanges. */
         val DISPOSE_WAIT: Duration = Duration.ofSeconds(5)
+
+        /** The event loops' own graceful-shutdown timeout, inside [DISPOSE_WAIT]. */
+        val LOOP_SHUTDOWN_TIMEOUT: Duration = Duration.ofSeconds(3)
     }
 }
