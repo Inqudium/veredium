@@ -216,7 +216,8 @@ binds the same key under `app.restclient.user-agent`.
 ### 1.6 `engine.*` — the HTTP engine (`WebClientProperties.Engine`, `WebClientEngine`)
 
 Which library carries a backend's exchanges. A shared default with per-alias overrides, the same shape as
-`validation.*` (§1.4):
+`validation.*` (§1.4). What each engine does on its own, and what the module does about it, is collected in
+[HTTP engine behaviour](../../docs/engine-behaviour.md).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -346,7 +347,7 @@ one after another - so a factory on several engines does not take the bound once
 pool closes its idle connections and lets in-flight calls finish on theirs, and its event loops are disposed
 once the bound has passed (daemon threads, so an exiting JVM is not held up); the JDK client shuts down in order -
 in-flight exchanges run to completion until the deadline, then it is shut down hard with a WARN; Jetty's client
-stops, which aborts its exchanges; Apache's I/O reactor shuts down gracefully until the deadline and is then
+waits for its in-flight exchanges until the deadline and then stops, with a WARN naming those it aborts; Apache's I/O reactor shuts down gracefully until the deadline and is then
 closed, with a WARN when the deadline ran out - and the exchanges it still had in flight are cancelled (WARN
 with their number), because closing the reactor completes none of their callers, who would otherwise wait out
 their budget. After `shutdown()` no new client can be built (`IllegalStateException`): it would create engine

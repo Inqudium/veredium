@@ -178,7 +178,7 @@ class ResilientWebClientFactory(
                 }
 
                 WebClientEngine.JETTY -> {
-                    JettyTransport(properties, meshTransport)
+                    JettyTransport(properties, meshTransport, logger)
                 }
 
                 WebClientEngine.APACHE -> {
@@ -317,8 +317,8 @@ class ResilientWebClientFactory(
      * Releases the resources of every engine in use on context shutdown, all of them against ONE deadline
      * [poolDisposeTimeout] from now - the engines are released one after another, and a bound per engine would
      * let the shutdown take that bound once per engine. Reactor Netty's pool is disposed (below) and its event
-     * loops once the bound has passed, the JDK client shut down in order, Jetty's client stopped (which aborts
-     * its exchanges), Apache's I/O reactor shut down gracefully. An engine that never built a client has nothing
+     * loops once the bound has passed, the JDK client shut down in order, Jetty's client stopped once its
+     * in-flight exchanges finished (or the deadline passed), Apache's I/O reactor shut down gracefully. An engine that never built a client has nothing
      * to release; afterwards, no client can be built any more ([create]).
      *
      * For Reactor Netty, what the disposal waits for is narrower than "drain": the pool is built without Reactor

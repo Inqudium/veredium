@@ -34,7 +34,9 @@ of this module is the reference configuration the contract tests pin - a library
 
 ## Engines
 
-The HTTP engine underneath the clients is selectable - for all backends, and per backend:
+The HTTP engine underneath the clients is selectable - for all backends, and per backend. What each engine does on
+its own, and what the module does about it, is collected in
+[HTTP engine behaviour](../../docs/engine-behaviour.md):
 
 ```yaml
 app:
@@ -181,6 +183,7 @@ gauges leave the host's registry with the pool. A client requested after `shutdo
 - [What maps to the reactive sibling and what differs](restclient-vs-webclient.md)
 - [Decisions this module relies on](decisions.md)
 - [The mesh timeout ladder](../../veredium-core/docs/mesh-timeout.md) (veredium-core)
+- [HTTP engine behaviour - what each engine does on its own](../../docs/engine-behaviour.md) (both clients)
 
 ## Provenance
 

@@ -28,9 +28,11 @@ import org.apache.hc.core5.reactor.IOReactorConfig
 import org.apache.hc.core5.reactor.IOReactorStatus
 import org.apache.hc.core5.util.TimeValue
 import org.apache.hc.core5.util.Timeout
+import org.eclipse.jetty.client.AbstractConnectionPool
 import org.eclipse.jetty.client.ConnectionPool
 import org.eclipse.jetty.client.DuplexConnectionPool
 import org.eclipse.jetty.client.Request
+import org.eclipse.jetty.client.transport.HttpDestination
 import org.eclipse.jetty.http.HttpCookieStore
 import org.slf4j.Logger
 import org.springframework.core.io.buffer.DataBuffer
@@ -48,12 +50,14 @@ import reactor.core.publisher.Mono
 import reactor.netty.resources.ConnectionProvider
 import reactor.netty.resources.LoopResources
 import java.net.URI
+import java.nio.channels.ClosedSelectorException
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.LockSupport
 import java.util.concurrent.locks.ReentrantLock
 import java.util.function.Function
 import kotlin.concurrent.withLock
@@ -331,10 +335,14 @@ internal class JdkTransport(
  * Not applied: `pending-acquire-timeout-ms` - Jetty has no timeout for a request waiting in its queue - and
  * `pool.evict-in-background`, because Jetty closes an idle connection on that connection's own idle timer
  * rather than in a background sweep.
+ *
+ * Shutdown drains, as on every other engine: Jetty's `stop` aborts the exchanges still running, so [release] first
+ * waits for them - the same wait, on the same counters, as the blocking module's Jetty engine.
  */
 internal class JettyTransport(
     properties: WebClientProperties,
     meshTransport: MeshProperties.Transport,
+    private val logger: Logger,
 ) : EngineTransport {
     override val engine: WebClientEngine = WebClientEngine.JETTY
 
@@ -361,19 +369,54 @@ internal class JettyTransport(
     override fun connectorFor(endpoint: ResolvedTimeouts): ClientHttpConnector = JettyEndpointConnector(connector, endpoint.responseTimeout)
 
     /**
-     * Stops the client: its exchanges are aborted, its connections closed and its thread pool stopped. Jetty's
-     * stop does not wait, so the shared deadline is not consumed here.
+     * Waits until [deadlineNanos] for the exchanges in flight to finish, then stops the client - its connections
+     * closed, its thread pool stopped, and whatever is still running aborted, with one WARN saying how many.
+     *
+     * The wait also ends when the calling thread is INTERRUPTED; the flag is left for the caller. Jetty's stop then
+     * runs on a thread of its own and is left to complete: it waits for Jetty's own threads regardless of an
+     * interrupt, and the shutdown thread must not.
      */
     override fun release(
         deadlineNanos: Long,
         nanoTime: () -> Long,
-    ) = client.stop()
+    ) {
+        if (client.isStopped) return
+        while (exchangesInFlight() > 0 && nanoTime() - deadlineNanos < 0 && !Thread.currentThread().isInterrupted) {
+            LockSupport.parkNanos(DRAIN_POLL_NANOS)
+        }
+        val interrupted = Thread.currentThread().isInterrupted
+        val left = exchangesInFlight()
+        if (left > 0) {
+            logger.warn(
+                "HTTP engine '{}' did not drain {} - stopping it with {} exchange(s) still in flight",
+                engine,
+                if (interrupted) "because the shutdown thread was interrupted" else "by the factory's shutdown deadline",
+                left,
+            )
+        }
+        if (interrupted) {
+            Thread.ofVirtual().name("$THREAD_NAME_PREFIX-stop").start { client.stop() }
+        } else {
+            client.stop()
+        }
+    }
+
+    /** Exchanges holding a connection or queued for one, over every destination - what [release] waits on. */
+    internal fun exchangesInFlight(): Int =
+        client.destinations.sumOf { destination ->
+            val httpDestination = destination as? HttpDestination
+            val active = (httpDestination?.connectionPool as? AbstractConnectionPool)?.activeConnectionCount ?: 0
+            active + (httpDestination?.queuedRequestCount ?: 0)
+        }
 
     override fun isReleased(): Boolean = client.isStopped
 
     companion object {
         /** The client's name, and so the name prefix of this engine's I/O threads. */
         const val THREAD_NAME_PREFIX: String = "veredium-webclient-jetty"
+
+        /** How often [release] re-checks the exchanges in flight. */
+        val DRAIN_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(50)
 
         /**
          * The Jetty queue capacity that means what `pool.pending-acquire-max-count` means on Reactor Netty: how
@@ -468,11 +511,16 @@ internal class ApacheTransport(
             ).setDefaultTlsConfig(TlsConfig.custom().setVersionPolicy(HttpVersionPolicy.FORCE_HTTP_1).build())
             .build()
 
+    /** Set when [release] starts - from then on a closed selector is the expected end of a worker, not a fault. */
+    @Volatile
+    private var releasing = false
+
     private val client: AbortableAsyncClient =
         AbortableAsyncClient(
             HttpAsyncClients
                 .custom()
                 .setConnectionManager(connectionManager)
+                .setIoReactorExceptionCallback(::onReactorException)
                 // Named after the module, like the other engines' threads, so a thread dump (and a test) tells
                 // this engine's I/O threads from a host's own Apache client; daemons, as Apache's default ones.
                 .setThreadFactory(DefaultThreadFactory(THREAD_NAME_PREFIX, true))
@@ -516,6 +564,7 @@ internal class ApacheTransport(
         deadlineNanos: Long,
         nanoTime: () -> Long,
     ) {
+        releasing = true
         evictor?.let { running ->
             running.shutdown()
             try {
@@ -545,10 +594,8 @@ internal class ApacheTransport(
         } else if (aborted > 0) {
             logger.warn("HTTP engine '{}' shut down with {} exchange(s) still in flight - cancelling them", engine, aborted)
         }
-        // Once nothing holds it, the reactor can end by itself; it is closed hard only if it still has not.
-        // Assumption: closing a reactor whose workers are still shutting down closes their selector under them,
-        // which Apache logs at ERROR as a ClosedSelectorException (httpcore5 5.4) - noise at the moment someone
-        // reads the shutdown log, avoided whenever the reactor can end by itself.
+        // Once nothing holds it, the reactor can end by itself; it is closed hard only if it still has not. A worker
+        // still shutting down then finds its selector closed under it - `onReactorException` takes that.
         if (client.status != IOReactorStatus.SHUT_DOWN) {
             try {
                 client.awaitShutdown(TimeValue.of(SHUTDOWN_AFTER_ABORT))
@@ -557,6 +604,24 @@ internal class ApacheTransport(
             }
         }
         client.close(if (client.status == IOReactorStatus.SHUT_DOWN) CloseMode.GRACEFUL else CloseMode.IMMEDIATE)
+    }
+
+    /**
+     * The I/O reactor's exception callback, in place of Apache's default, which logs every exception at ERROR.
+     *
+     * Assumption: closing the multi-core reactor while one of its workers is still shutting down closes that
+     * worker's selector under it, and the worker's termination (`closePendingChannels`) reports a
+     * [ClosedSelectorException] to this callback (httpcore5 5.4). The multi-core reactor reports `SHUT_DOWN` only
+     * once it is closed, so [release] cannot tell a worker that already ended from one that has not - on a slow
+     * machine the hard close regularly meets one that has not. During [release] that exception is the expected end
+     * of the worker, logged at DEBUG; any other exception, and one outside a release, stays an ERROR.
+     */
+    private fun onReactorException(ex: Exception) {
+        if (releasing && ex is ClosedSelectorException) {
+            logger.debug("HTTP engine '{}': an I/O worker ended on its closed selector during the release", engine)
+        } else {
+            logger.error("HTTP engine '{}': I/O reactor failure", engine, ex)
+        }
     }
 
     override fun isReleased(): Boolean = client.status == IOReactorStatus.SHUT_DOWN && evictor?.isRunning != true

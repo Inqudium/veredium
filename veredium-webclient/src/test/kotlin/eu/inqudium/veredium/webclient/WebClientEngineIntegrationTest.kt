@@ -73,6 +73,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -119,8 +120,15 @@ class WebClientEngineIntegrationTest {
          */
         private const val LONG_ANCHOR_MS = 10_000L
 
-        /** The engines that report a failure of the exchange AFTER the TimeLimiter's abort (client class KDoc). */
-        private val REPORTS_FAILURE_AFTER_ABORT = setOf(WebClientEngine.JDK, WebClientEngine.JETTY, WebClientEngine.APACHE)
+        /** The engines that report a failure of the exchange AFTER the TimeLimiter's abort, every time (client class KDoc). */
+        private val REPORTS_FAILURE_AFTER_ABORT = setOf(WebClientEngine.JETTY, WebClientEngine.APACHE)
+
+        /**
+         * The engine that reports such a late failure only SOMETIMES: cancelling the JDK client's future completes
+         * it at once, and whether the exchange's own failure follows depends on whether the JDK had already failed
+         * it - a race, decided differently on a loaded machine.
+         */
+        private val MAY_REPORT_FAILURE_AFTER_ABORT = setOf(WebClientEngine.JDK)
 
         @JvmStatic
         @BeforeAll
@@ -139,7 +147,7 @@ class WebClientEngineIntegrationTest {
 
         /** The two engines whose release waits for in-flight exchanges, each with a deadline ahead and one passed. */
         @JvmStatic
-        fun drainingEnginesAndDeadlines(): Stream<Arguments> = Stream.of(WebClientEngine.JDK, WebClientEngine.APACHE).flatMap { engine -> Stream.of(Arguments.of(engine, 300L), Arguments.of(engine, -1L)) }
+        fun drainingEnginesAndDeadlines(): Stream<Arguments> = Stream.of(WebClientEngine.JDK, WebClientEngine.JETTY, WebClientEngine.APACHE).flatMap { engine -> Stream.of(Arguments.of(engine, 300L), Arguments.of(engine, -1L)) }
 
         /** Every engine against both error statuses the mapping must preserve. */
         @JvmStatic
@@ -390,10 +398,11 @@ class WebClientEngineIntegrationTest {
             // Success criteria: against a backend that reads the request and never answers, the call fails with
             //   the TimeLimiter's TimeoutException (300 ms budget); the bulkhead has its one permit back; and the
             //   backend sees the client close the connection within a second of the timeout - before the 1400 ms
-            //   response timeout could have done it; and on the engines that report a failure after the abort, the
-            //   client's DEBUG line "ended after cancellation" for the backend arrives (bounded wait) while Reactor
-            //   logs no "onErrorDropped" ERROR - checked only AFTER that line, so the check cannot pass before the
-            //   engine's late failure was even reported.
+            //   response timeout could have done it; and on the engines that always report a failure after the
+            //   abort (Jetty, Apache), the client's DEBUG line "ended after cancellation" for the backend arrives
+            //   (bounded wait) while Reactor logs no "onErrorDropped" ERROR - checked only AFTER that line, so the
+            //   check cannot pass before the engine's late failure was even reported. The JDK client reports one
+            //   only sometimes; its line is waited for (bounded) but not required, and no ERROR is allowed either.
             // Why it matters: cancellation is how the budget frees what a stalled call holds. An engine that only
             //   drops the subscriber keeps the connection - and with it a pool slot - until the response timeout,
             //   so under a stalled backend the pool fills with exchanges nobody waits for. Spring's Apache
@@ -429,14 +438,25 @@ class WebClientEngineIntegrationTest {
         ) {
             SilentBackend().use { backend ->
                 val bulkheads = BulkheadRegistry.of(BulkheadConfig.custom().maxConcurrentCalls(1).build())
-                val client =
+                // Two backends on the engine: `warm` (WireMock) makes the engine's first exchange - its start, the
+                // class loading, the codec setup - before the 300 ms budget of `stalled` is measured; on a loaded
+                // machine the first exchange alone can take longer than that, and the budget would expire before
+                // the request reached the backend.
+                val stalledMesh = meshFor(listOf("stalled"), backend.baseUrl)
+                val mesh = stalledMesh.copy(endpoints = stalledMesh.endpoints + meshFor(listOf("warm"), wireMock.baseUrl()).endpoints)
+                val factory =
                     newFactory(
-                        engine,
-                        "stalled",
-                        baseUrl = backend.baseUrl,
+                        WebClientProperties.Engine(default = engine),
+                        listOf("stalled", "warm"),
                         timeLimiter = Duration.ofMillis(300),
                         bulkheads = bulkheads,
-                    ).create("stalled")
+                        mesh = mesh,
+                    )
+                wireMock.stubFor(get(urlEqualTo("/warm")).willReturn(okJson("""{"message":"warm"}""")))
+                // Its outcome does not matter - under load it may itself exceed the shared 300 ms budget; the engine is
+                // initialised either way.
+                catchThrowable { runBlocking { factory.create("warm").get(Greeting::class.java) { it.uri("/warm") }.awaitSingle() } }
+                val client = factory.create("stalled")
 
                 // When
                 val started = System.nanoTime()
@@ -450,12 +470,15 @@ class WebClientEngineIntegrationTest {
                     .`as`("the client closed the connection after the abort")
                     .isTrue()
                 assertThat(Duration.ofNanos(backend.closedAtNanos - started)).isLessThan(RESPONSE_TIMEOUT)
-                if (engine in REPORTS_FAILURE_AFTER_ABORT) {
+                if (engine in REPORTS_FAILURE_AFTER_ABORT || engine in MAY_REPORT_FAILURE_AFTER_ABORT) {
+                    // Bounded wait for the late failure, so the ERROR check below does not pass before it came.
                     val lateFailure =
                         eventually {
                             clientLines.events.any { it.level == Level.DEBUG && it.formattedMessage.startsWith("Exchange of backend 'stalled' ended after cancellation") }
                         }
-                    assertThat(lateFailure).`as`("the engine's failure after the abort was written at DEBUG").isTrue()
+                    if (engine in REPORTS_FAILURE_AFTER_ABORT) {
+                        assertThat(lateFailure).`as`("the engine's failure after the abort was written at DEBUG").isTrue()
+                    }
                 }
                 assertThat(dropped.events.filter { it.level == Level.ERROR }.map { it.formattedMessage }).isEmpty()
             }
@@ -743,17 +766,20 @@ class WebClientEngineIntegrationTest {
             engine: WebClientEngine,
             deadlineMillis: Long,
         ) {
-            // What is tested: the release of the two engines that WAIT for in-flight exchanges - the JDK client's
-            //   orderly shutdown and Apache's graceful reactor shutdown - against an exchange that never ends,
-            //   with a deadline 300 ms ahead and one that has already passed.
+            // What is tested: the release of the engines that WAIT for in-flight exchanges here - the JDK client's
+            //   orderly shutdown, Jetty's wait on its active and queued exchanges, and Apache's graceful reactor
+            //   shutdown - against an exchange that never ends, with a deadline 300 ms ahead and one that has
+            //   already passed.
             // Success criteria: release() returns within 2 s; the transport reports itself released; the held
             //   exchange's connection is closed and its CALL fails at once (not at its 30 s budget); and the
             //   factory's logger has a WARN for the engine - "did not drain by the factory's shutdown deadline"
-            //   for the JDK client, which waits for the exchange, and for Apache with the deadline already passed;
+            //   for the JDK client and Jetty, which wait for the exchange, and for Apache with the deadline already
+            //   passed;
             //   for Apache with the deadline ahead either that line or "exchange(s) still in flight", because
             //   whether its graceful reactor shutdown ends before the deadline with the exchange's connection
-            //   still open varies from run to run; and Apache logs no ERROR (a reactor closed hard while still shutting
-            //   down logs a ClosedSelectorException).
+            //   still open varies from run to run; and no ERROR is logged, neither by Apache nor by the factory (a
+            //   reactor closed hard while a worker is still shutting down reports a ClosedSelectorException, which
+            //   during the release is the worker's expected end).
             // Why it matters: the bound is the whole point of a draining shutdown - a context close must not wait
             //   for an exchange the backend never ends, and the caller of that exchange must not be left waiting
             //   for its budget either (Apache's hard close completes no callback of an exchange in flight). A deadline already spent by an engine released before
@@ -787,7 +813,7 @@ class WebClientEngineIntegrationTest {
                     assertThat(elapsed).isLessThan(Duration.ofSeconds(2))
                     val warnings = lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage }
                     val drained = "did not drain by the factory's shutdown deadline"
-                    if (engine == WebClientEngine.JDK || deadlineMillis < 0) {
+                    if (engine != WebClientEngine.APACHE || deadlineMillis < 0) {
                         assertThat(warnings).anySatisfy { assertThat(it).contains("'$engine'", drained) }
                     } else {
                         assertThat(warnings).anySatisfy { assertThat(it).contains("'$engine'").containsAnyOf(drained, "exchange(s) still in flight") }
@@ -796,10 +822,103 @@ class WebClientEngineIntegrationTest {
                     assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
                     assertThat(catchThrowable { held.get(2, TimeUnit.SECONDS) }).isNotNull().isNotInstanceOf(TimeoutException::class.java)
                     assertThat(engineLines.events.filter { it.level == Level.ERROR }.map { it.throwableProxy?.className }).isEmpty()
+                    assertThat(lines.events.filter { it.level == Level.ERROR }.map { it.formattedMessage }).isEmpty()
                 }
             } finally {
                 logger.detachAppender(lines)
                 engineLog.detachAppender(engineLines)
+            }
+        }
+    }
+
+    @Nested
+    inner class `Jetty's shutdown` {
+        @Test
+        fun `should let an in-flight exchange finish before stopping the client`() {
+            // What is tested: the drain of the Jetty engine's release - an exchange still on the wire when the
+            //   release starts, answered 500 ms later, well before the deadline.
+            // Success criteria: the call SUCCEEDS with the backend's answer; release() waited for it (at least
+            //   100 ms) and then stopped the client; the factory logs no WARN.
+            // Why it matters: Jetty's stop aborts every exchange still running. Without the wait a graceful
+            //   shutdown would fail the calls in flight on this engine alone - the other engines, and Jetty on the
+            //   blocking side, let them finish.
+            //
+            // Given
+            wireMock.stubFor(get(urlEqualTo("/finishing")).willReturn(okJson("""{"message":"finished"}""").withFixedDelay(500)))
+            val arrived = CountDownLatch(1)
+            wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/finishing") arrived.countDown() }
+            val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
+            val lines = ConcurrentAppender().apply { start() }
+            logger.addAppender(lines)
+            try {
+                val factory = newFactory(WebClientEngine.JETTY, "draining")
+                val call = factory.create("draining").get(Greeting::class.java) { it.uri("/finishing") }.toFuture()
+                assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
+                val transport = factory.startedEngines().getValue(WebClientEngine.JETTY)
+
+                // When
+                val started = System.nanoTime()
+                transport.release(started + TimeUnit.SECONDS.toNanos(5), System::nanoTime)
+                val waited = Duration.ofNanos(System.nanoTime() - started)
+
+                // Then
+                assertThat(call.get(2, TimeUnit.SECONDS)?.message).isEqualTo("finished")
+                assertThat(waited).`as`("release() must have waited for the exchange").isGreaterThan(Duration.ofMillis(100))
+                assertThat(transport.isReleased()).isTrue()
+                assertThat(lines.events.filter { it.level == Level.WARN }).isEmpty()
+            } finally {
+                logger.detachAppender(lines)
+            }
+        }
+
+        @Test
+        fun `should stop waiting when the shutdown thread is interrupted and leave the flag set`() {
+            // What is tested: the interrupt exit of the Jetty engine's drain, against an exchange that never ends
+            //   and a deadline far off.
+            // Success criteria: release() on an interrupted thread returns within 2 s, the flag is still set, the
+            //   WARN names the interrupt, and the client is stopped shortly after (its stop runs on a thread of
+            //   its own), which closes the held connection.
+            // Why it matters: a container tearing the context down under its own deadline interrupts the
+            //   shutdown thread. Jetty's stop waits for its own threads regardless of the interrupt; run on the
+            //   shutdown thread it would hold the shutdown anyway.
+            //
+            // Given
+            val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
+            val lines = ConcurrentAppender().apply { start() }
+            logger.addAppender(lines)
+            try {
+                SilentBackend().use { backend ->
+                    val factory =
+                        newFactory(
+                            WebClientProperties.Engine(default = WebClientEngine.JETTY),
+                            listOf("held"),
+                            mesh = meshFor(listOf("held"), backend.baseUrl, anchors = mapOf("held" to LONG_ANCHOR_MS)),
+                        )
+                    val held = factory.create("held").get(Greeting::class.java) { it.uri("/held") }.toFuture()
+                    assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
+                    val transport = factory.startedEngines().getValue(WebClientEngine.JETTY)
+
+                    // When
+                    val release =
+                        CompletableFuture.supplyAsync(
+                            {
+                                Thread.currentThread().interrupt()
+                                transport.release(System.nanoTime() + TimeUnit.MINUTES.toNanos(1), System::nanoTime)
+                                Thread.currentThread().isInterrupted
+                            },
+                            { task -> Thread.ofVirtual().start(task) },
+                        )
+
+                    // Then
+                    assertThat(release.get(2, TimeUnit.SECONDS)).`as`("the interrupt flag must survive release()").isTrue()
+                    assertThat(lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage })
+                        .anySatisfy { assertThat(it).contains("'jetty'", "because the shutdown thread was interrupted") }
+                    assertThat(eventually { transport.isReleased() }).`as`("the client stops on its own thread").isTrue()
+                    assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
+                    assertThat(catchThrowable { held.get(2, TimeUnit.SECONDS) }).isNotNull().isNotInstanceOf(TimeoutException::class.java)
+                }
+            } finally {
+                logger.detachAppender(lines)
             }
         }
     }

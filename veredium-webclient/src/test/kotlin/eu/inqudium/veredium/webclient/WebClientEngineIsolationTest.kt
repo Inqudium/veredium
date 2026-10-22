@@ -84,17 +84,18 @@ class WebClientEngineIsolationTest {
         /**
          * The threads each engine of THIS module answers on, as a regex: the factory's own Reactor Netty loops
          * (named after its pool - Boot's global ones are `reactor-http-...`), Jetty's and Apache's pools named
-         * after the module, and for the JDK client the common fork-join pool it completes on (this module's JDK
-         * client is the only one in the cases where it is selected).
+         * after the module, and for the JDK client either its own executor's worker threads or the common fork-join
+         * pool - it delivers on both (this module's JDK client is the only one in the cases where it is selected).
          */
         private val MODULE_ENGINE_THREAD =
             mapOf(
                 WebClientEngine.REACTOR_NETTY to "${ResilientWebClientFactory.POOL_NAME}-.*",
                 WebClientEngine.JETTY to "${JettyTransport.THREAD_NAME_PREFIX}-.*",
                 WebClientEngine.APACHE to "${ApacheTransport.THREAD_NAME_PREFIX}-.*",
-                // The JDK client hands every completion to the common fork-join pool (HttpClientImpl.sendAsync);
-                // no other engine, Boot's included, delivers a response there.
-                WebClientEngine.JDK to "ForkJoinPool\\.commonPool-worker-\\d+",
+                // The JDK client delivers on its default executor's threads (`HttpClient-<n>-Worker-<m>`) or hands a
+                // completion to the common fork-join pool, depending on timing - both seen; no other engine, Boot's
+                // included, delivers a response on either.
+                WebClientEngine.JDK to "HttpClient-\\d+-Worker-\\d+|ForkJoinPool\\.commonPool-worker-\\d+",
             )
 
         /** The User-Agent prefix each engine sends on its own - the wire evidence of which engine served a call. */
