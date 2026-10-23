@@ -665,6 +665,61 @@ class RestClientEngineIntegrationTest {
 
         @ParameterizedTest
         @EnumSource(RestClientEngine::class)
+        fun `should let a call still waiting for a connection finish before closing the engine`(engine: RestClientEngine) {
+            // What is tested: the drain of shutdown() on each engine for a call that is not yet on a connection
+            //   when the shutdown starts - max-connections 1, one call holding the connection for 500 ms, a second
+            //   call of the same backend waiting for it (on the JDK client, whose pool is unbounded, on a
+            //   connection of its own).
+            // Success criteria: BOTH calls succeed with the backend's answer; shutdown() raises nothing; no
+            //   "did not drain" / "did not terminate" WARN.
+            // Why it matters: a call queued for a connection is in flight for its caller as much as one on the
+            //   wire. A drain that counts only the connections handed out could close the pool in the moment the
+            //   first call gives its connection back, before the waiting one has taken it - the reactive engines
+            //   failed such a call before their release waited for it.
+            //
+            // Given
+            wireMock.stubFor(get(urlEqualTo("/queued")).willReturn(okJson("""{"message":"served"}""").withFixedDelay(500)))
+            val arrived = CountDownLatch(1)
+            wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/queued") arrived.countDown() }
+            val bulkheads = BulkheadRegistry.ofDefaults()
+            val mesh =
+                MeshProperties(
+                    defaults =
+                        MeshProperties.Defaults(
+                            individualRequestTimeoutMs = 3_000,
+                            transport =
+                                MeshProperties.Transport(
+                                    sidecarBaseUrl = wireMock.baseUrl(),
+                                    maxConnections = 1,
+                                    pendingAcquireTimeoutMs = 3_000,
+                                ),
+                        ),
+                    endpoints = listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/${localAuthority()}/GET/queued", alias = "queued")),
+                )
+            val factory = newFactory(RestClientProperties.Engine(default = engine), mesh = mesh, bulkheads = bulkheads)
+            val client = factory.create("queued")
+            val first = callers.submit<Greeting> { client.get(Greeting::class.java) { it.uri("/queued") } }
+            assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the first request reached the backend").isTrue()
+            val second = callers.submit<Greeting> { client.get(Greeting::class.java) { it.uri("/queued") } }
+            val bulkhead = bulkheads.bulkhead("queued")
+            awaitCondition("the second call must have started its exchange") {
+                bulkhead.metrics.availableConcurrentCalls == bulkhead.bulkheadConfig.maxConcurrentCalls - 2
+            }
+
+            capturingFactoryWarnings { warnings ->
+                // When
+                val (outcome, _) = timed { factory.shutdown() }
+
+                // Then
+                assertThat(outcome).isNull()
+                assertThat(first.get(5, TimeUnit.SECONDS).message).isEqualTo("served")
+                assertThat(second.get(5, TimeUnit.SECONDS).message).isEqualTo("served")
+                assertThat(warnings()).isEmpty()
+            }
+        }
+
+        @ParameterizedTest
+        @EnumSource(RestClientEngine::class)
         fun `should report an engine that does not drain by the deadline and close it anyway`(engine: RestClientEngine) {
             // What is tested: the deadline branch of each engine's shutdown, on a clock that is past the deadline
             //   at its next read.

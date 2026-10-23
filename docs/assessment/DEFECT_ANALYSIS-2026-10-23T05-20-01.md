@@ -138,7 +138,7 @@ Kategorien: test quality 16, resources 1, robustness 1, maintainability 1.
 
 Befund 1 ist behoben, auf Branch `fix/reactive-apache-drain` über Commit
 `6d423d61cdacb0be8d4b466483b69378484e9a70`. Ein `mvn -o clean verify` über alle Module ist grün: 651 Tests
-(core 196, restclient 233, webclient 221 + 1 im eigenen JDK-Flag-Lauf), 0 Fehler, ktlint sauber. Die Änderungen
+(core 196, restclient 233, webclient 221 + 1 im eigenen JDK-Flag-Lauf; mit dem restclient-Zwillingsfall restclient 237), 0 Fehler, ktlint sauber. Die Änderungen
 stehen in `./CHANGELOG.md` unter „Fixed“.
 
 **Die Gegenprobe hat Befund 1 präzisiert:**
@@ -175,8 +175,10 @@ stehen in `./CHANGELOG.md` unter „Fixed“.
 
 - Mit `disposeTimeout` loggt Reactor Netty einen Pool, der über die Drain-Grenze hinaus nicht leer wird, selbst
   mit ERROR („didn't shut down gracefully“). Vorher hat die Factory ihn schon per WARN gemeldet.
-- Nicht geprüft: ob die blockierenden Engines (`veredium-restclient`) einen auf eine Verbindung wartenden Aufruf
-  ebenso drainieren. Ihr Drain wartet auf die vergebenen Verbindungen, nicht auf wartende Acquires.
+- Die blockierenden Engines (`veredium-restclient`) sind nicht betroffen: Der Zwillingsfall „should let a call
+  still waiting for a connection finish before closing the engine“ ist auf allen vier Engines grün, je dreimal.
+  Gegenprobe: Ohne `drainOrReport` im Reactor-Netty-Transport wird er rot. Die Übergabe einer zurückgegebenen
+  Verbindung an den wartenden Acquire hält die Zahl der vergebenen Verbindungen über null.
 
 Die Befunde 2–19 sind offen.
 
