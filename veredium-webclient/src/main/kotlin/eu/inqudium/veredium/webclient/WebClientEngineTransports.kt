@@ -779,8 +779,9 @@ internal class AbortableAsyncClient(
 
     override fun initiateShutdown() = delegate.initiateShutdown()
 
-    // Compatibility: abstract in CloseableHttpAsyncClient and deprecated there (httpclient5 5.6), so it is still
-    // overridden - and delegated unchanged - but carries the deprecation on, rather than hiding it.
+    // Compatibility: never called - neither this module nor Spring's connector registers a push handler, and the
+    // engine speaks HTTP/1.1 only, which has no server push. It exists because CloseableHttpAsyncClient declares it
+    // abstract; deprecated there (httpclient5 5.6), it is delegated unchanged and carries the deprecation on.
     @Deprecated("Deprecated in Apache's CloseableHttpAsyncClient; delegated unchanged")
     @Suppress("DEPRECATION")
     override fun register(
