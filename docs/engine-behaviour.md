@@ -26,6 +26,45 @@ Versions, as the Spring Boot BOM resolves them today:
 "Blocking" means `veredium-restclient` (Spring's `ClientHttpRequestFactory` adapters), "reactive" means
 `veredium-webclient` (Spring's `ClientHttpConnector` adapters).
 
+## Choosing an engine
+
+Measured against the topics below - which of the expected behaviours an engine meets by itself, which only with a
+workaround of the module's, and which not at all - **the defaults are the engines to choose: Apache HttpClient 5 on
+the blocking stack, Reactor Netty on the reactive one.** Jetty is a sound second choice on both, for a host that
+runs Jetty anyway. The JDK client is the weakest on both.
+
+### Blocking
+
+| | Apache (default) | Jetty | Reactor Netty | JDK |
+|---|---|---|---|---|
+| Connection bound, waiting for a connection (§3, §4) | both applied, the wait included | the wait bounded only by the request's total timeout; queue of 1024 | the queue length cannot be set | **neither**: no bound, nothing to wait for |
+| Abandoning an exchange (§9) | **native**: an interrupt closes the socket; nothing to add | the request runs on and Jetty swallows the interrupt; fixed by the module | body reads ignore the interrupt; fixed by hand-off threads | native |
+| Idle and old connections (§5) | applied | applied, no background eviction | applied | **not applied**: JVM-wide properties only |
+| Retries, redirects, headers (§6, §7) | all switched off | applied | applied | connect retry and GET re-send cannot be switched off; `Host` is restricted |
+| Shutdown (§12) | clean drain | non-daemon threads, stopped with the factory | one hang seen on CI after a late shutdown, not reproduced | clean |
+
+Apache meets every expectation. The one fix it needs is shared by all four blocking engines: a body not read to its
+end would otherwise be read to its end before the connection is given up (§10). It is also the only blocking
+engine with pool meters (§11).
+
+### Reactive
+
+| | Reactor Netty (default) | Jetty | Apache (async) | JDK |
+|---|---|---|---|---|
+| Waiting for a connection (§4) | applied | queue size applied; "nobody waits" (`0`) cannot be expressed | **the timeout is not enforced** (httpcore5's async pool) | nothing to wait for: no bound (§3) |
+| Abandoning an exchange (§9) | **native**: a cancel closes the connection | a cancelled body is aborted by the module | Spring drops the exchange's `Future`; fixed by `AbortableAsyncClient` | a body cancelled after the head is read on; **no fix** |
+| Compression (§8) | on | on | on | **off** |
+| Shutdown (§12) | graceful pool disposal | applied | ERROR on close and callbacks that never complete; several workarounds | applied |
+
+Reactor Netty is the library WebFlux is built on, and it needs no workaround to abandon an exchange. One thing to
+know: each backend's client carries its own settings, so `max-connections` applies **per backend**, not per engine
+(§3). Apache's async engine is, after the JDK client, the most fragile reactive choice: four of the six
+`Assumption:` comments in `WebClientEngineTransports.kt` are its own.
+
+The JDK client misses expectations on both stacks that no per-client setting can fix: no connection bound, no idle
+handling, retries that cannot be switched off, a restricted `Host` header - and on the reactive stack no gzip and no
+abort once the head arrived. It suits a host whose only reason is to add no HTTP library at all.
+
 ## 1. Connect timeout
 
 **Expected.** A connect gives up after `app.mesh.defaults.transport.connect-timeout-ms` (100 ms by default). The
@@ -629,8 +668,8 @@ Pinned per engine by "should let an in-flight exchange finish before closing the
 waiting for a connection finish before closing the engine", "should report an engine that does not drain by the
 deadline and close it anyway", "should stop waiting when the shutdown thread is interrupted and leave the flag set"
 and "should refuse a client requested after shutdown" (blocking), and by the reactive "Draining shutdown" (the same
-two cases on every engine), "Release against the shutdown deadline" and "Interrupted shutdown" cases. `EngineTransportLifecycleTest`
-and `EngineTransportsTest` pin the isolation of a failing release.
+two cases on every engine), "Release against the shutdown deadline" and "Interrupted shutdown" cases. `EngineSetTest`
+(`veredium-core`, the lifecycle both stacks share) pins the isolation of a failing release.
 
 ## Test infrastructure
 
