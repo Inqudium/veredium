@@ -311,7 +311,11 @@ internal class JdkTransport(
                 false
             }
         if (!terminated) {
-            logger.warn("HTTP engine '{}' did not drain by the factory's shutdown deadline - closing it with exchanges still open", engine)
+            logger.warn(
+                "HTTP engine '{}' did not drain {} - closing it with exchanges still open",
+                engine,
+                if (Thread.currentThread().isInterrupted) "because the shutdown thread was interrupted" else "by the factory's shutdown deadline",
+            )
             client.shutdownNow()
             // shutdownNow() aborts the exchanges and returns before the client's threads have ended; a short,
             // bounded wait makes `isReleased` true on return in the normal case without holding up a shutdown.
@@ -602,6 +606,7 @@ internal class ApacheTransport(
         while (client.inFlightCount() > 0 && nanoTime() - deadlineNanos < 0 && !Thread.currentThread().isInterrupted) {
             LockSupport.parkNanos(EngineTransport.DRAIN_POLL_NANOS)
         }
+        val interrupted = Thread.currentThread().isInterrupted && client.inFlightCount() > 0
         evictor?.let { running ->
             running.shutdown()
             try {
@@ -627,7 +632,9 @@ internal class ApacheTransport(
         // without completing its callback (httpclient5 5.6, httpcore5 5.4) - so the caller's Mono would wait for
         // its TimeLimiter. Cancelling them hands each caller its cancellation now.
         val aborted = client.abortInFlight()
-        if (timedOut) {
+        if (interrupted) {
+            logger.warn("HTTP engine '{}' did not drain because the shutdown thread was interrupted - closing it with exchanges still open", engine)
+        } else if (timedOut) {
             logger.warn("HTTP engine '{}' did not drain by the factory's shutdown deadline - closing it with exchanges still open", engine)
         } else if (aborted > 0) {
             logger.warn("HTTP engine '{}' shut down with {} exchange(s) still in flight - cancelling them", engine, aborted)
@@ -654,7 +661,7 @@ internal class ApacheTransport(
      * machine the hard close regularly meets one that has not. During [release] that exception is the expected end
      * of the worker, logged at DEBUG; any other exception, and one outside a release, stays an ERROR.
      */
-    private fun onReactorException(ex: Exception) {
+    internal fun onReactorException(ex: Exception) {
         if (releasing && ex is ClosedSelectorException) {
             logger.debug("HTTP engine '{}': an I/O worker ended on its closed selector during the release", engine)
         } else {
@@ -726,22 +733,25 @@ private class AbortOnBodyCancel(
  * first: an abort before the `Future` is attached cancels it on attachment.
  */
 internal class AbortableExchange {
-    private val future = AtomicReference<Future<*>?>()
-
-    @Volatile
-    private var aborted = false
+    /**
+     * `null` before either side, the attached `Future`, or [ABORTED]. One atomic state rather than a future and a
+     * flag: with two fields the two sides depend on the ORDER of their writes and reads, which a reordering edit
+     * breaks without any test noticing; here whichever side comes second sees the other's write in the same step.
+     */
+    private val state = AtomicReference<Any?>()
 
     fun attach(started: Future<*>) {
-        future.set(started)
-        if (aborted) started.cancel(true)
+        if (!state.compareAndSet(null, started)) started.cancel(true)
     }
 
     fun abort() {
-        aborted = true
-        future.get()?.cancel(true)
+        (state.getAndSet(ABORTED) as? Future<*>)?.cancel(true)
     }
 
     companion object {
+        /** The state of an exchange that was aborted, before or after its `Future` was attached. */
+        private val ABORTED = Any()
+
         /** The `HttpClientContext` attribute [ApacheEndpointConnector] puts the exchange under. */
         const val CONTEXT_ATTRIBUTE: String = "eu.inqudium.veredium.webclient.AbortableExchange"
     }

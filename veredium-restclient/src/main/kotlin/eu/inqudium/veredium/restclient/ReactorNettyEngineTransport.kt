@@ -20,6 +20,7 @@ import reactor.netty.resources.LoopResources
 import java.io.IOException
 import java.io.InputStream
 import java.io.InterruptedIOException
+import java.io.UncheckedIOException
 import java.net.SocketAddress
 import java.time.Duration
 import java.util.concurrent.Callable
@@ -185,16 +186,21 @@ internal class ReactorNettyEngineTransport(
         }
     }
 
-    /** Waits at most [DISPOSE_WAIT] for [disposal]; an expiry is reported, the resource is left to finish on its own. */
-    private fun awaitDisposal(
+    /**
+     * Waits at most [wait] ([DISPOSE_WAIT] in [shutdown]) for [disposal]; an expiry is reported, the resource is left
+     * to finish on its own. `internal` with the wait as a parameter so a test can reach the expiry without waiting
+     * the full [DISPOSE_WAIT].
+     */
+    internal fun awaitDisposal(
         what: String,
         disposal: Mono<Void>,
         logger: Logger,
+        wait: Duration = DISPOSE_WAIT,
     ) {
         disposal
-            .timeout(DISPOSE_WAIT)
+            .timeout(wait)
             .onErrorResume(TimeoutException::class.java) {
-                logger.warn("HTTP engine '{}': {} not disposed within {} - leaving it to finish on its own", engine, what, DISPOSE_WAIT)
+                logger.warn("HTTP engine '{}': {} not disposed within {} - leaving it to finish on its own", engine, what, wait)
                 Mono.empty()
             }.block()
     }
@@ -312,9 +318,32 @@ internal class ReactorNettyEngineTransport(
             if (len == 0) return 0
             // Closing wakes the reader through Spring's own resume, never through an interrupt: the reader parks in
             // the same interrupt-blind loop, which an interrupt would turn into a spin.
-            return handOff(offload, "Body read", onInterrupt = { _ -> source.close() }) { source.read(b, off, len) }
+            return handOff(offload, "Body read", onInterrupt = { _ -> source.close() }) { readUnwrapped(b, off, len) }
                 .also { if (it < 0) atEnd = true }
         }
+
+        /**
+         * [source]'s read, with a transport failure as the [IOException] it is. Spring's stream reports the
+         * inbound's error UNCHECKED (`Exceptions.propagate`, spring-web 7.0): a peer closing the connection
+         * mid-body arrives as Reactor's `ReactiveException` around a `PrematureCloseException`. Thrown on as that,
+         * it would pass Spring's `IOException` handling of the exchange - no `ResourceAccessException`, unlike
+         * every other engine - so it is unwrapped here as Spring's request unwraps the same failure while waiting
+         * for the head (`ReactorClientHttpRequest.convertException`).
+         */
+        private fun readUnwrapped(
+            b: ByteArray,
+            off: Int,
+            len: Int,
+        ): Int =
+            try {
+                source.read(b, off, len)
+            } catch (e: RuntimeException) {
+                throw when (val cause = e.cause) {
+                    is IOException -> cause
+                    is UncheckedIOException -> cause.cause ?: e
+                    else -> e
+                }
+            }
 
         fun closeUnlessAtEnd() {
             if (!atEnd) source.close()

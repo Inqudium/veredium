@@ -56,6 +56,7 @@ import reactor.test.scheduler.VirtualTimeScheduler
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -106,12 +107,25 @@ class ResilientWebClientIntegrationTest {
 
         private lateinit var wireMock: WireMockServer
 
+        /**
+         * What a request to a URL triggers once it reached WireMock, per test ([arrivalOf]) - behind ONE listener for
+         * the class, registered with the server: `resetAll()` does not remove a request listener, so one added per
+         * test would pile up and fire for a later test's request to the same URL. Cleared before every test.
+         */
+        private val arrivals = ConcurrentHashMap<String, () -> Unit>()
+
+        /** A latch that opens once a request to [url] reached WireMock in the current test. */
+        private fun arrivalOf(url: String): CountDownLatch = CountDownLatch(1).also { latch -> arrivals[url] = latch::countDown }
+
         @JvmStatic
         @BeforeAll
         fun startWireMock() {
             // Dynamic port keeps this test independent of the :8080 performance harness and of any other
             // WireMock instance, so it can run in the default build alongside everything else.
-            wireMock = WireMockServer(wireMockConfig().dynamicPort()).apply { start() }
+            wireMock =
+                WireMockServer(wireMockConfig().dynamicPort())
+                    .apply { start() }
+                    .also { server -> server.addMockServiceRequestListener { request, _ -> arrivals[request.url]?.invoke() } }
         }
 
         @JvmStatic
@@ -140,6 +154,7 @@ class ResilientWebClientIntegrationTest {
     @BeforeEach
     fun resetStubs() {
         wireMock.resetAll()
+        arrivals.clear()
     }
 
     /**
@@ -1101,8 +1116,7 @@ class ResilientWebClientIntegrationTest {
         // Given: an answer 1 s late - inside the endpoint's 1400 ms response timeout, so the transport lets it
         // through - a listener that fires once the request reached WireMock, and the factory logger capturing
         wireMock.stubFor(get(urlEqualTo("/in-flight")).willReturn(okJson("""{"message":"late"}""").withFixedDelay(1_000)))
-        val arrived = CountDownLatch(1)
-        wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/in-flight") arrived.countDown() }
+        val arrived = arrivalOf("/in-flight")
         val factory = newFactory("in-flight")
         val client = factory.create("in-flight")
         val factoryLines = CapturingAppender("Connection pool", "never-terminal").apply { start() }

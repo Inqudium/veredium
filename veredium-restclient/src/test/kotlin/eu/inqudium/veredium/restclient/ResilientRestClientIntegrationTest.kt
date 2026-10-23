@@ -63,6 +63,7 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
@@ -112,15 +113,33 @@ class ResilientRestClientIntegrationTest {
 
         private lateinit var wireMock: WireMockServer
 
+        /**
+         * What a request to a URL triggers once it reached WireMock, per test ([arrivalOf]) - behind ONE listener for
+         * the class, registered with the server: `resetAll()` does not remove a request listener, so one added per
+         * test would pile up and fire for a later test's request to the same URL. Cleared before every test.
+         */
+        private val arrivals = ConcurrentHashMap<String, () -> Unit>()
+
+        /** A latch that opens once a request to [url] reached WireMock in the current test. */
+        private fun arrivalOf(url: String): CountDownLatch = CountDownLatch(1).also { latch -> arrivals[url] = latch::countDown }
+
         @JvmStatic
         @BeforeAll
         fun startWireMock() {
             // Dynamic port keeps this test independent of any other WireMock instance, so it can run in the
             // default build alongside everything else. Responses carry a Content-Length rather than being
             // chunked, the shape a JSON API answers in - and the shape the buffer-limit line reads the header from.
+            // Asynchronous responses: a delayed answer waits on WireMock's scheduler instead of a container thread,
+            // so the 30 s delays the abandoned calls leave behind hold no thread a later case needs.
             wireMock =
-                WireMockServer(wireMockConfig().dynamicPort().useChunkedTransferEncoding(Options.ChunkedEncodingPolicy.NEVER))
-                    .apply { start() }
+                WireMockServer(
+                    wireMockConfig()
+                        .dynamicPort()
+                        .useChunkedTransferEncoding(Options.ChunkedEncodingPolicy.NEVER)
+                        .asynchronousResponseEnabled(true)
+                        .asynchronousResponseThreads(16),
+                ).apply { start() }
+                    .also { server -> server.addMockServiceRequestListener { request, _ -> arrivals[request.url]?.invoke() } }
         }
 
         @JvmStatic
@@ -144,6 +163,7 @@ class ResilientRestClientIntegrationTest {
     @BeforeEach
     fun resetStubs() {
         wireMock.resetAll()
+        arrivals.clear()
     }
 
     @AfterEach
@@ -826,8 +846,7 @@ class ResilientRestClientIntegrationTest {
         //
         // Given: a backend that does not answer within the test's window, and the client logger capturing
         wireMock.stubFor(get(urlEqualTo("/never")).willReturn(okJson("{}").withFixedDelay(30_000)))
-        val inFlight = CountDownLatch(1)
-        wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/never") inFlight.countDown() }
+        val inFlight = arrivalOf("/never")
         val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
         val clientEvents = CapturingAppender("backend 'cancelled'", COMPLETED_PREFIX).apply { start() }
         val previousClientLevel = clientLogger.level
@@ -1124,8 +1143,10 @@ class ResilientRestClientIntegrationTest {
                         Thread.currentThread().isInterrupted
                     }
 
-                // Then: it returns well inside the derived window (which carries a full second of slack alone) ...
-                val flagStillSet = shutdown.get(1, TimeUnit.SECONDS)
+                // Then: it returns well inside the derived window (2.7 s here, a full second of slack alone) - 2 s,
+                // the bound the engine cases use for the same exit, leaves room for a loaded runner and still fails
+                // a drain that waited the window out or spun until the backend's answer at 5 s ...
+                val flagStillSet = shutdown.get(2, TimeUnit.SECONDS)
                 // ... leaves the interrupt for the caller ...
                 assertThat(flagStillSet).`as`("the interrupt flag must survive shutdown()").isTrue()
                 // ... and says why it stopped waiting
@@ -1142,8 +1163,9 @@ class ResilientRestClientIntegrationTest {
     fun `should close the pool on shutdown without raising out of the destroy callback`() {
         // What is tested: that shutdown() completes normally when the pool holds a live keep-alive connection,
         //   and that calling it twice is harmless.
-        // Success criteria: neither call throws, and the exchange that populated the pool did reach the
-        //   backend - so there genuinely was a connection to close rather than an empty pool.
+        // Success criteria: neither call throws; the exchange that populated the pool did reach the backend -
+        //   so there genuinely was a connection to close rather than an empty pool - and after the first call the
+        //   pool is closed.
         // Why it matters: shutdown() runs as a @PreDestroy, where Spring can only catch what it
         //   throws and log it as a destroy method that failed. The drain deadline is an outcome, reported as a
         //   WARN naming the pool; that branch is covered by the two cases above, on an injected clock.
@@ -1156,10 +1178,12 @@ class ResilientRestClientIntegrationTest {
 
         // When: the context is torn down
         val firstShutdown = catchThrowable { factory.shutdown() }
+        val closed = factory.engineTransports.getValue(RestClientEngine.APACHE).isClosed
         val secondShutdown = catchThrowable { factory.shutdown() }
 
         // Then
         assertThat(firstShutdown).`as`("closing a pool with a live connection must not raise").isNull()
+        assertThat(closed).`as`("the first shutdown() must close the pool").isTrue()
         assertThat(secondShutdown).`as`("shutdown must stay idempotent - Spring may call it once, tests twice").isNull()
         wireMock.verify(getRequestedFor(urlEqualTo("/bye")))
     }
@@ -1334,8 +1358,7 @@ class ResilientRestClientIntegrationTest {
         // Given: a backend that does not answer within the test's window, timeouts that would not end the
         // exchange either, a bulkhead and a pool the test can read, and the client logger capturing
         wireMock.stubFor(get(urlEqualTo("/never-async")).willReturn(okJson("{}").withFixedDelay(30_000)))
-        val inFlight = CountDownLatch(1)
-        wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/never-async") inFlight.countDown() }
+        val inFlight = arrivalOf("/never-async")
         val bulkheads = BulkheadRegistry.ofDefaults()
         val meters = SimpleMeterRegistry()
         val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger

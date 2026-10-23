@@ -79,12 +79,22 @@ object BoundedBodyReader {
         return body.takeIf { it.size <= limitBytes }
     }
 
-    /** At most [limitBytes] of the body; whatever lies beyond is left unread. [contentLength] as for [readOrNull]. */
+    /**
+     * At most [limitBytes] of the body; whatever lies beyond is left unread. [contentLength] as for [readOrNull].
+     *
+     * A body that declared EXACTLY [limitBytes] and delivered them is complete, and one probe read sees its end at
+     * once: without it the stream would count as not read to its end, and the engines' close would discard a
+     * connection that has nothing left on it ([AbortingResponse]). Only then - for any other body at the limit, the
+     * probe could wait for a peer that keeps sending.
+     */
     fun readTruncated(
         input: InputStream,
         limitBytes: Int,
         contentLength: Long = -1,
-    ): ByteArray = readAtMost(input, limitBytes.toLong(), initialCapacity(contentLength, limitBytes))
+    ): ByteArray =
+        readAtMost(input, limitBytes.toLong(), initialCapacity(contentLength, limitBytes)).also { body ->
+            if (body.size == limitBytes && contentLength == limitBytes.toLong()) input.read()
+        }
 
     /**
      * The declared length when there is one, the first chunk otherwise - each capped at the limit, so neither a

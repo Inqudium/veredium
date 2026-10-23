@@ -35,6 +35,7 @@ import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.function.Supplier
@@ -58,10 +59,23 @@ class RestClientEngineIsolationTest {
 
         private lateinit var wireMock: WireMockServer
 
+        /**
+         * What a request to a URL triggers once it reached WireMock, per test ([arrivalOf]) - behind ONE listener for
+         * the class, registered with the server: `resetAll()` does not remove a request listener, so one added per
+         * test would pile up and fire for a later test's request to the same URL. Cleared before every test.
+         */
+        private val arrivals = ConcurrentHashMap<String, () -> Unit>()
+
+        /** A latch that opens once a request to [url] reached WireMock in the current test. */
+        private fun arrivalOf(url: String): CountDownLatch = CountDownLatch(1).also { latch -> arrivals[url] = latch::countDown }
+
         @JvmStatic
         @BeforeAll
         fun startWireMock() {
-            wireMock = WireMockServer(wireMockConfig().dynamicPort()).apply { start() }
+            wireMock =
+                WireMockServer(wireMockConfig().dynamicPort())
+                    .apply { start() }
+                    .also { server -> server.addMockServiceRequestListener { request, _ -> arrivals[request.url]?.invoke() } }
         }
 
         @JvmStatic
@@ -74,6 +88,7 @@ class RestClientEngineIsolationTest {
     @BeforeEach
     fun resetStubs() {
         wireMock.resetAll()
+        arrivals.clear()
         wireMock.stubFor(get(urlEqualTo("/host")).willReturn(okJson("""{"message":"host"}""")))
         wireMock.stubFor(get(urlEqualTo("/module")).willReturn(okJson("""{"message":"module"}""")))
     }
@@ -212,9 +227,8 @@ class RestClientEngineIsolationTest {
         factory: ResilientRestClientFactory,
         transport: EngineTransport,
     ): Int? {
-        val arrived = CountDownLatch(1)
+        val arrived = arrivalOf("/held")
         wireMock.stubFor(get(urlEqualTo("/held")).willReturn(okJson("""{"message":"held"}""").withFixedDelay(500)))
-        wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/held") arrived.countDown() }
         val call = CompletableFuture.supplyAsync { factory.create(BACKEND).get(Map::class.java) { it.uri("/held") } }
         assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the held call must have reached the backend").isTrue()
         val inUse = transport.connectionsInUse()

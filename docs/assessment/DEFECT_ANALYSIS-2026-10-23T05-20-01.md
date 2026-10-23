@@ -180,7 +180,52 @@ stehen in `./CHANGELOG.md` unter „Fixed“.
   Gegenprobe: Ohne `drainOrReport` im Reactor-Netty-Transport wird er rot. Die Übergabe einer zurückgegebenen
   Verbindung an den wartenden Acquire hält die Zahl der vergebenen Verbindungen über null.
 
-Die Befunde 2–19 sind offen.
+### Befunde 2–19 (2026-10-23, Branch `fix/defect-analysis-2026-10-23`)
+
+18 von 19 Befunden sind behoben. Ein `mvn -o clean verify` über alle Module ist grün: 690 Tests (core 196,
+restclient 249, webclient 245), 0 Fehler, ktlint sauber. Jeder neue oder verschärfte Test wurde mit der Mutation
+gegengeprüft, die der Befund als „bleibt grün“ nannte; jede wird jetzt rot. Die Änderungen stehen in
+`./CHANGELOG.md` unter „Fixed“.
+
+Neue Defekte, die die Tests aufgedeckt haben:
+
+- **2** — Der neue Fall mit tröpfelndem Body fand einen Defekt auf **Jetty** (reaktiv): Ein abgebrochener Body
+  behielt seine Verbindung, solange der Peer sendet. Jetzt bricht `AbortJettyOnBodyCancel` den nativen Request ab.
+  Der **JDK-Client** kann einen Exchange nach dem Head gar nicht abbrechen (`HttpBodySubscriberWrapper.onCancel`
+  meldet nur ab). Der Fall pinnt das, und Startup-Zeile wie `./docs/engine-behaviour.md` nennen es. Apaches
+  `AbortOnBodyCancel` ist auf beiden Body-Pfaden (Codec-Abbruch, TimeLimiter) nicht nötig: Ohne ihn bleiben beide
+  Fälle grün.
+- **5** — Der blockierende Connect-Timeout-Fall lief auf Apache, Jetty und Reactor Netty in ein **refused connect**.
+  `localhost` löste auf `::1` auf, das Blackhole lauscht auf `127.0.0.1`. Der Fall war grün, ohne dass der
+  Connect-Timeout lief. Er zielt jetzt auf die Adresse und verlangt die engine-eigene Timeout-Exception.
+- **6** — Der neue Cut-off-Fall fand einen Defekt auf **Reactor Netty** (blockierend): Ein mitten im Body
+  abgebrochener Peer kam als ungeprüfte `ReactiveException` an, nicht als `ResourceAccessException`. Springs
+  `SubscriberInputStream` wirft ungeprüft. Der Body-Read packt die `IOException` jetzt aus, wie Spring es für den
+  Head tut.
+
+Abweichend von der Fix-Strategie:
+
+- **3** — Statt die Werte zurückzulesen: Apache und Reactor Netty geben Idle- und Lebensdauer nicht heraus.
+  Gepinnt wird deshalb auf dem Draht, mit einem Backend, das seine Verbindungen zählt.
+- **9** — Die WARN-Zeilen der JDK- und Apache-Releases nannten einen Interrupt nicht als Grund. Sie tun es jetzt,
+  sonst wäre der parametrisierte Interrupt-Fall nicht formulierbar gewesen.
+- **10** — Statt eines deterministischen Interleavings: `AbortableExchange` ist jetzt ein einziger atomarer
+  Zustand. Die Reihenfolge, die der Test nicht fangen konnte, gibt es nicht mehr.
+- **13** — Ein Listener pro Testklasse verteilt an pro Test registrierte Latches und wird vor jedem Test geleert.
+  Das betrifft 16 Listener in 6 Klassen, beide Module.
+- **17** — Die Fenster sind so breit, wie die Unterscheidung der beiden Timeouts zulässt; gemessen wird weiter ab
+  dem Aufruf.
+
+Offen:
+
+- **19** — legatium#88 ist geschlossen (`580578e` auf legatiums `main`): Ein abgebrochener Aufruf wird am
+  Interrupt-Flag des Workers erkannt, zusätzlich an einer `InterruptedException` in der Ursachenkette. Das deckt
+  auch die `InterruptedIOException` des Hand-offs ab. Ein Release mit dem Fix gibt es noch nicht (zuletzt 1.2.1
+  vom 2026-10-19). Zu tun bleibt das Anheben von `legatium.version`, sobald 1.2.2 erscheint.
+
+Aufgefallen, nicht Teil der Befunde: Auf `main` warnt der Kotlin-Compiler in `BlockingResilienceDecoratorTest`
+(5×) und `RestClientVerdictsTest` (3×) „Expression is unused“, in `WebClientEngineTransports` über Jettys
+deprecated `transport`. Die Warnung in `ReactorNettyHandOffTest` aus PR #12 ist behoben.
 
 ## 4. File-Ranking (Phase 1)
 
@@ -258,7 +303,7 @@ Keine.
     erst den Reactor stoppen. Den Fall „in-flight finishes before the deadline“ über alle reaktiven Engines
     parametrisieren und die Assumption an die geprüfte Quelle anpassen.
 
-- [ ] 2. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:673` — und `:679-684` (`AbortOnBodyCancel`), gegen `./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/WebClientEngineIntegrationTest.kt:349-372`] {Medium} {Confidence: high} {test quality / false confidence}
+- [x] 2. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:673` — und `:679-684` (`AbortOnBodyCancel`), gegen `./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/WebClientEngineIntegrationTest.kt:349-372`] {Medium} {Confidence: high} {test quality / false confidence}
   - Die KDoc sagt „Both phases are covered“ (`:646-648`), doch der Abbruch in der Body-Phase ist auf keiner
     reaktiven Engine getestet.
     - Der Codec-Limit-Test schickt 4 KB in einem Stück. Wenn der Codec abbricht, ist der Exchange schon beendet.
@@ -274,7 +319,7 @@ Keine.
     `maxInMemorySize` schicken und prüfen, dass `DataBufferLimitException` vor dem Ende des Tröpfelns kommt und das
     Backend den Verbindungsabbau sieht.
 
-- [ ] 3. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:209` — `:211-213` (Reactor Netty), `:354`, `:356`, `:362` (Jetty), `:509`, `:542-545` (Apache); Startup-Zusagen `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineChecks.kt:147-215`] {Medium} {Confidence: high} {test quality / false confidence}
+- [x] 3. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:209` — `:211-213` (Reactor Netty), `:354`, `:356`, `:362` (Jetty), `:509`, `:542-545` (Apache); Startup-Zusagen `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineChecks.kt:147-215`] {Medium} {Confidence: high} {test quality / false confidence}
   - Auf dem Webclient sind nur `max-connections`, Timeouts, Host und gzip je Engine auf dem Draht belegt. Ungetestet
     als Engine-Verdrahtung sind:
     - `pool.max-idle-time`, `max-life-time`, `evict-in-background` und `pending-acquire-max-count`
@@ -292,7 +337,7 @@ Keine.
   - Fix strategy: Den Wert vom gebauten Engine-Objekt zurücklesen (billig). Wo das nicht geht, je Knopf einen
     Verhaltensfall schreiben, zum Beispiel dass eine Idle-Verbindung nach kurzer `max-idle-time` ersetzt wird.
 
-- [ ] 4. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/RestClientEngineIntegrationTest.kt:240` — und `:355`] {Medium} {Confidence: high} {test quality / false confidence}
+- [x] 4. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/RestClientEngineIntegrationTest.kt:240` — und `:355`] {Medium} {Confidence: high} {test quality / false confidence}
   - Die Transport-Sprosse der Leiter ist nur nach oben begrenzt.
     - Fall `stalled` (Response-Timeout 700 ms): Er prüft nur `elapsed < 2,5 s`.
     - Fall `quick`/`patient`: Er prüft `quick < 1,5 s` und `patient ≥ 1,5 s`.
@@ -309,7 +354,7 @@ Keine.
   - Fix strategy: Zusätzlich `elapsed ≥ responseTimeout − wenige ms` prüfen. Eine Untergrenze ist auf einem
     belasteten Rechner sicher, weil ein Timeout nicht früher feuert.
 
-- [ ] 5. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/RestClientEngineIntegrationTest.kt:627` — bis `:628`; `./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/WebClientEngineIntegrationTest.kt:1010`, `:1024-1025`] {Medium} {Confidence: medium} {test quality / false confidence}
+- [x] 5. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/RestClientEngineIntegrationTest.kt:627` — bis `:628`; `./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/WebClientEngineIntegrationTest.kt:1010`, `:1024-1025`] {Medium} {Confidence: medium} {test quality / false confidence}
   - Die Connect-Timeout-Tests beider Module akzeptieren jeden schnellen Fehler.
     - Restclient: `isNotNull().isNotInstanceOf(TimeoutException)` + `elapsed < 2 s`
     - Webclient: `WebClientRequestException` + `elapsed < 2 s`
@@ -323,7 +368,7 @@ Keine.
   - Fix strategy: Die engine-spezifische Connect-Timeout-Ursache in der Cause-Chain verlangen, plus
     `elapsed ≥ connect-timeout`. Ein übersprungener Fall soll in CI auffallen (Zählung oder Fehler bei `CI=true`).
 
-- [ ] 6. [`./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/ReactorNettyEngineTransport.kt:315` — bis `:321`; Testlücke in `./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/`] {Medium} {Confidence: high} {test quality / coverage gap}
+- [x] 6. [`./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/ReactorNettyEngineTransport.kt:315` — bis `:321`; Testlücke in `./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/`] {Medium} {Confidence: high} {test quality / coverage gap}
   - Ein Transportfehler **mitten im Body** (Peer schließt oder setzt die Verbindung zurück, Response-Timeout zwischen
     zwei Chunks) ist auf keiner Engine des Restclients getestet.
     - `grep -rn "Fault\.\|withFault\|CONNECTION_RESET" veredium-restclient/src/test` liefert 0 Treffer.
@@ -341,14 +386,14 @@ Keine.
 
 ### 🟢 Low
 
-- [ ] 7. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/ResilientRestClientIntegrationTest.kt:1131`] {Low} {Confidence: low} {test quality / flakiness}
+- [x] 7. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/ResilientRestClientIntegrationTest.kt:1131`] {Low} {Confidence: low} {test quality / flakiness}
   - `shutdown.get(1, SECONDS)` umfasst den Start eines Virtual Threads und das Schließen des Apache-Pools. Der
     Engine-Zwilling erlaubt dafür 2 s (`PROMPTLY`, `RestClientEngineIntegrationTest.kt:733`).
   - Fenster dieser Art musste Commit `9823825` bereits für CI aufweiten. Ein Ausfall wurde nicht beobachtet.
   - Fix strategy: Auf `PROMPTLY` angleichen. Eine Mutation, die den Drain hot spinnen lässt, fällt auch dann noch
     auf (Fenster ≥ 2,4 s, Backend antwortet nach 5 s).
 
-- [ ] 8. [`./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/WebClientEngineIntegrationTest.kt:824` — bis `:825`, gegen `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:606`, `:619-625`] {Low} {Confidence: medium} {test quality}
+- [x] 8. [`./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/WebClientEngineIntegrationTest.kt:824` — bis `:825`, gegen `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:606`, `:619-625`] {Low} {Confidence: medium} {test quality}
   - `close(IMMEDIATE)` wartet nicht auf die Worker. Eine `ClosedSelectorException` kommt daher asynchron und
     womöglich erst nach der ERROR-Prüfung.
   - JaCoCo zeigt, dass weder der DEBUG- noch der ERROR-Zweig von `onReactorException` im Lauf ausgeführt wurde. Die
@@ -357,7 +402,7 @@ Keine.
   - Fix strategy: `onReactorException` direkt unit-testen (ERROR vor dem Release, DEBUG währenddessen). Im
     Integrationsfall begrenzt auf das Ende der I/O-Threads warten, bevor die ERROR-Abwesenheit geprüft wird.
 
-- [ ] 9. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/ResilientWebClientFactory.kt:171` — mit `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:299-301`, `:310-311`, `:581-582`] {Low} {Confidence: high} {test quality / coverage gap}
+- [x] 9. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/ResilientWebClientFactory.kt:171` — mit `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:299-301`, `:310-311`, `:581-582`] {Low} {Confidence: high} {test quality / coverage gap}
   - Reactor Netty bekommt `left`, also den Rest der gemeinsamen Frist. Der Virtual-Time-Test ruft `drain()` aber mit
     dem Default `poolDisposeTimeout` auf
     (`./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/ResilientWebClientIntegrationTest.kt:1127-1168`).
@@ -366,14 +411,14 @@ Keine.
   - Fix strategy: `ReactorNettyTransport.release` mit abgelaufener Frist und einem aufzeichnenden `dispose` aufrufen.
     Den Interrupt-Fall über alle Engines parametrisieren.
 
-- [ ] 10. [`./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/AbortableExchangeTest.kt:67` — bis `:93`, gegen `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:696-699`] {Low} {Confidence: medium} {test quality / concurrency}
+- [x] 10. [`./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/AbortableExchangeTest.kt:67` — bis `:93`, gegen `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:696-699`] {Low} {Confidence: medium} {test quality / concurrency}
   - Vertauscht man in `attach` die Reihenfolge von `future.set(started)` und `if (aborted)`, bleiben die beiden
     geordneten Fälle grün.
   - Nur das 1000-Runden-Barrier-Rennen könnte die Vertauschung fangen, und sein Fenster ist wenige Nanosekunden
     breit. Die Implementierung selbst ist korrekt (volatile + `AtomicReference`, Dekker-Muster).
   - Fix strategy: Eine deterministische Verschränkung, etwa ein `Future`-Stub, der beim `set` selbst `abort()` aufruft.
 
-- [ ] 11. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/RestClientEngineIntegrationTest.kt:374`] {Low} {Confidence: high} {test quality}
+- [x] 11. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/RestClientEngineIntegrationTest.kt:374`] {Low} {Confidence: high} {test quality}
   - „Ein Engine für alle Backends“ wird über `engineTransports.keys` geprüft, also über die Buchführung der Factory.
   - Mutation: `JdkEngineTransport.requestFactory` baut pro Backend einen eigenen `HttpClient`. Der Test bleibt grün,
     und nur ein Client wird geschlossen.
@@ -381,42 +426,42 @@ Keine.
   - Fix strategy: Prüfen, dass die Request-Factories zweier Backends dieselbe Client-Instanz tragen, oder die
     Engine-Threads zählen.
 
-- [ ] 12. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/RestClientEngineIntegrationTest.kt:597`] {Low} {Confidence: high} {test quality}
+- [x] 12. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/RestClientEngineIntegrationTest.kt:597`] {Low} {Confidence: high} {test quality}
   - Im `max-connections`-Fall prüft die Assertion für den zweiten Aufruf nur `failure isNotNull`. Jeder Fehler vor
     dem Senden erfüllt das; `verify(0)` begrenzt den Schaden.
   - Fix strategy: Die engine-spezifische Pool- bzw. Queue-Timeout-Ursache verlangen.
 
-- [ ] 13. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/` — 12 Aufrufe von `addMockServiceRequestListener` (`grep -rn addMockServiceRequestListener veredium-restclient/src/test`)] {Low} {Confidence: high} {test quality / isolation}
+- [x] 13. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/` — 12 Aufrufe von `addMockServiceRequestListener` (`grep -rn addMockServiceRequestListener veredium-restclient/src/test`)] {Low} {Confidence: high} {test quality / isolation}
   - `wireMock.resetAll()` entfernt Request-Listener nicht, sodass sie sich pro Klassenlauf anhäufen.
   - Ein später Request auf eine wiederverwendete URL (`/never`, `/slow`) eines früheren Tests kann den Latch eines
     späteren Tests auslösen.
   - Fix strategy: Eindeutige URLs pro Test verwenden oder den Listener in `@AfterEach` entfernen.
 
-- [ ] 14. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/ResilientRestClientIntegrationTest.kt:1142` — bis `:1165`] {Low} {Confidence: high} {test quality}
+- [x] 14. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/ResilientRestClientIntegrationTest.kt:1142` — bis `:1165`] {Low} {Confidence: high} {test quality}
   - Der Test verspricht einen geschlossenen Pool, prüft ihn aber nicht. Ein leeres `shutdown()` bliebe hier grün;
     nur der Engine-Test (`RestClientEngineIntegrationTest.kt:381`) fängt es.
   - Fix strategy: `engineTransports[APACHE].isClosed` assertieren.
 
-- [ ] 15. [`./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/ReactorNettyEngineTransport.kt:182` — bis `:193`, und `:226-239`] {Low} {Confidence: high} {test quality / coverage gap}
+- [x] 15. [`./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/ReactorNettyEngineTransport.kt:182` — bis `:193`, und `:226-239`] {Low} {Confidence: high} {test quality / coverage gap}
   - Der Ablaufzweig von `awaitDisposal` (WARN „not disposed within“) hat keinen Test
     (`grep -rn "not disposed within" veredium-restclient/src/test` liefert 0 Treffer).
   - Die Gauge-Lambdas werden nie gelesen (JaCoCo: `:226`, `:234-239` nicht ausgeführt). Getestet ist nur, dass die
     Gauges registriert werden, nicht ihr Wert. Eine Verwechslung wie `ACTIVE ↔ acquiredSize` bliebe grün.
   - Fix strategy: Eine Disposal injizieren, die nie endet. Eine Gauge während eines gehaltenen Exchanges lesen.
 
-- [ ] 16. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/ResilientRestClientIntegrationTest.kt:122`] {Low} {Confidence: high} {test quality / flakiness}
+- [x] 16. [`./veredium-restclient/src/test/kotlin/eu/inqudium/veredium/restclient/ResilientRestClientIntegrationTest.kt:122`] {Low} {Confidence: high} {test quality / flakiness}
   - Ein Rest von Vorbericht-Befund 20: Dieser WireMock antwortet weiter synchron.
   - Die 30-s-Delays bei `:828` und `:1336` halten nach dem Client-Abbruch je einen Container-Thread 30 s lang belegt.
   - Fix strategy: `asynchronousResponseEnabled(true)` wie im Engine-Test.
 
-- [ ] 17. [`./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/WebClientEngineIntegrationTest.kt:343` — sowie `:472`, `:813`, `:977`] {Low} {Confidence: medium} {test quality / flakiness}
+- [x] 17. [`./veredium-webclient/src/test/kotlin/eu/inqudium/veredium/webclient/WebClientEngineIntegrationTest.kt:343` — sowie `:472`, `:813`, `:977`] {Low} {Confidence: medium} {test quality / flakiness}
   - Die Zeitfenster laufen auf der Wanduhr; die engste obere Toleranz ist +400 ms.
   - Der Warm-up hat das Klassenladen herausgenommen. GC- oder CPU-Hunger auf einem belasteten Runner und das 50-ms-
     Select-Intervall von Apache bleiben aber im Fenster.
   - Fix strategy: Ab dem Eingang des Requests am Backend messen (Zeitstempel im Backend) oder die Obergrenze an die
     nächste Sprosse der Leiter legen.
 
-- [ ] 18. [`./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/BoundedBodyReader.kt:87` — mit `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/EngineTransport.kt:286-289`] {Low} {Confidence: high} {resources}
+- [x] 18. [`./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/BoundedBodyReader.kt:87` — mit `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/EngineTransport.kt:286-289`] {Low} {Confidence: high} {resources}
   - `readTruncated` hört bei genau `limitBytes` auf, ohne einen Probe-Read nach `-1`.
   - Ein Fehler-Body, der **genau** das Limit lang ist, gilt für `AbortingResponse` deshalb als „nicht zu Ende
     gelesen“. Auf Apache, JDK und Jetty wird die Verbindung verworfen, obwohl nichts mehr kommt.

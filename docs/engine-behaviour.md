@@ -620,7 +620,7 @@ Pinned per engine by "should let an in-flight exchange finish before closing the
 waiting for a connection finish before closing the engine", "should report an engine that does not drain by the
 deadline and close it anyway", "should stop waiting when the shutdown thread is interrupted and leave the flag set"
 and "should refuse a client requested after shutdown" (blocking), and by the reactive "Draining shutdown" (the same
-two cases on every engine), "Release against the shutdown deadline" and "Jetty's shutdown" cases. `EngineTransportLifecycleTest`
+two cases on every engine), "Release against the shutdown deadline" and "Interrupted shutdown" cases. `EngineTransportLifecycleTest`
 and `EngineTransportsTest` pin the isolation of a failing release.
 
 ## Test infrastructure

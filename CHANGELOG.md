@@ -76,6 +76,30 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-23T05-20-01.md`:
   the engine's exchanges in flight first, as Jetty's does, and shuts the reactor down after. A per-engine test
   of a call waiting for a connection pins it; on Apache it failed after 0.6 s of a 5 s deadline before the fix.
   The "in-flight exchange finishes" case, before on Jetty only, now runs on every reactive engine.
+- `veredium-webclient`: the Jetty engine aborts an exchange whose response body is cancelled before its end - a
+  body the codec refuses at `max-in-memory-size`, a TimeLimiter abort while the body arrives. Spring's connector
+  only stopped the delivery, and Jetty kept receiving the rest on the connection, holding it and its slot of
+  `max-connections` for as long as the peer sent. Pinned per engine with a backend that keeps dripping.
+- `veredium-webclient`: the JDK engine's startup line and the engine page now say that a body cancelled after
+  the head arrived is read to its end - the JDK client has no per-exchange abort; cancelling its body
+  subscription only unregisters the subscriber. A case pins that, so a JDK that changes it turns it red.
+- `veredium-restclient`: on the Reactor Netty engine, a peer cutting a body off mid-stream fails the call with
+  Spring's `ResourceAccessException` over an `IOException`, as on every other engine, instead of Reactor's
+  unchecked `ReactiveException` around a `PrematureCloseException` that passed Spring's transport-fault handling.
+- `veredium-restclient`: an error body of exactly the declared length at `max-in-memory-size` is read to its end,
+  so the engines keep its connection instead of discarding one that has nothing left on it.
+- `veredium-webclient`: the JDK and Apache engines' release WARN names an interrupted shutdown thread as the
+  reason, as Jetty's and the blocking module's do.
+- `veredium-webclient`: the Apache engine's abort link (`AbortableExchange`) is one atomic state instead of a
+  future and a flag whose correctness depended on the order of their writes.
+- Tests: the reactive pool settings (`max-idle-time`, `max-life-time`, `pending-acquire-max-count`) are pinned on
+  the wire per engine; the blocking response and connect timeouts are bounded from below - the blocking connect
+  case had run into a refused connect on three engines (`localhost` resolved to `::1`) and is now aimed at the
+  address; the max-connections case demands each engine's own wait bound; sharing one engine between backends is
+  seen on the wire; the Reactor Netty gauges are read for their values, its disposal expiry and the reactive
+  shared deadline are reached; the interrupted release runs on every engine that waits; WireMock request
+  listeners no longer pile up across tests; the reactive response-timeout windows are as wide as telling the
+  timeouts apart allows.
 - `veredium-webclient`: the Reactor Netty engine's release no longer fails a call that is still waiting for a
   connection either. Its pool was disposed without a `disposeTimeout`, which is no graceful shutdown: pending
   acquires failed at once with a `PoolShutdownException`. The pool is now built with the factory's drain bound as

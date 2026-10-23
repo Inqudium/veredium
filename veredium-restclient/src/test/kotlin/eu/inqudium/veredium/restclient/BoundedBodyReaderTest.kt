@@ -219,6 +219,47 @@ class BoundedBodyReaderTest {
         }
 
         @Test
+        fun `should read an error body of exactly the declared length at the limit to its end`() {
+            // What is tested: an error body that declared exactly the limit and delivered it.
+            // Success criteria: returned byte for byte, and the stream was read to its end (a read returned -1).
+            // Why it matters: the engines' response close discards the connection of a body not read to its end
+            //   (AbortingResponse). A complete body cut exactly at the limit, without that last read, would cost
+            //   a connection that has nothing left on it.
+            //
+            // Given
+            val body = pattern(1000)
+            val stream = EndRecordingStream(body)
+
+            // When
+            val truncated = BoundedBodyReader.readTruncated(stream, 1000, contentLength = 1000)
+
+            // Then
+            assertThat(truncated).isEqualTo(body)
+            assertThat(stream.sawEnd).`as`("the stream must have been read to its end").isTrue()
+        }
+
+        @ParameterizedTest(name = "Content-Length {0}")
+        @ValueSource(longs = [-1, 5000])
+        fun `should not read past the limit of an error body that declared no length or a longer one`(contentLength: Long) {
+            // What is tested: an error body at the limit whose declared length does not say it is complete - none
+            //   (chunked) or a larger one.
+            // Success criteria: exactly the first `limit` bytes are returned, and no byte beyond them was read.
+            // Why it matters: only a body whose declared end is at the limit can be probed for its end without
+            //   waiting; for any other, one more read could wait for a peer that keeps sending.
+            //
+            // Given
+            val body = pattern(5000)
+            val stream = TricklingStream(body, intArrayOf(100_000))
+
+            // When
+            val truncated = BoundedBodyReader.readTruncated(stream, 1000, contentLength)
+
+            // Then
+            assertThat(truncated).isEqualTo(body.copyOf(1000))
+            assertThat(stream.bytesRead).isEqualTo(1000)
+        }
+
+        @Test
         fun `should return a short error body whole`() {
             // What is tested: an error body below the limit.
             // Success criteria: returned byte for byte.
@@ -283,6 +324,23 @@ class BoundedBodyReaderTest {
 
     /** A non-repeating byte pattern: position `i` holds `i % 251`, a prime, so no chunk size aligns with it. */
     private fun pattern(size: Int): ByteArray = ByteArray(size) { (it % 251).toByte() }
+
+    /** A stream over [content] that records whether a read reported its end. */
+    private class EndRecordingStream(
+        content: ByteArray,
+    ) : InputStream() {
+        private val delegate = ByteArrayInputStream(content)
+        var sawEnd: Boolean = false
+            private set
+
+        override fun read(): Int = delegate.read().also { if (it < 0) sawEnd = true }
+
+        override fun read(
+            b: ByteArray,
+            off: Int,
+            len: Int,
+        ): Int = delegate.read(b, off, len).also { if (it < 0) sawEnd = true }
+    }
 
     /**
      * A stream that hands out [content] in reads of the sizes [readSizes] names, cycling through them - never
