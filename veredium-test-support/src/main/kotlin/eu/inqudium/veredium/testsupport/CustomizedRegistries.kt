@@ -24,15 +24,17 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry
  * one thing the real path never does (it never has a prior instance), and it is what lets a test register a marker
  * config first and assert what survives the customizer.
  *
- * The same object exists in veredium-core's tests, which cannot depend on this module (see its pom).
+ * The same object exists in veredium-core's tests, which cannot depend on this module (see its pom). The parameters
+ * are in the same order; only the verdicts differ: here a caller passes its stack's, there they default to the core's
+ * test verdicts.
  */
 object CustomizedRegistries {
     /** The circuit breaker of [endpoint], customized with [verdicts] over [base] (default: the config registered under its alias). */
     fun circuitBreaker(
         registry: CircuitBreakerRegistry,
         endpoint: ResolvedTimeouts,
-        verdicts: BreakerVerdicts,
         base: CircuitBreakerConfig? = null,
+        verdicts: BreakerVerdicts,
     ): CircuitBreaker {
         val seed = base ?: registry.find(endpoint.alias).map { it.circuitBreakerConfig }.orElse(registry.defaultConfig)
         val builder = CircuitBreakerConfig.from(seed)
@@ -64,7 +66,7 @@ object CustomizedRegistries {
         registry: CircuitBreakerRegistry,
         mesh: MeshProperties,
         verdicts: BreakerVerdicts,
-    ) = mesh.resolveAll().values.forEach { circuitBreaker(registry, it, verdicts) }
+    ) = mesh.resolveAll().values.forEach { circuitBreaker(registry, it, verdicts = verdicts) }
 
     /** Every time limiter of [mesh], customized where enabled. */
     fun timeLimiters(

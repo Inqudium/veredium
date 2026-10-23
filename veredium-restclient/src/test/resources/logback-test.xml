@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
 
-    <!-- The exchange-diary events carry their data in two places a plain %msg pattern would hide: the
+    <!-- legatium's exchange events carry their data in two places a plain %msg pattern would hide: the
          adapter_* key-value pairs (SLF4J fluent API, rendered by %kvp - NONE = unquoted values) and the
          MDC trace keys, rendered by %mdc as key=value pairs - only the keys that are actually present.
-         Same pattern as the endpoint-logging twins' test configuration. -->
+         The webclient module's test configuration uses the same pattern. -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
             <pattern>

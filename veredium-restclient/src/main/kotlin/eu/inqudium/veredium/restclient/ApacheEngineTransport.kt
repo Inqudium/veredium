@@ -35,7 +35,7 @@ import java.util.concurrent.TimeUnit
  *
  * ## The transport, mapped from the reactive twin
  *
- * | Reactor Netty (web-client)                   | Apache HttpClient 5 (here)                                            |
+ * | Reactor Netty (webclient module)             | Apache HttpClient 5 (here)                                            |
  * |----------------------------------------------|-----------------------------------------------------------------------|
  * | one `ConnectionProvider` for all endpoints   | one `PoolingHttpClientConnectionManager`, shared by every client      |
  * | `maxConnections`                             | `maxConnTotal` AND `maxConnPerRoute` (every endpoint is one route)    |
@@ -72,7 +72,7 @@ internal class ApacheEngineTransport(
     private val pool = settings.pool
 
     /** Name of the single shared Apache pool: the [RestClientMetrics.POOL_TAG] value on its gauges, its evictor's thread name. */
-    private val poolName: String = RestClientMetrics.POOL_NAME
+    override val name: String = RestClientMetrics.POOL_NAME
 
     /**
      * The single connection pool shared by every target's HttpClient, built once and closed in [shutdown].
@@ -113,7 +113,7 @@ internal class ApacheEngineTransport(
             .takeUnless { it.isZero }
             ?.let { interval ->
                 Executors
-                    .newSingleThreadScheduledExecutor(Thread.ofVirtual().name("$poolName-evictor").factory())
+                    .newSingleThreadScheduledExecutor(Thread.ofVirtual().name("$name-evictor").factory())
                     .also { scheduler ->
                         val maxIdle = TimeValue.ofMilliseconds(pool.maxIdleTime.toMillis())
                         scheduler.scheduleWithFixedDelay(
@@ -143,7 +143,7 @@ internal class ApacheEngineTransport(
                 MetricConfig
                     .builder()
                     .prefix(RestClientMetrics.POOL_METER_PREFIX)
-                    .addCommonTag(RestClientMetrics.POOL_TAG, poolName)
+                    .addCommonTag(RestClientMetrics.POOL_TAG, name)
                     .build(),
             )
             registry.meters.filterNot { it in before }
@@ -202,7 +202,7 @@ internal class ApacheEngineTransport(
 
     override val poolMeters: String =
         if (settings.meterRegistry != null) {
-            "${RestClientMetrics.POOL_METER_PREFIX}.pool.{leased,available,pending}{${RestClientMetrics.POOL_TAG}=$poolName}"
+            "${RestClientMetrics.POOL_METER_PREFIX}.pool.{leased,available,pending}{${RestClientMetrics.POOL_TAG}=$name}"
         } else {
             "none (no MeterRegistry)"
         }
@@ -211,7 +211,7 @@ internal class ApacheEngineTransport(
 
     override val isClosed: Boolean get() = connectionManager.isClosed
 
-    override fun connectionsInUse(): Int = connectionManager.totalStats.leased
+    override fun exchangesInFlight(): Int = connectionManager.totalStats.leased
 
     /**
      * Drains the shared pool, waiting until the deadline for leased connections to come back, then closes it.
@@ -232,7 +232,7 @@ internal class ApacheEngineTransport(
     ) {
         evictor?.shutdownNow()
         httpClients.forEach { it.close(CloseMode.GRACEFUL) }
-        drainOrReport(engine, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
+        drainOrReport(engine, ::exchangesInFlight, deadlineNanos, nanoTime, window, logger)
         connectionManager.close(CloseMode.GRACEFUL)
         boundPoolMeters.forEach { meterRegistry?.remove(it) }
     }

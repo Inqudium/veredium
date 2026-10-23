@@ -114,8 +114,10 @@ open class HttpObservationReport(
         /** Spring's client observation name, for both stacks - the target of the central disable-filter. */
         const val HTTP_CLIENT_OBSERVATION: String = "http.client.requests"
 
-        /** Central Micrometer disable-filter keys (default true; false = OFF). */
+        /** Central Micrometer disable-filter key for every observation (default true; false = OFF). */
         const val CENTRAL_ENABLE_ALL: String = "management.observations.enable.all"
+
+        /** Central Micrometer disable-filter key for [HTTP_CLIENT_OBSERVATION] (default true; false = OFF). */
         const val CENTRAL_ENABLE_HTTP_CLIENT: String = "management.observations.enable.$HTTP_CLIENT_OBSERVATION"
     }
 }

@@ -13,18 +13,24 @@ import java.io.IOException
 import java.nio.channels.ClosedSelectorException
 
 /**
- * The I/O reactor exception callback of the Apache engine ([ApacheTransport.onReactorException]), called directly -
- * the exception it exists for, a worker meeting its selector closed under it, arrives during a release only on a
+ * The I/O reactor exception callback of the Apache engine ([ApacheEngineTransport.onReactorException]), called directly -
+ * the exception it exists for, a worker meeting its selector closed under it, arrives during a shutdown only on a
  * slow machine, so no integration case reaches it reliably.
  */
-class ApacheTransportTest {
-    private val logger = LoggerFactory.getLogger(ApacheTransportTest::class.java) as Logger
-    private val lines = ListAppender<ILoggingEvent>().apply { start() }.also { logger.addAppender(it) }.also { logger.level = Level.DEBUG }
-    private val transport = ApacheTransport(WebClientProperties(), MeshProperties.Transport(), logger)
+class ApacheEngineTransportTest {
+    private val logger = LoggerFactory.getLogger(ApacheEngineTransportTest::class.java) as Logger
+    private val lines = ListAppender<ILoggingEvent>().apply { start() }
+
+    init {
+        logger.addAppender(lines)
+        logger.level = Level.DEBUG
+    }
+
+    private val transport = ApacheEngineTransport(WebClientProperties(), MeshProperties.Transport(), logger)
 
     @AfterEach
     fun releaseAndDetach() {
-        transport.release(System.nanoTime(), System::nanoTime)
+        transport.shutdown(System.nanoTime(), System::nanoTime)
         logger.detachAppender(lines)
         logger.level = null
     }
@@ -47,8 +53,8 @@ class ApacheTransportTest {
     }
 
     @Test
-    fun `should take a closed selector to DEBUG during the release and keep every other exception at ERROR`() {
-        // What is tested: the callback once release() has started - here, after it returned, as a worker still
+    fun `should take a closed selector to DEBUG during the shutdown and keep every other exception at ERROR`() {
+        // What is tested: the callback once shutdown() has started - here, after it returned, as a worker still
         //   shutting down would report it.
         // Success criteria: the closed selector is one DEBUG line without a stack trace; another exception stays an
         //   ERROR with its exception.
@@ -57,7 +63,7 @@ class ApacheTransportTest {
         //   the moment someone reads the shutdown log. Anything else must stay loud.
         //
         // Given
-        transport.release(System.nanoTime(), System::nanoTime)
+        transport.shutdown(System.nanoTime(), System::nanoTime)
         lines.list.clear()
 
         // When

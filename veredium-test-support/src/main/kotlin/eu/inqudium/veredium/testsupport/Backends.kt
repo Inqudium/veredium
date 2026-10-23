@@ -163,6 +163,7 @@ class SilentBackend : SocketBackend() {
     /** Counted down when the client closed a connection. */
     val connectionClosed = CountDownLatch(1)
 
+    /** The `System.nanoTime()` at which the client last closed a connection; 0 until it did. */
     @Volatile
     var closedAtNanos: Long = 0L
         private set

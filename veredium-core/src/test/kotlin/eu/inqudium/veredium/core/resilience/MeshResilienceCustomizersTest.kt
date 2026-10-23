@@ -302,6 +302,10 @@ class MeshResilienceCustomizersTest {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
     /** The single accounts endpoint resolved, with optional CB opt-in and a maxRetries override. */
     private fun endpoint(
         individual: Long,

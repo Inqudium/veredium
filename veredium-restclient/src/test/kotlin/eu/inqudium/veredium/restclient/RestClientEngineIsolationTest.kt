@@ -124,8 +124,8 @@ class RestClientEngineIsolationTest {
             assertThat(userAgentOf("/module")).isEqualTo(Veredium.userAgent())
             assertThat(acceptEncodingOf("/module")).`as`("the module's request must not have gone out on Apache").isNotEqualTo(acceptEncodingOf("/host"))
             val transport = factory.engineTransports.getValue(engine)
-            if (transport.connectionsInUse() != null) {
-                assertThat(connectionsInUseDuringHeldCall(factory, transport)).isEqualTo(1)
+            if (transport.exchangesInFlight() != null) {
+                assertThat(exchangesInFlightDuringHeldCall(factory, transport)).isEqualTo(1)
             }
         }
     }
@@ -163,7 +163,7 @@ class RestClientEngineIsolationTest {
                 assertThat(factory.requestFactoryOf(BACKEND)).isInstanceOf(HttpComponentsClientHttpRequestFactory::class.java)
                 assertThat(userAgentOf("/module")).isEqualTo(Veredium.userAgent())
                 assertThat(acceptEncodingOf("/module")).contains("x-gzip")
-                assertThat(connectionsInUseDuringHeldCall(factory, factory.engineTransports.getValue(RestClientEngine.APACHE))).isEqualTo(1)
+                assertThat(exchangesInFlightDuringHeldCall(factory, factory.engineTransports.getValue(RestClientEngine.APACHE))).isEqualTo(1)
             }
     }
 
@@ -203,6 +203,10 @@ class RestClientEngineIsolationTest {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
     /** The User-Agent of the one request WireMock received on [path]. */
     private fun userAgentOf(path: String): String =
         wireMock
@@ -220,10 +224,10 @@ class RestClientEngineIsolationTest {
             .let { if (it.isPresent) it.values().joinToString(", ") else "" }
 
     /**
-     * The connections in use of [transport] while one call of the module's [BACKEND] is held in flight by the
+     * The exchanges in flight on [transport] while one call of the module's [BACKEND] is held in flight by the
      * backend - read once the request has reached WireMock, then the call is let finish.
      */
-    private fun connectionsInUseDuringHeldCall(
+    private fun exchangesInFlightDuringHeldCall(
         factory: ResilientRestClientFactory,
         transport: EngineTransport,
     ): Int? {
@@ -231,9 +235,9 @@ class RestClientEngineIsolationTest {
         wireMock.stubFor(get(urlEqualTo("/held")).willReturn(okJson("""{"message":"held"}""").withFixedDelay(500)))
         val call = callers.submit<Any> { factory.create(BACKEND).get(Map::class.java) { it.uri("/held") } }
         assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the held call must have reached the backend").isTrue()
-        val inUse = transport.connectionsInUse()
+        val inFlight = transport.exchangesInFlight()
         call.get(5, TimeUnit.SECONDS)
-        return inUse
+        return inFlight
     }
 
     /** A client the HOST builds from Boot's builder bean, against WireMock - nothing of the module on it. */

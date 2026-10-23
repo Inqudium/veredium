@@ -22,7 +22,7 @@ import eu.inqudium.veredium.core.engine.HttpEngine
  * `webclient-config-guide.md` tabulates it.
  *
  * [key], [requiredClasses] and [dependency] are those of [HttpEngine], shared with the blocking module's engines,
- * which the start-time checks of `eu.inqudium.veredium.core.engine.EngineSelection` read.
+ * which the start-time checks of [eu.inqudium.veredium.core.engine.EngineSelection] read.
  *
  * @property library What the engine is, for the startup lines.
  */
@@ -32,7 +32,7 @@ enum class WebClientEngine(
     override val requiredClasses: List<String>,
     override val dependency: String,
 ) : HttpEngine {
-    /** Spring's `ReactorClientHttpConnector` over Reactor Netty - the default, and the wiring this module always had. */
+    /** Spring's `ReactorClientHttpConnector` over Reactor Netty - the default, as in Boot's own WebClient auto-configuration. */
     REACTOR_NETTY(
         key = "reactor-netty",
         library = "ReactorClientHttpConnector over Reactor Netty",

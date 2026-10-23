@@ -201,6 +201,17 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
 
 ### Changed
 
+- `veredium-webclient`: a Reactor Netty pool that does not drain by the shutdown deadline is reported with the
+  drain line every other engine writes - `HTTP engine 'reactor-netty' did not drain within … - closing it with the
+  exchanges still in flight` - instead of `Connection pool 'webclient-reactor-netty' did not drain …`. A log query
+  on the old text needs the new one.
+- Code style analysis of 2026-10-23 (afternoon): KDoc, comments, test rationales and the webclient guides follow
+  the code again after the legatium 1.3.0 and verdicts-as-object changes; the remaining references to the project
+  the modules were ported from are gone; the engine transports of both stacks share one vocabulary
+  (`*EngineTransport`, `shutdown`, `isClosed`, `exchangesInFlight`); the test suites share the log-capture scope
+  and the reference-configuration loader of `veredium-test-support`; the example tests use constructor injection
+  and one shared context annotation. **CI:** two new checks reject words of the origin project in `veredium-*/src`
+  and a veredium class named in production KDoc by its full name in backticks instead of a link.
 - `veredium-restclient`, `veredium-webclient`: legatium 1.3.0 (from 1.2.1). **Behaviour change of the blocking
   stack's exchange log:** a call its caller abandoned - a TimeLimiter that cancels the worker, an interrupted
   caller, a cancelled `getAsync` future - is now logged as WARN `adapter_outcome=cancelled`, as on the reactive

@@ -80,8 +80,9 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  *
  * On success, the startup evidence an operator reads next to the meters: the two policy lines naming the
  * aliases the verdicts were installed on, and one line per endpoint stating what mesh decided for its time
- * limiter and circuit breaker. The derived numbers themselves are logged by `MeshLadderLogger` on
- * `ApplicationReadyEvent`; repeating them here would only let the two drift.
+ * limiter and circuit breaker. The derived numbers themselves are logged by
+ * [eu.inqudium.veredium.core.mesh.MeshLadderLogger] on `ApplicationReadyEvent`; repeating them here would only
+ * let the two drift.
  *
  * The benign-4xx probe comes from the stack ([BreakerVerdicts.benignClientErrorProbe]): the record predicate is
  * applied to a 404 in the exact shape that stack throws, which is the only shape its policy recognises.
@@ -257,12 +258,12 @@ class MeshResilienceStartupGuard(
 
     private companion object {
         /** The pool's name when no client factory names its pools: the one the mesh transport describes. */
-        const val SHARED_POOL = "shared"
+        const val SHARED_POOL: String = "shared"
 
         // The layer spellings match Resilience4j's own property prefixes, so a message names the key verbatim.
-        const val LAYER_CIRCUIT_BREAKER = "circuitbreaker"
-        const val LAYER_TIME_LIMITER = "timelimiter"
-        const val LAYER_BULKHEAD = "bulkhead"
+        const val LAYER_CIRCUIT_BREAKER: String = "circuitbreaker"
+        const val LAYER_TIME_LIMITER: String = "timelimiter"
+        const val LAYER_BULKHEAD: String = "bulkhead"
 
         /**
          * A real rejection instance - the type is only constructible through a bulkhead's factory. The one

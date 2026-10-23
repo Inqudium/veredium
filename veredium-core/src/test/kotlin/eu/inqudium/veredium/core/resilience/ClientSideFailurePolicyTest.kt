@@ -243,7 +243,7 @@ class ClientSideFailurePolicyTest {
             // Success criteria: the predicate returns a verdict at all (false - no client-side failure
             //   is in the cycle). A walk without a bound would not fail the assertion but spin forever; the @Timeout
             //   turns that spin into a test failure instead of a hung build.
-            // Why it matters: the walk's own guard (`takeIf { it !== candidate }`) only catches a throwable
+            // Why it matters: the walk's own self-cause guard only catches a throwable
             //   that is its OWN cause; a two-element A -> B -> A cycle passes straight through it and is
             //   stopped by the depth bound alone. Since this predicate runs inside the circuit breaker's error
             //   hook on a request-serving thread, a spin there would not be a slow test - it would wedge the

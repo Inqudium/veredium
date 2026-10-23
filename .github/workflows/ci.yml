@@ -83,6 +83,28 @@ jobs:
             exit 1
           fi
 
+      # The modules were ported from another project. Its consumers, documents,
+      # incidents and removed components (the exchange diary) mean nothing here,
+      # and a comment that leans on them explains nothing to a reader of this
+      # repository: state the constraint itself, or point at the ADRs or
+      # veredium-restclient/docs/decisions.md.
+      - name: Check that no source leans on the origin project
+        run: |
+          if grep -rniE 'sync-bridge|helm-lap|helm-mesh|\bPoC\b|ADR-006|runbook|backfill|CustomerProducts|\bdiary\b' veredium-*/src; then
+            echo '::error::state the constraint itself - the origin project, its documents and the removed diary are not part of this repository'
+            exit 1
+          fi
+
+      # A production class named in KDoc by its full name in backticks is one
+      # pair of brackets away from a link Dokka checks (CONTRIBUTING, "Tests");
+      # in backticks a rename leaves it standing unnoticed.
+      - name: Check that KDoc links production classes instead of naming them
+        run: |
+          if grep -rnE '^\s*\*.*`eu\.inqudium\.veredium(\.[a-z]+)+\.[A-Z][A-Za-z]*(\.[A-Za-z]+)?`' --include='*.kt' veredium-*/src/main; then
+            echo '::error::write [eu.inqudium.veredium...Class] instead of the name in backticks, so Dokka checks it'
+            exit 1
+          fi
+
       # ktlint 1.8 and the Kotlin compiler leave unused imports alone; one whose
       # name survives only in a `//` comment looks like use.
       - name: Check that no Kotlin source has an unused import

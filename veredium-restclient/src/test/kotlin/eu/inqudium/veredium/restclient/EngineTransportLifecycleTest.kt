@@ -90,6 +90,8 @@ class EngineTransportLifecycleTest {
         var shutdownDeadline: Long? = null
         var deadlineReachedAtShutdown: Boolean? = null
 
+        override val name: String = "recording"
+
         override fun requestFactory(endpoint: ResolvedTimeouts): ClientHttpRequestFactory = error("not used")
 
         override val applied: List<String> = emptyList()
@@ -98,7 +100,7 @@ class EngineTransportLifecycleTest {
         override val cancellation: String = "none"
         override val isClosed: Boolean get() = shutdownDeadline != null
 
-        override fun connectionsInUse(): Int = 0
+        override fun exchangesInFlight(): Int = 0
 
         override fun shutdown(
             deadlineNanos: Long,

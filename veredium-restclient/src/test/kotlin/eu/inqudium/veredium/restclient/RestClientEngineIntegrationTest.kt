@@ -2,8 +2,6 @@ package eu.inqudium.veredium.restclient
 
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
-import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.read.ListAppender
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.aResponse
 import com.github.tomakehurst.wiremock.client.WireMock.equalToJson
@@ -20,12 +18,12 @@ import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import eu.inqudium.veredium.testsupport.AnsweringBackend
-import eu.inqudium.veredium.testsupport.CapturingAppender
 import eu.inqudium.veredium.testsupport.DrippingBackend
 import eu.inqudium.veredium.testsupport.Greeting
 import eu.inqudium.veredium.testsupport.LookupRequest
 import eu.inqudium.veredium.testsupport.UnansweredConnectBackend
 import eu.inqudium.veredium.testsupport.WireMockArrivals
+import eu.inqudium.veredium.testsupport.capturing
 import eu.inqudium.veredium.testsupport.causeChain
 import eu.inqudium.veredium.testsupport.causeNames
 import eu.inqudium.veredium.testsupport.eventually
@@ -93,9 +91,6 @@ class RestClientEngineIntegrationTest {
 
         /** What a request to a URL triggers once it reached WireMock, per test - the class's one listener on the server. */
         private val arrivals = WireMockArrivals()
-
-        /** The generous budget of every case that is not about timing - see `ResilientRestClientIntegrationTest`. */
-        private val GENEROUS_BUDGET: TimeLimiterConfig = TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build()
 
         /** How long an abandoned exchange may take to give back its permit and its connection - far below every response timeout it is pitted against. */
         private val PROMPTLY: Duration = Duration.ofSeconds(2)
@@ -432,18 +427,7 @@ class RestClientEngineIntegrationTest {
                 val factory =
                     newFactory(
                         RestClientProperties.Engine(default = engine),
-                        mesh =
-                            MeshProperties(
-                                defaults =
-                                    MeshProperties.Defaults(
-                                        individualRequestTimeoutMs = 1000,
-                                        transport = MeshProperties.Transport(sidecarBaseUrl = "http://${backend.authority}"),
-                                    ),
-                                endpoints =
-                                    listOf("first", "second").map {
-                                        MeshProperties.EndpointConfig(triplet = "/endpoint/${backend.authority}/GET/$it", alias = it)
-                                    },
-                            ),
+                        mesh = meshOf("http://${backend.authority}", backend.authority, "first", "second"),
                     )
                 factory.create("first").get(Greeting::class.java) { it.uri("/hello") }
                 factory.create("second").get(Greeting::class.java) { it.uri("/hello") }
@@ -1097,9 +1081,7 @@ class RestClientEngineIntegrationTest {
             //
             // Given
             val logger = LoggerFactory.getLogger(ResilientRestClientFactory::class.java) as Logger
-            val lines = ListAppender<ILoggingEvent>().apply { start() }
-            logger.addAppender(lines)
-            try {
+            capturing(logger) { lines ->
                 // When
                 newFactory(
                     RestClientProperties.Engine(endpoints = mapOf("b-trial" to RestClientEngine.JDK)),
@@ -1107,14 +1089,12 @@ class RestClientEngineIntegrationTest {
                 )
 
                 // Then
-                val messages = lines.list.map { it.formattedMessage }
+                val messages = lines.events.map { it.formattedMessage }
                 assertThat(messages).contains("HTTP engines: default=apache, per backend [a-stable=apache, b-trial=jdk, c-stable=apache]")
                 assertThat(messages.single { it.startsWith("HTTP engine 'apache' for a-stable, c-stable: applies ") })
                     .contains("max-connections=100", "does not apply -")
                 assertThat(messages.single { it.startsWith("HTTP engine 'jdk' for b-trial: applies ") })
                     .contains("does not apply max-connections=100", "cancellation: ")
-            } finally {
-                logger.detachAppender(lines)
             }
         }
 
@@ -1178,19 +1158,18 @@ class RestClientEngineIntegrationTest {
             // Given
             val transport = ReactorNettyEngineTransport(EngineTransport.Settings(MeshProperties.Transport(), RestClientProperties.Pool(), null))
             val logger = LoggerFactory.getLogger("disposal-probe") as Logger
-            val lines = ListAppender<ILoggingEvent>().apply { start() }
-            logger.addAppender(lines)
             try {
-                // When
-                val (failure, elapsed) = timed { transport.awaitDisposal(what = "connection pool", disposal = Mono.never(), logger = logger, wait = Duration.ofMillis(100)) }
+                capturing(logger) { lines ->
+                    // When
+                    val (failure, elapsed) = timed { transport.awaitDisposal(what = "connection pool", disposal = Mono.never(), logger = logger, wait = Duration.ofMillis(100)) }
 
-                // Then
-                assertThat(failure).isNull()
-                assertThat(elapsed).isLessThan(Duration.ofSeconds(1))
-                assertThat(lines.list.single { it.level == Level.WARN }.formattedMessage)
-                    .isEqualTo("HTTP engine 'reactor-netty': connection pool not disposed within PT0.1S - leaving it to finish on its own")
+                    // Then
+                    assertThat(failure).isNull()
+                    assertThat(elapsed).isLessThan(Duration.ofSeconds(1))
+                    assertThat(lines.events.single { it.level == Level.WARN }.formattedMessage)
+                        .isEqualTo("HTTP engine 'reactor-netty': connection pool not disposed within PT0.1S - leaving it to finish on its own")
+                }
             } finally {
-                logger.detachAppender(lines)
                 transport.shutdown(deadlineNanos = System.nanoTime(), nanoTime = System::nanoTime, window = Duration.ZERO, logger = logger)
             }
         }
@@ -1281,6 +1260,10 @@ class RestClientEngineIntegrationTest {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
     /** The authority the JDK client sends for the WireMock base URL - the triplet host of every default endpoint. */
     private fun localAuthority(): String = "localhost:${wireMock.port()}"
 
@@ -1289,15 +1272,7 @@ class RestClientEngineIntegrationTest {
         vararg aliases: String,
         host: String = localAuthority(),
         individualRequestTimeoutMs: Long = 1000,
-    ): MeshProperties =
-        MeshProperties(
-            defaults =
-                MeshProperties.Defaults(
-                    individualRequestTimeoutMs = individualRequestTimeoutMs,
-                    transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl()),
-                ),
-            endpoints = aliases.map { MeshProperties.EndpointConfig(triplet = "/endpoint/$host/GET/$it", alias = it) },
-        )
+    ): MeshProperties = meshOf(wireMock.baseUrl(), host, *aliases, individualRequestTimeoutMs = individualRequestTimeoutMs)
 
     private fun budget(timeout: Duration): TimeLimiterConfig =
         TimeLimiterConfig
@@ -1351,8 +1326,8 @@ class RestClientEngineIntegrationTest {
             .`as`("the abandoned exchange on %s must release its bulkhead permit within %s", engine, PROMPTLY)
             .isTrue()
         val transport = factory.engineTransports.getValue(engine)
-        if (transport.connectionsInUse() != null) {
-            assertThat(eventually(PROMPTLY) { transport.connectionsInUse() == 0 })
+        if (transport.exchangesInFlight() != null) {
+            assertThat(eventually(PROMPTLY) { transport.exchangesInFlight() == 0 })
                 .`as`("the abandoned exchange on %s must release its connection within %s", engine, PROMPTLY)
                 .isTrue()
         }
@@ -1363,15 +1338,7 @@ class RestClientEngineIntegrationTest {
         authority: String,
         alias: String,
         individualRequestTimeoutMs: Long = 1000,
-    ): MeshProperties =
-        MeshProperties(
-            defaults =
-                MeshProperties.Defaults(
-                    individualRequestTimeoutMs = individualRequestTimeoutMs,
-                    transport = MeshProperties.Transport(sidecarBaseUrl = "http://$authority"),
-                ),
-            endpoints = listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/$authority/GET/$alias", alias = alias)),
-        )
+    ): MeshProperties = meshOf("http://$authority", authority, alias, individualRequestTimeoutMs = individualRequestTimeoutMs)
 
     /**
      * Captures the factory's WARN lines for [block], which reads them through the function it is given - from any
@@ -1379,12 +1346,8 @@ class RestClientEngineIntegrationTest {
      */
     private fun capturingFactoryWarnings(block: (warnings: () -> List<String>) -> Unit) {
         val logger = LoggerFactory.getLogger(ResilientRestClientFactory::class.java) as Logger
-        val lines = CapturingAppender { it.level == Level.WARN }.apply { start() }
-        logger.addAppender(lines)
-        try {
+        capturing(logger, accept = { it.level == Level.WARN }) { lines ->
             block { lines.events.map { it.formattedMessage } }
-        } finally {
-            logger.detachAppender(lines)
         }
     }
 

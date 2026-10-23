@@ -10,17 +10,14 @@ import org.junit.jupiter.api.Test
  * instead of the module's reference configuration ([ConfigurationFiles.REFERENCE], the documented example a host
  * copies from; a library ships no `application.yml`), so an edit to the reference cannot break it.
  *
- * 1. What is tested: that the exchange stream legatium-webclient-logging writes is switched on and audible -
- *    the `adapter-http-exchange` logger at INFO or below, the library's own logger at WARN or below - that this
- *    library's own loggers are addressed under their real package `eu.inqudium.veredium`, and that the
- *    `adapter-logging` block sets the values this module relies on: headers logged and masked with an explicit
- *    plaintext allowlist, bodies on failure only, the 16 KB capture cap.
- * 2. Success criteria: the bound `logging.level` map carries the logger names with a permitted level,
- *    and the `adapter-logging` keys bind to the expected values.
- * 3. Why it matters: the logger names are literals in a YAML file and in the library; a typo in either leaves
- *    the level addressing nothing, silently. And the `adapter-logging` values are what the runbook's queries
- *    assume - the Host header readable, the token a fingerprint, the error body present - so a drift here is a
- *    runbook that stops answering, not a build that fails.
+ * It pins that the exchange stream legatium-webclient-logging writes is switched on and audible - the
+ * `adapter-http-exchange` logger at INFO or below, the library's own logger at WARN or below - that this
+ * library's own loggers are addressed under their real package `eu.inqudium.veredium`, and that the
+ * `adapter-logging` block sets the values this module relies on: headers logged and masked with an explicit
+ * plaintext allowlist, bodies on failure only, the 16 KB capture cap. The logger names are literals in a YAML
+ * file and in the library, and a typo in either leaves the level addressing nothing, silently. The
+ * `adapter-logging` values are what an operator's log queries assume - the Host header readable, the token a
+ * fingerprint, the error body present - so a drift here is a query that stops answering, not a build that fails.
  */
 class LoggingLevelContractTest {
     private val levels: Map<String, String> = bind("logging.level")
@@ -110,7 +107,7 @@ class LoggingLevelContractTest {
             // What is tested: the header selection and the plaintext allowlist.
             // Success criteria: includes "*" on both directions; Host on the request plaintext allowlist; no
             //   X-Access-Token on it.
-            // Why it matters: the runbook reads the backend off the Host header next to adapter_name, and the
+            // Why it matters: a log query reads the backend off the Host header next to adapter_name, and the
             //   token must stay a fingerprint whatever else is added to the allowlist.
             //
             // Given / When / Then
@@ -126,7 +123,7 @@ class LoggingLevelContractTest {
             // What is tested: the body modes and the capture cap of the fixture.
             // Success criteria: `on-failure` for both directions and `max-body-bytes` 16384.
             // Why it matters: a body on every call is customer data on every line. `on-failure` keeps the error
-            //   body the runbook needs and drops the rest; 16384 is the library default, written out so the cap
+            //   body an operator needs and drops the rest; 16384 is the library default, written out so the cap
             //   is a visible decision rather than an inherited one.
             //
             // Given / When / Then

@@ -160,6 +160,10 @@ class ResponseValidationTest {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
     /** A value with one constraint it violates. */
     private class TooLong {
         @field:Size(max = 3)

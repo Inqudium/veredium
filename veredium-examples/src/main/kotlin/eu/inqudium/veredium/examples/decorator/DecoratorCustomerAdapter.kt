@@ -36,7 +36,7 @@ class DirectoryFailureException(
  * same way.
  */
 @Component
-class LegacyCustomerDirectory(
+class DecoratorCustomerAdapter(
     private val decorator: BlockingResilienceDecorator,
     private val httpClient: CloseableHttpClient,
     private val objectMapper: ObjectMapper,

@@ -26,7 +26,7 @@ import java.time.Duration
  * settings it applies, and its shutdown.
  *
  * Created by the factory only for an engine some backend selects, at most once per factory, and shared by every
- * backend on that engine - one pool per engine, as there is one pool today. Nothing of it is a Spring bean, so
+ * backend on that engine - one pool per engine. Nothing of it is a Spring bean, so
  * nothing of it is visible to, or replaceable by, the host's own HTTP client wiring.
  *
  * Every subclass defines [cancellation] honestly: what an interrupted worker (a TimeLimiter expiry, a caller
@@ -42,6 +42,12 @@ internal abstract class EngineTransport(
      * once per backend, when the factory builds its client.
      */
     abstract fun requestFactory(endpoint: ResolvedTimeouts): ClientHttpRequestFactory
+
+    /**
+     * The engine's name, `restclient-<engine key>`: the stem of the threads it owns, and the pool name the startup
+     * guard sizes the bulkheads against.
+     */
+    abstract val name: String
 
     /** The mesh and pool settings this engine applies, each with the value or the engine knob it lands on. */
     abstract val applied: List<String>
@@ -59,11 +65,11 @@ internal abstract class EngineTransport(
     abstract val isClosed: Boolean
 
     /**
-     * The connections the engine has handed to exchanges right now (queued requests included where the engine
-     * counts them), or `null` when the engine does not expose the number - the JDK client. What a draining
-     * shutdown waits on, and what a test reads to see an abandoned exchange give its connection back.
+     * The exchanges in flight on the engine right now - the connections it has handed out, queued requests included
+     * where the engine counts them - or `null` when the engine does not expose the number: the JDK client. What a
+     * draining shutdown waits on, and what a test reads to see an abandoned exchange give its connection back.
      */
-    abstract fun connectionsInUse(): Int?
+    abstract fun exchangesInFlight(): Int?
 
     /**
      * Releases the engine's resources, waiting for in-flight exchanges to finish until [deadlineNanos] (on

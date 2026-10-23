@@ -217,7 +217,7 @@ class WebClientEngineConfigTest {
             //   same settings, and the sum must not wrap to a negative capacity.
             //
             // Given / When / Then
-            assertThat(JettyTransport.jettyQueueCapacity(maxConnections, pendingAcquireMaxCount)).isEqualTo(expected)
+            assertThat(JettyEngineTransport.jettyQueueCapacity(maxConnections, pendingAcquireMaxCount)).isEqualTo(expected)
         }
 
         @Test

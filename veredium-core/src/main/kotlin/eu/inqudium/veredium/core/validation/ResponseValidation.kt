@@ -79,15 +79,15 @@ class ResponseValidation(
     /** Whether a detected violation FAILS the call or is only REPORTED - one posture for the whole app. */
     val failOnViolation: Boolean get() = validation.failOnViolation
 
+    /** For the startup line: whether a provider is there at all. */
+    val providerVerdict: String =
+        if (validator != null) "present, messages pinned to English" else "MISSING - validation cannot run for any backend"
+
     /** Whether [alias] validates at all: its own override when set, otherwise the shared default. */
     fun isEnabledFor(alias: String): Boolean = validation.isEnabledFor(alias)
 
     /** The validator for [alias], or `null` when validation is off for it - so the per-call path carries no toggle. */
     fun validatorFor(alias: String): Validator? = validator.takeIf { isEnabledFor(alias) }
-
-    /** For the startup line: whether a provider is there at all. */
-    val providerVerdict: String =
-        if (validator != null) "present, messages pinned to English" else "MISSING - validation cannot run for any backend"
 
     /**
      * The aliases of [aliases] that validate, sorted, or `none` - the startup line's second argument. Worth a

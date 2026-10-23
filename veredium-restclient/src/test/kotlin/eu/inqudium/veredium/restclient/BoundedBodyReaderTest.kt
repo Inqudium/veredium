@@ -322,6 +322,10 @@ class BoundedBodyReaderTest {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
     /** A non-repeating byte pattern: position `i` holds `i % 251`, a prime, so no chunk size aligns with it. */
     private fun pattern(size: Int): ByteArray = ByteArray(size) { (it % 251).toByte() }
 

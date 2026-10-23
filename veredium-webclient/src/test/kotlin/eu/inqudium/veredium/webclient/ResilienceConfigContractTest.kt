@@ -21,21 +21,19 @@ import org.springframework.core.env.MapPropertySource
  * files - the reference configuration ([REFERENCE]) and the test fixture ([FIXTURE]) - checked statically, from
  * the files alone.
  *
- * 1. What is tested: that every mesh alias (derived from its triplet exactly as at runtime, by binding
- *    `app.mesh` into [MeshProperties]) is declared under `resilience4j.circuitbreaker.instances`,
- *    `resilience4j.timelimiter.instances` AND `resilience4j.bulkhead.instances`; and that the bulkheads of those
- *    aliases together admit no more concurrent calls than the shared pool has connections -
- *    `sum(max-concurrent-calls) <= app.mesh.defaults.transport.max-connections`.
- * 2. Success criteria: for both files the check reports no problem; and the check itself is shown to bite - the
- *    reference configuration with one bulkhead raised by a single permit is reported, naming the sum and the
- *    pool size.
- * 3. Why it matters: both rules are invisible when broken. An undeclared alias still gets an instance - on the
- *    registry default, silently - and the core's `MeshResilienceStartupGuard` refuses that at startup; this test
- *    moves the refusal to the build of the file that documents the rule. An over-committed pool starts fine:
- *    the excess queues for a connection instead of being shed by its bulkhead, and the pending-acquire timeout
- *    that follows is a FAILURE on the breaker of whichever backend is waiting, not necessarily the one holding
- *    the connections. At runtime the startup guard only WARNs about it (a deliberate over-commit can be right
- *    for a host); for the configuration this module publishes as its reference it is a hard rule.
+ * It checks that every mesh alias (derived from its triplet exactly as at runtime, by binding `app.mesh` into
+ * [MeshProperties]) is declared under `resilience4j.circuitbreaker.instances`, `resilience4j.timelimiter.instances`
+ * AND `resilience4j.bulkhead.instances`, and that the bulkheads of those aliases together admit no more
+ * concurrent calls than the shared pool has connections -
+ * `sum(max-concurrent-calls) <= app.mesh.defaults.transport.max-connections` - and shows that the check bites.
+ *
+ * Both rules are invisible when broken. An undeclared alias still gets an instance - on the registry default,
+ * silently - and the core's [eu.inqudium.veredium.core.resilience.MeshResilienceStartupGuard] refuses that at
+ * startup; this test moves the refusal to the build of the file that documents the rule. An over-committed pool
+ * starts fine: the excess queues for a connection instead of being shed by its bulkhead, and the pending-acquire
+ * timeout that follows is a FAILURE on the breaker of whichever backend is waiting, not necessarily the one
+ * holding the connections. At runtime the startup guard only WARNs about it (a deliberate over-commit can be
+ * right for a host); for the configuration this module publishes as its reference it is a hard rule.
  *
  * The per-alias `max-concurrent-calls` is not read off the YAML by hand: the `resilience4j.bulkhead` keys are
  * handed to Resilience4j's own Boot auto-configuration and the value is read off the instance it builds, so a

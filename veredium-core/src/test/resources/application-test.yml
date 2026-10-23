@@ -96,7 +96,7 @@ resilience4j:
   circuitbreaker:
     configs:
       mesh-backend:
-        # NOTE: a bulkhead rejection is NOT counted as a backend failure - see ClientSideFailurePolicy, which
+        # Invariant: a bulkhead rejection is NOT counted as a backend failure - see ClientSideFailurePolicy, which
         # the mesh customizer installs on every instance below while Resilience4j builds it. That invariant
         # lives in code on purpose, so it cannot be lost by an edit to this block.
         #

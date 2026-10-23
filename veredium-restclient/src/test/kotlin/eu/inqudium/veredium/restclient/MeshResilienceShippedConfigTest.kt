@@ -25,14 +25,12 @@ import org.springframework.web.client.HttpClientErrorException
  * stack's verdicts and the core's guard agree. (The "Shipped" in the name is the one the core's tests and
  * ADR-0001 refer to it by, in both stacks.)
  *
- * What is tested: that the context starts, and that every instance the file declares shows the customizer's
- * effect with the verdicts this module ships: a 404 in the shape `RestClient` throws it is not recorded, this
- * module's buffer-limit exception is ignored, the derived budget is on every TimeLimiter.
- * Success criteria: the context has not failed and every endpoint's instances pass the probes.
- * Why it matters: the mechanism - customizer beans, the guard, both directions of failure - is pinned once in
- * the core (`MeshResilienceContextTest`) with a stand-in stack. Only a context with the real [RestClientVerdicts]
- * shows that the probe the guard applies is one this stack's policy recognises; a stack whose probe did not
- * match its own reader would fail every start.
+ * The test checks that the context starts and that every instance the file declares shows the customizer's effect
+ * with the verdicts this module ships: a 404 in the shape `RestClient` throws it is not recorded, this module's
+ * buffer-limit exception is ignored, the derived budget is on every TimeLimiter. The mechanism - customizer beans,
+ * the guard, both directions of failure - is pinned once in the core (`MeshResilienceContextTest`) with a stand-in
+ * stack. Only a context with the real [RestClientVerdicts] shows that the probe the guard applies is one this
+ * stack's policy recognises; a stack whose probe did not match its own reader would fail every start.
  *
  * Determinism: a real context, no I/O beyond the classpath, no WireMock - nothing is called, only configured.
  */
@@ -75,11 +73,15 @@ class MeshResilienceShippedConfigTest {
         }
     }
 
-    /** Resilience4j's three auto-configurations on the reference keys, plus this stack's verdicts configuration. */
+    /**
+     * Resilience4j's three auto-configurations on the reference keys, plus [RestClientConfiguration] - the core's
+     * mesh configuration and [RestClientMeshRegistrar], which registers the customizers and the guard with this
+     * stack's verdicts.
+     */
     private fun referenceContext(): ApplicationContextRunner =
         ApplicationContextRunner()
             .withInitializer { context ->
-                context.environment.propertySources.addFirst(MapPropertySource("reference-application-yml", referenceProperties("resilience4j.", "app.mesh.")))
+                context.environment.propertySources.addFirst(MapPropertySource("reference-application-yml", ConfigurationFiles.referenceProperties("resilience4j.", "app.mesh.")))
             }.withConfiguration(
                 AutoConfigurations.of(
                     TimeLimiterAutoConfiguration::class.java,

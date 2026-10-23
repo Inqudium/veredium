@@ -14,24 +14,21 @@ import org.junit.jupiter.params.provider.ValueSource
  * in [ConfigurationFiles]: the logger IDENTITIES in both the reference `application.yml` and the fixture, the
  * tunable `adapter-logging` VALUES in the fixture only.
  *
- * 1. What is tested: (both files) that the `logging.level` entry for the exchange stream addresses the SAME
- *    logger `adapter-logging.logger-name` makes the library write on, at INFO or below; that the library's own
- *    logger stays audible; that this module's own classes are addressed under their real package
- *    (`eu.inqudium.veredium`); that root is at INFO; that the library is switched on by an explicit entry.
- *    (fixture) the `adapter-logging` values the runbook relies on: headers logged and masked with an explicit
- *    plaintext allowlist, bodies on failure only, the 16 KB capture cap.
- * 2. Success criteria: the bound `logging.level` map carries the logger name the `adapter-logging` block
- *    declares, with a permitted level, the `eu.inqudium.veredium` key and no key of the origin project's
- *    package, and the `adapter-logging` keys bind to the expected values.
- * 3. Why it matters: the exchange logger's name is a literal in two places of the SAME file - the level key and
- *    the library property - and nothing but this test relates them. A mismatch leaves the level addressing
- *    nothing, silently: the stream then inherits the root level, and the operational knob "WARN = only
- *    failures, timeouts and slow calls" filters nothing. Such a drift in the reference file (a level key that
- *    differs from `logger-name` by one segment) is invisible to a test bound to the fixture alone, and so is a
- *    level for the origin project's package (`com.ing`), whose classes do not exist here - hence both files.
- *    And the `adapter-logging` values are what the runbook's queries assume - the Host header
- *    readable, the token a fingerprint, the error body present - so a drift there is a runbook that stops
- *    answering, not a build that fails.
+ * In both files the tests pin that the `logging.level` entry for the exchange stream addresses the SAME logger
+ * `adapter-logging.logger-name` makes the library write on, at INFO or below; that the library's own logger stays
+ * audible; that this module's own classes are addressed under their real package (`eu.inqudium.veredium`) and no
+ * key names the origin project's package; that root is at INFO; and that the library is switched on by an explicit
+ * entry. In the fixture they pin the `adapter-logging` values the log queries rely on: headers logged and masked
+ * with an explicit plaintext allowlist, bodies on failure only, the 16 KB capture cap.
+ *
+ * The exchange logger's name is a literal in two places of the SAME file - the level key and the library
+ * property - and nothing but these tests relates them. A mismatch leaves the level addressing nothing, silently:
+ * the stream then inherits the root level, and the operational knob "WARN = only failures, timeouts and slow
+ * calls" filters nothing. Such a drift in the reference file (a level key that differs from `logger-name` by one
+ * segment) is invisible to a test bound to the fixture alone, and so is a level for the origin project's package
+ * (`com.ing`), whose classes do not exist here - hence both files. The `adapter-logging` values are what the log
+ * queries assume - the Host header readable, the token a fingerprint, the error body present - so a drift there is
+ * a query that stops answering, not a build that fails.
  */
 class LoggingLevelContractTest {
     @Nested
@@ -127,7 +124,7 @@ class LoggingLevelContractTest {
             // What is tested: the header selection and masking of the fixture's adapter-logging block.
             // Success criteria: includes "*" on both directions, Host on the request plaintext allowlist, and no
             //   X-Access-Token variant on it.
-            // Why it matters: the runbook reads the backend off the Host header next to adapter_name, and the
+            // Why it matters: a log query reads the backend off the Host header next to adapter_name, and the
             //   token must stay a fingerprint whatever else is allowed in plaintext.
             //
             // Given / When / Then
@@ -142,7 +139,7 @@ class LoggingLevelContractTest {
             // What is tested: the body modes and the capture cap of the fixture.
             // Success criteria: both directions `on-failure`, `max-body-bytes` 16384.
             // Why it matters: logging every body of every call would put customer data on every line;
-            //   `on-failure` keeps the error body the runbook needs and drops the rest, and 16384 - the library
+            //   `on-failure` keeps the error body an operator needs and drops the rest, and 16384 - the library
             //   default - is written out so the cap is reviewable. The body mode of the REFERENCE file is a
             //   rollout posture and a value an operator tunes, which is why it is not pinned there
             //   (LegatiumExchangeLoggingIntegrationTest reads the reference mode as it is).

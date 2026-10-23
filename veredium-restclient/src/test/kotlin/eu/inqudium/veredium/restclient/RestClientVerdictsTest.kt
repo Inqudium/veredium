@@ -72,13 +72,12 @@ class RestClientVerdictsTest {
             //   peak opens the breaker and takes the backend down for waitDurationInOpenState - the load
             //   shedding meant to absorb the peak amplifies it into an outage instead.
             //
-            // Given: a single-permit bulkhead that rejects immediately, and the customizer has run
+            // Given: a single-permit bulkhead that rejects immediately, the customizer has run, and the only
+            // permit is held by a call that has not completed
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(circuitBreakerRegistry, singlePermitBulkheads())
             CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), RestClientVerdicts.breakerVerdicts)
             val circuitBreaker = circuitBreakerRegistry.circuitBreaker(alias)
-
-            // And: the only permit is held by a call that has not completed
             val entered = CountDownLatch(1)
             val release = CountDownLatch(1)
             val holding =

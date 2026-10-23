@@ -66,6 +66,8 @@ internal class JdkEngineTransport(
     private val meshTransport = settings.transport
     private val pool = settings.pool
 
+    override val name: String = CLIENT_NAME
+
     /**
      * The client's executor and Spring's request-body writer, owned here and shut down with the client. Virtual
      * threads, named after the engine, instead of the JDK's per-client cached platform pool and Spring's
@@ -106,7 +108,7 @@ internal class JdkEngineTransport(
 
     override val isClosed: Boolean get() = httpClient.isTerminated
 
-    override fun connectionsInUse(): Int? = null
+    override fun exchangesInFlight(): Int? = null
 
     /**
      * Stops accepting requests, waits until the deadline for the exchanges in flight, then aborts the rest.
@@ -152,7 +154,7 @@ internal class JdkEngineTransport(
     }
 
     companion object {
-        /** The client's name on the shutdown line and its threads' name prefix. */
+        /** The engine's [name]: its threads' name prefix. */
         const val CLIENT_NAME: String = "restclient-jdk"
 
         /**

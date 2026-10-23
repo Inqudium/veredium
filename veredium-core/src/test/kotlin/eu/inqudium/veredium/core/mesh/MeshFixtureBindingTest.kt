@@ -165,6 +165,10 @@ class MeshFixtureBindingTest {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
     private fun bindMeshFromFixture(): MeshProperties {
         // Binds the TEST fixture the way Spring Boot binds a config file at startup (the class doc says why a
         // test-owned fixture).

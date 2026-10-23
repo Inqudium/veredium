@@ -22,7 +22,8 @@ import java.util.concurrent.Future
  *
  * `cancel` is the only thing that reaches a running call: it abandons the exchange and frees its bulkhead permit.
  * A future derived with `thenApply`, `handle` or `thenCombine` does not pass a cancel on to the one it came from,
- * so each method here hands it on itself ([cancelling]).
+ * so each method that returns a derived future hands it on itself ([cancelling]); [orders] returns the client's own
+ * future, which needs no such step.
  */
 @Component
 class AsyncCustomerAdapter(
@@ -77,6 +78,6 @@ class AsyncCustomerAdapter(
          * Invariant: once this future is done - completed, failed, or cancelled by the caller - none of [calls] is
          * left running. Cancelling a call that already ended is a no-op.
          */
-        fun <T> CompletableFuture<T>.cancelling(vararg calls: Future<*>): CompletableFuture<T> = apply { whenComplete { _, _ -> calls.forEach { it.cancel(true) } } }
+        fun <T> CompletableFuture<T>.cancelling(vararg calls: Future<*>): CompletableFuture<T> = also { it.whenComplete { _, _ -> calls.forEach { call -> call.cancel(true) } } }
     }
 }

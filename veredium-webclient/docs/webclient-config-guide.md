@@ -1,6 +1,6 @@
 # WebClient configuration guide
 
-> **Ownership & baseline.** Maintained by **Dirk Haase**. Verified against the code at commit `589d3890` (2026-07-30)
+> **Ownership & baseline.** Maintained by **Dirk Haase**. Reviewed against the code on 2026-10-23.
 > Where this text and the code disagree, the code
 > wins.
 
@@ -62,11 +62,10 @@ app:
 
 The upper bound on how much of a response body the codec will buffer. It bounds the *exchange*, not the log: how
 much of a body reaches the exchange event is `adapter-logging.max-body-bytes` (§4.1), an independent number.
-(Until ticket 30 the module's own diary derived its capture bound from this value; the library has its own.)
 
-256 KB is Spring's standard `ExchangeStrategies` ceiling. The previous 8 KB value was too small for a real
-access-profile list and deterministically rejected the otherwise successful response. At the shared pool's
-default maximum of 100 concurrent connections, the new ceiling bounds simultaneous response buffers at roughly
+256 KB is Spring's standard `ExchangeStrategies` ceiling. 8 KB is too small for a real access-profile list and
+deterministically rejects the otherwise successful response. At the shared pool's default maximum of 100
+concurrent connections, the ceiling bounds simultaneous response buffers at roughly
 25 MB.
 
 - **Guard:** must be in `1 B .. Int.MAX_VALUE B`. Both ends are load-bearing:
@@ -142,7 +141,7 @@ itself; this flag decides whether it *keeps* it.
   factory (which a test may do repeatedly). Both branches are pinned by
   `WebClientReactorContextPropagationConfigurationTest` (a ThreadLocal carried across a thread hop with the toggle on,
   nothing changed with it off).
-- Self-contained: it resolves from this module's own property and references nothing from sync-bridge.
+- Self-contained: it resolves from this module's own property and from nothing else of the host.
 - See also §4.2 for the **central** disable-filter that can suppress the observation even when this is on.
 
 ### 1.4 `validation.*` — response Bean Validation (`ResponseValidationProperties`, shared with the blocking client in `veredium-core`)
@@ -329,19 +328,23 @@ without it the factory refuses to start, naming the key, the backends on `jdk` a
 JDK itself, so a property set programmatically after the JDK client initialised is reported as missing -
 correctly, since the client ignores it. (`JdkEngineRestrictedHostHeaderTest` pins this in a JVM of its own.)
 
-**Cancellation.** The TimeLimiter cancels the subscription when the budget runs out; on every engine that
-aborts the exchange and closes its connection promptly - well before the response timeout - and gives the
-bulkhead permit back (`WebClientEngineIntegrationTest`, against a backend that never answers). Reactor Netty and
+**Cancellation.** The TimeLimiter cancels the subscription when the budget runs out; while the exchange waits for
+the response head, that aborts the exchange on every engine and closes its connection promptly - well before the
+response timeout - and gives the bulkhead permit back (`WebClientEngineIntegrationTest`, against a backend that
+never answers). A body cancelled after the head arrived (a codec refusal, a TimeLimiter abort) drops the
+connection on Reactor Netty, Jetty and Apache; the JDK client reads such a body to its end on the same
+connection, as its startup line says (pinned by the dripping-body cases of the same test). Reactor Netty and
 Jetty (`abortOnCancel`) do it themselves, the JDK client through the cancelled `CompletableFuture`. Spring's
 Apache connector drops the `Future` of the exchange it starts, so a cancellation alone would leave the exchange
-running until the response timeout; the module keeps that `Future` per exchange and cancels it - while waiting
-for the response and while reading the body. Some engines report the aborted exchange as a failure after the
+running until the response timeout; the module keeps that `Future` per exchange and cancels it while waiting
+for the response. Reading the body needs no help: a body cancelled before its end releases its connection
+through Spring's connector and Apache alone. Some engines report the aborted exchange as a failure after the
 cancellation; with no one left to receive it, Reactor would log it at ERROR as a dropped error, so the client
 writes it at DEBUG instead (`Exchange of backend '...' ended after cancellation: ...`). Only that case: an error
 an operator drops while the exchange was *not* cancelled still goes to the caller's own `onErrorDropped` hook
 or to Reactor's global handling.
 
-**Shutdown.** `shutdown()` releases each engine in use against ONE deadline (the longest response timeout of
+**Shutdown.** `shutdown()` shuts down each engine in use against ONE deadline (the longest response timeout of
 any endpoint + connect + pending-acquire + 1 s from the start of the shutdown), shared by the engines released
 one after another - so a factory on several engines does not take the bound once per engine. Every engine lets
 its calls in flight finish first, those still waiting for a connection included: Reactor Netty's pool is disposed
@@ -352,7 +355,8 @@ in-flight exchanges run to completion until the deadline, then it is shut down h
 waits for its in-flight exchanges until the deadline and then stops, with a WARN naming those it aborts; Apache waits for its exchanges in flight until the deadline, then its I/O reactor shuts down gracefully and is
 closed, with a WARN when the deadline ran out - and the exchanges it still had in flight are cancelled (WARN
 with their number), because closing the reactor completes none of their callers, who would otherwise wait out
-their budget. After `shutdown()` no new client can be built (`IllegalStateException`): it would create engine
+their budget. Every engine that did not drain reports it on the same WARN line, named by its engine key:
+`HTTP engine '<engine>' did not drain ... - closing it with ... still in flight`. After `shutdown()` no new client can be built (`IllegalStateException`): it would create engine
 resources nothing releases.
 
 **Fail-fast** (§5): an override key that names no mesh alias, a selected engine whose library is missing (the
@@ -658,8 +662,7 @@ library's auto-configuration hangs its filter on Boot's `WebClient.Builder` bean
 every client of the factory is a clone of that bean (§1.3) — nothing in this module wires it. The backend name
 reaches the event as `adapter_name` through a request attribute the factory sets once per client
 (`ClientRequestLoggingFilter.ADAPTER_NAME_ATTRIBUTE`); the URI template reaches it as `adapter_url_template`
-through the attribute `ResilientWebClient` stamps on every request. (Until ticket 30 the module wrote this event
-itself, as the "exchange diary"; [logging-guide.md](logging-guide.md) §0 records the change.)
+through the attribute `ResilientWebClient` stamps on every request.
 
 ```yaml
 adapter-logging:
@@ -683,16 +686,16 @@ logging:
     eu.inqudium.legatium.webclient.logging: WARN     # the library's own breadcrumb and fail-open lines
 ```
 
-- **The level is a filter, not a switch** (unlike the diary's): INFO shows every exchange, WARN keeps failures,
+- **The level is a filter, not a switch**: INFO shows every exchange, WARN keeps failures,
   timeouts, cancellations, slow calls and the four escalated rejections (401, 403, 408, 429), ERROR only calls
   that threw. The context-start switch is
   `adapter-logging.enabled`. Both logger names are pinned by `LoggingLevelContractTest`.
 - **Headers:** everything selected is masked by default; the `unmasked` lists are the plaintext allowlists. `Host`
   is readable because it is the second view of the backend next to `adapter_name`; `X-Access-Token` and
-  everything unknown render as `<length>:<16 hex>` — stricter than the diary's prefix-only masking.
+  everything unknown render as `<length>:<16 hex>`, which reveals no prefix of the value.
 - **Bodies:** `on-failure` logs a body only when the outcome is not `success` — a 4xx is `rejected`, so a 404's
   error body is there and a 200's customer data is not. The cap is 16 KB with a `[truncated, N bytes total]`
-  note; the diary's 256 KB (derived from `max-in-memory-size`) is gone, and so is the coupling.
+  note, independent of `max-in-memory-size`.
 - **Outcome vocabulary:** a 4xx answer is `rejected` with its status (the peer refused the request; INFO, and WARN
   for 401, 403, 408 and 429 — legatium ADR-0012, since 1.2.0); a 5xx a WARN
   `failure`; a caller's cancel *and* a TimeLimiter budget expiring are `cancelled` (the TimeLimiter cancels the
@@ -700,7 +703,7 @@ logging:
   produces no exchange and therefore no event — those verdicts stay on `ResilientWebClient`'s transport lines,
   which carry `adapter_name` and `adapter_url_template` under the library's field names so both loggers group
   by one field.
-  Pinned by `LegatiumExchangeLoggingIntegrationTest`; the runbook reads the fields accordingly.
+  Pinned by `LegatiumExchangeLoggingIntegrationTest`; a log query reads the fields accordingly.
 - **The caller's MDC** is restored around the event from the Reactor Context through the `ThreadLocalAccessor`s
   the host registered with Micrometer's context propagation (legatium ADR-0010). A coroutine `MDCContext` alone
   does not reach it — the host registers an accessor per key it wants on the event; the recipe is pinned in the
@@ -814,10 +817,9 @@ resilience4j:                                  # §3 (instance keys = derived al
 ## See also
 
 - [mesh-timeout.md](../../veredium-core/docs/mesh-timeout.md) — the mesh derivation and its R4j registration in depth.
-- [logging-guide.md](logging-guide.md) — the design of the former exchange diary, superseded by legatium (§0 there).
+- [logging-guide.md](logging-guide.md) — SUPERSEDED: the design of the module's own exchange diary, replaced by legatium and kept for its reasoning (§0 there says what still applies).
 - `legatium/docs/GUIDE.md` and `legatium-webclient-logging/docs/GUIDE.md` (outside this repository) — the library that writes the exchange event.
 - [metrics.md](metrics.md) — the emitted metrics and their cardinality.
-- `../../sync-bridge/docs/jvm-sidecar/timeout-leiter-mesh-call-muster.md` — the ladder rationale and the sidecar twin.
 - The reference configuration `src/test/resources/application.yml` is the authoritative example: a test resource,
   not part of the artefact, pinned by `ResilienceConfigContractTest`, `MeshResilienceShippedConfigTest`,
   `LegatiumExchangeLoggingIntegrationTest` and `WebClientPropertiesTest`.

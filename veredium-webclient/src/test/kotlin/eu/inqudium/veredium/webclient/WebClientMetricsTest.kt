@@ -35,7 +35,7 @@ class WebClientMetricsTest {
         }
 
         @Test
-        fun `should map the involved-parties POST lookup path to its POST template`() {
+        fun `should map the involved-parties lookup path to its lookup template`() {
             // What is tested: a static path next to a templated one on the same resource in another version
             //   (`/v5/involved-parties/lookup` and `/v6/involved-parties/{uuid}`).
             // Success criteria: the lookup path maps to the lookup template.
@@ -47,7 +47,7 @@ class WebClientMetricsTest {
         }
 
         @Test
-        fun `should map a concrete involved-party GET path with a UUID to the templated GET tag`() {
+        fun `should map a concrete involved-party path with a UUID to its template`() {
             // What is tested: the cardinality guard proper - a path variable collapsed into its template.
             // Success criteria: a path carrying a UUID maps to `/v6/involved-parties/{uuid}`.
             // Why it matters: a real call carries a per-request UUID in the path - exactly the value that would
@@ -201,7 +201,7 @@ class WebClientMetricsTest {
             assertThat(WebClientMetrics.uriTag("/v8/agreements/products/lookupsomething", staticOnly))
                 .isEqualTo(WebClientMetrics.UNKNOWN)
 
-            // And: the legitimate forms still match - exact, deeper segment, and with a query string
+            // ... while the legitimate forms still match - exact, deeper segment, and with a query string
             assertThat(WebClientMetrics.uriTag("/v8/agreements/products/lookup", staticOnly))
                 .isEqualTo("/v8/agreements/products/lookup")
             assertThat(WebClientMetrics.uriTag("/v8/agreements/products/lookup/42", staticOnly))

@@ -6,34 +6,27 @@ import com.github.tomakehurst.wiremock.client.WireMock.get
 import com.github.tomakehurst.wiremock.client.WireMock.okJson
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import eu.inqudium.veredium.examples.CustomerOverview
+import eu.inqudium.veredium.examples.ExampleContext
 import eu.inqudium.veredium.examples.Sidecar
 import eu.inqudium.veredium.examples.Sidecar.ADA
 import eu.inqudium.veredium.examples.Sidecar.ADAS_ORDERS
 import eu.inqudium.veredium.restclient.ResilientRestClient
-import eu.inqudium.veredium.testsupport.CapturingAppender
+import eu.inqudium.veredium.testsupport.capturing
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
-import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.test.context.DynamicPropertyRegistry
-import org.springframework.test.context.DynamicPropertySource
 import java.util.concurrent.TimeUnit
 
-/**
- * The asynchronous example as a host runs it: the whole Boot application, its adapter calling the stand-in sidecar.
- *
- * Like the other examples' contexts it stays off Micrometer's global registry, which it would join after another
- * context had registered meters there.
- */
-@SpringBootTest(classes = [AsyncExampleApplication::class], properties = ["management.metrics.use-global-registry=false"])
-class AsyncExampleTest {
-    @Autowired
-    private lateinit var adapter: AsyncCustomerAdapter
-
+/** The asynchronous example as a host runs it: the whole Boot application, its adapter calling the stand-in sidecar. */
+@ExampleContext(AsyncExampleApplication::class)
+class AsyncExampleTest(
+    private val adapter: AsyncCustomerAdapter,
+) {
     @BeforeEach
-    fun stubBackends() = Sidecar.reset()
+    fun stubBackends() {
+        Sidecar.reset()
+    }
 
     @Test
     fun `should deliver a customer on the future, and null for an unknown one`() {
@@ -76,25 +69,12 @@ class AsyncExampleTest {
             get(urlEqualTo("/v1/customers/c-slow")).willReturn(okJson("""{"id":"c-slow","name":"Slow"}""").withFixedDelay(30_000)),
         )
         val logger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
-        val level = logger.level
-        val appender = CapturingAppender { it.formattedMessage.startsWith("Cancelled request to backend 'customers'") }.apply { start() }
-        logger.level = Level.DEBUG
-        logger.addAppender(appender)
-        try {
+        capturing(logger, Level.DEBUG, accept = { it.formattedMessage.startsWith("Cancelled request to backend 'customers'") }) { appender ->
             // When
             adapter.overview("c-slow").cancel(true)
 
             // Then
             assertThat(appender.awaitEvents()).hasSize(1)
-        } finally {
-            logger.detachAppender(appender)
-            logger.level = level
         }
-    }
-
-    companion object {
-        @JvmStatic
-        @DynamicPropertySource
-        fun sidecar(registry: DynamicPropertyRegistry) = Sidecar.register(registry)
     }
 }

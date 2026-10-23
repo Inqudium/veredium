@@ -48,7 +48,7 @@ import java.time.Duration
  * which the per-alias `CircuitBreakerConfigCustomizer` of veredium-core (`MeshResilienceCustomizers.kt`, fed
  * with this stack's [WebClientVerdicts]) installs while Resilience4j builds the instance from
  * `resilience4j.circuitbreaker.instances.<alias>` - for every MESH ALIAS, and only those. Without that
- * customizer the invariant does not hold, and the core's `MeshResilienceStartupGuard` fails the start when it
+ * customizer the invariant does not hold, and the core's [eu.inqudium.veredium.core.resilience.MeshResilienceStartupGuard] fails the start when it
  * did not land.
  *
  * ## Three verdicts, not two
@@ -65,8 +65,9 @@ import java.time.Duration
  *
  * The middle row is the one that is easy to get wrong in the safe-looking direction. Ignoring a benign 4xx
  * also keeps it out of the sliding window, so on a 4xx-dominated backend the window fills with whatever was
- * left over and a few genuine faults become its entire content - the failure mode that opened the resolver
- * breaker at a nominal 100 % on 2026-07-31. The customizer's KDoc in veredium-core carries the numbers.
+ * left over and a few genuine faults become its entire content, and the breaker opens at a nominal 100 % failure
+ * rate against a backend that is serving. The measured case is recorded under D2, "Answered means healthy", in
+ * `veredium-restclient/docs/decisions.md`.
  *
  * The scope limit is load-bearing, not incidental: one customizer exists per `meshProperties.resolveAll()`
  * alias, so a breaker constructed OUTSIDE this module never receives the invariant and has to carry its own

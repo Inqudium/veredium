@@ -27,8 +27,8 @@ import java.util.function.Consumer
 /**
  * A resilience-wrapped HTTP caller for a single downstream backend, handed out by [ResilientWebClientFactory]
  * instead of a bare [WebClient]. It owns the per-call pipeline - error surfacing, body (de)serialisation,
- * the R4j decoration ([ReactiveResilienceDecorator]) and the reactive->coroutine bridge - so a caller only
- * describes the request. [backendName] doubles as the Resilience4j instance name.
+ * the R4j decoration ([ReactiveResilienceDecorator]) - and returns a cold [Mono], so a caller only describes the
+ * request; a coroutine caller bridges with `awaitSingle()`. [backendName] doubles as the Resilience4j instance name.
  *
  * The exchange itself is NOT logged here. legatium-webclient-logging hangs its filter on Boot's
  * `WebClient.Builder` bean, which the factory clones per backend, and writes one structured event per exchange
@@ -41,10 +41,9 @@ import java.util.function.Consumer
  *
  * The returned `Mono<T>` emits exactly one value or an error - never completes empty. A 2xx answer without a
  * body (a 204, or a 200 with an empty entity) fails with [EmptyResponseBodyException] naming the backend and the
- * expected type; a non-2xx answer fails with the `WebClientResponseException` `retrieve()` raises. Until
- * 2026-10-21 an empty body completed the `Mono` empty instead: no error line, a success for the breaker, and a
- * `NoSuchElementException` out of the caller's `awaitSingle()` that named nothing - the blocking twin failed
- * the same answer with a parse error, so the two stacks disagreed. The failure is raised AFTER the
+ * expected type; a non-2xx answer fails with the [WebClientResponseException] `retrieve()` raises. An empty
+ * `Mono` would give no error line and leave the caller's `awaitSingle()` a `NoSuchElementException` that names
+ * nothing, and the blocking twin fails the same answer with the same exception. The failure is raised AFTER the
  * Resilience4j decoration, like a deserialisation failure: the backend answered promptly with a success status,
  * so the breaker records a success, and the error line reports the anomaly at WARN.
  *
@@ -114,11 +113,12 @@ class ResilientWebClient(
     /** The endpoint's path template - the URI an adapter builds its calls on, and the low-cardinality tag of their metrics. */
     val pathTemplate: String get() = endpoint.pathTemplate
 
-    /** The transport's rung of the ladder for this backend - what an adapter publishes as `BaseAdapter.responseTimeout`. */
+    /** The transport's rung of the ladder for this backend - what an adapter publishes as [eu.inqudium.veredium.core.BaseAdapter.responseTimeout]. */
     val responseTimeout: Duration get() = endpoint.responseTimeout
 
-    /** The TimeLimiter budget of this backend - what an adapter publishes as `BaseAdapter.timeLimiterTimeout`. */
+    /** The TimeLimiter budget of this backend - what an adapter publishes as [eu.inqudium.veredium.core.BaseAdapter.timeLimiterTimeout]. */
     val timeLimiterTimeout: Duration get() = resilience.requestBudget(backendName)
+
     private val logger: Logger = LoggerFactory.getLogger(ResilientWebClient::class.java)
 
     /** The transport lines, the size sample and the validation of a call - shared with the blocking client. */
@@ -231,12 +231,13 @@ class ResilientWebClient(
                 val startNanos = nanoTime()
                 val elapsedMillis = { TimeUnit.NANOSECONDS.toMillis(nanoTime() - startNanos) }
 
-                // The source produces only the raw JSON string - all the CircuitBreaker, TimeLimiter and
-                // Bulkhead observe. Deserialisation is deliberately kept off this inner mono (see below).
                 // Set when the exchange itself is cancelled - by the TimeLimiter, the breaker's or the caller's
                 // cancellation travelling up - which is what makes a failure the engine reports afterwards the
                 // expected end of an aborted exchange (see the onErrorDropped hook at the end).
                 val exchangeCancelled = AtomicBoolean(false)
+
+                // The source produces only the raw JSON string - all the CircuitBreaker, TimeLimiter and
+                // Bulkhead observe. Deserialisation is deliberately kept off this inner mono (see below).
                 val rawMono = spec.retrieve().bodyToMono(String::class.java).doOnCancel { exchangeCancelled.set(true) }
 
                 // Deserialisation runs AFTER the decoration: a parse failure is a client-side error, so the

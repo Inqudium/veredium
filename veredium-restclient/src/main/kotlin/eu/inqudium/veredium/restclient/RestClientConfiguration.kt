@@ -28,8 +28,8 @@ import org.springframework.context.annotation.Import
  *   without any client - so the bean is declared here, and here is where this module names its workers:
  *   `restclient-call-<n>` is the thread name on every log line written during an exchange, which is how a
  *   reader tells this module's calls from a host's own decorated calls in the same JVM. The observation
- *   registry is optional (consequence 2 in the decorator's KDoc): absent, the exchange's observation starts as
- *   its own root.
+ *   registry is optional (the decorator's KDoc, "The thread hand-off the TimeLimiter needs"): absent, the
+ *   exchange's observation starts as its own root.
  *
  * The scanned `@Component`s of this module - [ResilientRestClientFactory], [RestClientObservationReport] - are
  * deliberately not declared here as well: they are components because they have dependencies the context
@@ -39,6 +39,10 @@ import org.springframework.context.annotation.Import
 @EnableConfigurationProperties(RestClientProperties::class)
 @Import(MeshResilienceConfiguration::class, RestClientMeshRegistrar::class)
 class RestClientConfiguration {
+    /**
+     * This module's [BlockingResilienceDecorator]: over the host's three Resilience4j registries, with the host's
+     * [ObservationRegistry] when there is one, and with workers named [WORKER_NAME_PREFIX]`<n>`.
+     */
     @Bean
     fun blockingResilienceDecorator(
         circuitBreakerRegistry: CircuitBreakerRegistry,

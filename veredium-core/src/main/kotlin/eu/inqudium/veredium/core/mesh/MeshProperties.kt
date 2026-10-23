@@ -3,12 +3,13 @@ package eu.inqudium.veredium.core.mesh
 import org.springframework.boot.context.properties.ConfigurationProperties
 
 /**
- * Binds the app-side mesh config (`app.mesh`) that Helm renders from the single `meshEndpoints` source. The
- * triplet is the canonical id (the sidecar key without the surrounding []), carried as a list entry because it
- * is unwieldy as a property key. Ported from the PoC (`helm-mesh-timeouts/kotlin`, package
- * `eu.mesh.timeouts.poc`) and extended with the per-endpoint client target fields (`baseUrl` / `headers`; the
- * Host header is derived from the triplet). This is the single per-endpoint tree, feeding [MeshResilienceConfiguration]
- * and [ResolvedTimeouts], and it is the same tree for both client stacks: the blocking `veredium-restclient`
+ * Binds the app-side mesh config (`app.mesh`), which describes the same endpoints as the sidecar's own config and
+ * should be rendered from the same source. The triplet is the canonical id (the sidecar key without the
+ * surrounding []), carried as a list entry because it is unwieldy as a property key. Besides the ladder inputs it
+ * carries the per-endpoint client target fields (`baseUrl` / `headers`; the Host header is derived from the
+ * triplet). This is the single per-endpoint tree: [resolveAll] turns it into [ResolvedTimeouts], which
+ * [eu.inqudium.veredium.core.resilience.MeshResilienceRegistrar] hands to Resilience4j and the client factory of
+ * each stack reads. It is the same tree for both client stacks: the blocking `veredium-restclient`
  * and the reactive `veredium-webclient` bind it from here, so one deployment's `app.mesh` block reads
  * identically whichever stack the host runs on.
  *
@@ -18,11 +19,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  * omitted - each endpoint then falls back to these values.
  *
  * **`app.mesh.defaults`** - shared fallbacks + policy knobs:
- * - `individual-request-timeout-ms` (Long, `4000`, mirrors the chart's `mesh.defaultIndividualMs` fallback) -
+ * - `individual-request-timeout-ms` (Long, `4000`) -
  *   fallback MEASURED anchor `p99(single attempt) + margin`;
  *   normally each endpoint sets its own, so this is only used where none is set.
  * - `max-retries` (Int, `0`) - mirrors the sidecar's max-retries; with the anchor it derives `global`.
- *   `0` = no retries (matches the production sidecar helm-lap `max-retries: 0`).
+ *   `0` = no retries.
  * - `time-limiter.enabled` (Boolean, `true`) - whether mesh derives + overrides each endpoint's TimeLimiter.
  * - `circuit-breaker.enabled` (Boolean, `false`) - whether mesh derives + overrides each endpoint's CircuitBreaker.
  * - `margins` - see below.
@@ -52,14 +53,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  * - `healthy-retries` (Int, `1`) - routine retries still counting as "healthy" (policy; capped at maxRetries).
  * - `slow-call-backoff-ms` (Long, `200`) - per-attempt backoff feeding the healthy ceiling.
  * - `slow-call-cap-fraction` (Double, `0.8`) - hard cap: `slowCall` never exceeds `global * this`.
- * - NOTE: the TimeLimiter margin is NOT configurable here - it is a computed property of `transport`.
+ * - The TimeLimiter margin is NOT configurable here - it is a computed property of `transport`.
  *
  * **`transport`** (under `defaults` - the app->sidecar pre-response phases; see [Transport]):
  * - `sidecar-base-url` (String, `http://localhost:8042`).
  * - `connect-timeout-ms` (Long, `100`, `1..Int.MAX_VALUE`) - small because app->sidecar is localhost + plaintext.
  * - `pending-acquire-timeout-ms` (Long, `200`, `1..Int.MAX_VALUE`) - fail fast on pool exhaustion.
  * - `max-connections` (Int, `100`).
- * - NOTE: `timeLimiterMargin` is COMPUTED = `connect + pendingAcquire + 100` headroom (not configurable).
+ * - [Transport.timeLimiterMargin] is COMPUTED = `connect + pendingAcquire + 100` headroom (not configurable).
  *
  * ## Example
  * ```yaml
@@ -103,6 +104,16 @@ data class MeshProperties(
         require(triplets.size == triplets.toSet().size) { "Mesh triplets collide: ${duplicatesIn(triplets)}" }
     }
 
+    /**
+     * The shared fallbacks under `app.mesh.defaults`; an endpoint that leaves a value unset inherits it from here.
+     *
+     * @property individualRequestTimeoutMs The fallback MEASURED anchor, used by an endpoint that sets none.
+     * @property maxRetries The fallback retry count; mirrors the sidecar's `max-retries`.
+     * @property margins The shared margins, field-merged with each endpoint's [EndpointConfig.margins].
+     * @property transport The app->sidecar transport caps, shared by every endpoint.
+     * @property timeLimiter The default TimeLimiter toggle (on); see [BackendToggle].
+     * @property circuitBreaker The default CircuitBreaker toggle (off); see [BackendToggle].
+     */
     data class Defaults(
         val individualRequestTimeoutMs: Long = 4000,
         val maxRetries: Int = 0,
@@ -112,6 +123,22 @@ data class MeshProperties(
         val circuitBreaker: BackendToggle = BackendToggle(enabled = false),
     )
 
+    /**
+     * One entry of `app.mesh.endpoints[]` - one backend. Every nullable field falls back to [Defaults].
+     *
+     * @property triplet The canonical id `/endpoint/<host>/<METHOD>/<path...>`; the only required field. It
+     *   drives the alias and the client target (host, path template).
+     * @property alias The Resilience4j instance name and metric label; `null` derives it from the [triplet]
+     *   ([effectiveAlias]).
+     * @property individualRequestTimeoutMs The endpoint's measured anchor; `null` takes
+     *   [Defaults.individualRequestTimeoutMs].
+     * @property maxRetries The endpoint's retry count; `null` takes [Defaults.maxRetries].
+     * @property baseUrl The endpoint's client base URL; `null` takes [Transport.sidecarBaseUrl].
+     * @property headers Extra static headers beyond the Host header derived from the [triplet].
+     * @property margins A PARTIAL override, field-merged onto [Defaults.margins]; `null` keeps them.
+     * @property timeLimiter The tri-state TimeLimiter toggle; `null` inherits [Defaults.timeLimiter].
+     * @property circuitBreaker The tri-state CircuitBreaker toggle; `null` inherits [Defaults.circuitBreaker].
+     */
     data class EndpointConfig(
         val triplet: String,
         val alias: String? = null,
@@ -166,25 +193,27 @@ data class MeshProperties(
         }
     }
 
+    /**
+     * The margins that shape the derived ladder ([ResolvedTimeouts]), under `defaults` and, partially, per
+     * endpoint ([MarginsOverride]).
+     *
+     * @property globalMarginMs Buffer folded into `global = (1 + maxRetries) * individual + globalMargin`; the ONE
+     *   margin the sidecar also reads. Must be `>= 0`.
+     * @property responseTimeoutMarginMs The response-timeout margin, bound from `response-timeout-margin-ms`:
+     *   `responseTimeout = global + responseTimeoutMargin`. Must be `>= 1`.
+     * @property p99MarginMs Recovers `p99 = individual - p99Margin` from the anchor.
+     * @property healthyRetries Routine retries still counting as "healthy" (policy; capped at `maxRetries`).
+     * @property slowCallBackoffMs Per-attempt backoff feeding the healthy ceiling.
+     * @property slowCallCapFraction Hard cap: `slowCall` never exceeds `global * slowCallCapFraction`; in (0,1).
+     */
     data class Margins(
         val globalMarginMs: Long = DEFAULT_GLOBAL_MARGIN_MS,
-        /** The response-timeout margin, bound from `response-timeout-margin-ms` (class KDoc). */
         val responseTimeoutMarginMs: Long = DEFAULT_RESPONSE_TIMEOUT_MARGIN_MS,
         val p99MarginMs: Long = DEFAULT_P99_MARGIN_MS,
         val healthyRetries: Int = DEFAULT_HEALTHY_RETRIES,
         val slowCallBackoffMs: Long = DEFAULT_SLOW_CALL_BACKOFF_MS,
         val slowCallCapFraction: Double = DEFAULT_SLOW_CALL_CAP_FRACTION,
     ) {
-        /** The default margin values, exposed as named constants so callers and tests share one source of truth. */
-        companion object {
-            const val DEFAULT_GLOBAL_MARGIN_MS: Long = 200
-            const val DEFAULT_RESPONSE_TIMEOUT_MARGIN_MS: Long = 200
-            const val DEFAULT_P99_MARGIN_MS: Long = 200
-            const val DEFAULT_HEALTHY_RETRIES: Int = 1
-            const val DEFAULT_SLOW_CALL_BACKOFF_MS: Long = 200
-            const val DEFAULT_SLOW_CALL_CAP_FRACTION: Double = 0.8
-        }
-
         /** Field-wise merge: each field from the override when present, otherwise this (the shared default). */
         fun overriddenBy(endpoint: MarginsOverride?): Margins =
             if (endpoint == null) {
@@ -199,6 +228,16 @@ data class MeshProperties(
                     slowCallCapFraction = endpoint.slowCallCapFraction ?: slowCallCapFraction,
                 )
             }
+
+        /** The default margin values, exposed as named constants so callers and tests share one source of truth. */
+        companion object {
+            const val DEFAULT_GLOBAL_MARGIN_MS: Long = 200
+            const val DEFAULT_RESPONSE_TIMEOUT_MARGIN_MS: Long = 200
+            const val DEFAULT_P99_MARGIN_MS: Long = 200
+            const val DEFAULT_HEALTHY_RETRIES: Int = 1
+            const val DEFAULT_SLOW_CALL_BACKOFF_MS: Long = 200
+            const val DEFAULT_SLOW_CALL_CAP_FRACTION: Double = 0.8
+        }
     }
 
     /**
@@ -223,9 +262,9 @@ data class MeshProperties(
      *   Resilience4j backend's timeout knob for the endpoint. `false` means mesh does NOT touch that backend's
      *   config - it does NOT remove or disable the backend itself. A disabled endpoint keeps whatever config it
      *   already has (per-backend YAML, a named `configs:` block, or the registry default), and the client
-     *   factory still resolves an R4j instance by alias exactly as before. The CircuitBreaker toggle governs the
+     *   factory still resolves the R4j instance by its alias, as for an enabled endpoint. The CircuitBreaker toggle governs the
      *   derived `slowCallDurationThreshold` AND its conditional 100% rate pin as ONE unit - the split is along
-     *   backend boundaries, never inside a backend (see `circuitBreakerCustomizer` in the `resilience` package),
+     *   backend boundaries, never inside a backend (see [eu.inqudium.veredium.core.resilience.circuitBreakerCustomizer]),
      *   so mesh can never leave the CB in the incoherent "duration derived, rate fixed" state.
      *
      * Response validation is NOT a mesh feature: it is not derived from the timeout ladder and is switched in
@@ -305,27 +344,14 @@ data class MeshProperties(
         }
     }
 
-    companion object {
-        /** The property prefix this tree binds from - the one string the registrar and the binding share. */
-        const val PREFIX = "app.mesh"
-    }
-
-    /** The values occurring more than once - named in the collision messages so the offender is obvious. */
-    private fun duplicatesIn(values: List<String>): Set<String> =
-        values
-            .groupingBy { it }
-            .eachCount()
-            .filterValues { it > 1 }
-            .keys
-
     /**
      * Every endpoint resolved to its ladder, keyed by the canonical triplet (unique per the `init` guard).
      *
-     * Derived ONCE and cached: three consumers ask for it (the client factory, the ladder logger and the R4j
-     * registrar), and recomputing per call handed each of them its own [ResolvedTimeouts] instances for the same
-     * configuration. Cheap either way at four endpoints - the point is that all consumers now reason about one
-     * set of objects. Lazy rather than eager so binding a `MeshProperties` stays free of the derivation, and its
-     * `require` diagnostics keep surfacing at the first use rather than deep inside Spring's binder.
+     * Derived ONCE and cached, so that every consumer (the client factory, the ladder logger and the R4j
+     * registrar) reasons about one set of [ResolvedTimeouts] instances for the configuration rather than each
+     * about its own copies; the derivation itself is cheap. Lazy rather than eager so binding a [MeshProperties]
+     * stays free of the derivation, and its `require` diagnostics keep surfacing at the first use rather than deep
+     * inside Spring's binder.
      */
     private val resolved: Map<String, ResolvedTimeouts> by lazy { resolveEndpoints() }
 
@@ -352,4 +378,17 @@ data class MeshProperties(
                     circuitBreakerEnabled = e.circuitBreaker?.enabled ?: defaults.circuitBreaker.enabled,
                 )
         }
+
+    /** The values occurring more than once - named in the collision messages so the offender is obvious. */
+    private fun duplicatesIn(values: List<String>): Set<String> =
+        values
+            .groupingBy { it }
+            .eachCount()
+            .filterValues { it > 1 }
+            .keys
+
+    companion object {
+        /** The property prefix this tree binds from - the one string the registrar and the binding share. */
+        const val PREFIX: String = "app.mesh"
+    }
 }

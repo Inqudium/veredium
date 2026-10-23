@@ -20,5 +20,6 @@ data class MeshConnectionPool(
  * without one it falls back to the single pool `app.mesh.defaults.transport.max-connections` describes.
  */
 fun interface MeshConnectionPools {
+    /** The pools of this client module, each with the mesh aliases that lease from it. */
     fun connectionPools(): List<MeshConnectionPool>
 }
