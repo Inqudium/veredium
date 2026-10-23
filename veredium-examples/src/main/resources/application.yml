@@ -1,6 +1,7 @@
-# The configuration of every example. Each client example scans one client module only, so the blocking and the
-# asynchronous ones bind app.restclient and the reactive one app.webclient; app.mesh is shared by them. The decorator
-# example scans no client and reads legacy-directory and its own Resilience4j instances.
+# The configuration of every example. The blocking, asynchronous and reactive examples run on one client module each
+# (they exclude the other's auto-configuration), so the endpoints below name no stack; app.mesh is shared by them. The
+# mixed example runs both modules and assigns each endpoint its stack in application-mixed.yml. The decorator example
+# uses no client and reads legacy-directory and its own Resilience4j instances.
 
 spring:
   application:

@@ -40,19 +40,26 @@ object EngineSelection {
     ): String = if (overridden) "$prefix.endpoints.$alias" else "$prefix.default"
 
     /**
-     * Every override key in [overrides] must be a mesh alias of [aliases] - typo protection a boolean per-alias
-     * setting lacks.
+     * Every override key in [overrides] must be a mesh alias of [aliases], the stack's own - typo protection a boolean
+     * per-alias setting lacks. A key that names an endpoint another stack owns ([foreign], alias -> owning stack) is
+     * refused too, naming that stack: this stack's engine would never carry it.
      */
     fun requireKnownAliases(
         prefix: String,
         overrides: Collection<String>,
         aliases: Collection<String>,
+        foreign: Map<String, String> = emptyMap(),
     ) {
-        val unknown = overrides.filterNot { it in aliases }.sorted()
-        require(unknown.isEmpty()) {
-            "${unknown.joinToString { "$prefix.endpoints.$it" }} names no mesh endpoint - the key must be the alias of an " +
-                "app.mesh.endpoints[] entry. Known aliases: ${aliases.sorted()}"
-        }
+        val (owned, unknown) = overrides.filterNot { it in aliases }.sorted().partition { it in foreign }
+        val problems =
+            owned.map { "$prefix.endpoints.$it names a mesh endpoint the ${foreign.getValue(it)} stack owns, not this one" } +
+                listOfNotNull(
+                    unknown.takeIf { it.isNotEmpty() }?.let { keys ->
+                        "${keys.joinToString { "$prefix.endpoints.$it" }} names no mesh endpoint - the key must be the alias " +
+                            "of an app.mesh.endpoints[] entry. Known aliases: ${aliases.sorted()}"
+                    },
+                )
+        require(problems.isEmpty()) { problems.joinToString("; ") }
     }
 
     /**

@@ -46,13 +46,31 @@ object TestVerdicts {
     fun bulkheadRejection(): BulkheadFullException = BulkheadFullException.createBulkheadFullException(Bulkhead.of("probe", BulkheadConfig.ofDefaults()))
 }
 
-/** What a stack's `*MeshRegistrar` is: the shared registrar with the stack's verdicts handed in. */
-class TestMeshRegistrar : MeshResilienceRegistrar(TestVerdicts.breakerVerdicts)
+/** What a stack's `*MeshRegistrar` is: the shared registrar with the stack's name and verdicts handed in. */
+class TestMeshRegistrar : MeshResilienceRegistrar(STACK, TestVerdicts.breakerVerdicts) {
+    companion object {
+        /** The stand-in stack's name, as `restclient` / `webclient` are the real ones'. */
+        const val STACK: String = "test"
+    }
+}
 
 /** What a stack's configuration does for the mesh: import the shared configuration next to its registrar. */
 @Configuration(proxyBeanMethods = false)
 @Import(MeshResilienceConfiguration::class, TestMeshRegistrar::class)
 class TestStackConfiguration
+
+/** A second stand-in stack, for a context with two stacks - the case of a host that depends on both client modules. */
+class OtherMeshRegistrar : MeshResilienceRegistrar(STACK, TestVerdicts.breakerVerdicts) {
+    companion object {
+        /** The second stand-in stack's name. */
+        const val STACK: String = "other"
+    }
+}
+
+/** The second stand-in stack's configuration, importing the shared mesh configuration as [TestStackConfiguration] does. */
+@Configuration(proxyBeanMethods = false)
+@Import(MeshResilienceConfiguration::class, OtherMeshRegistrar::class)
+class OtherStackConfiguration
 
 /**
  * The mesh most tests of this package are built on: the accounts endpoint, optionally next to further

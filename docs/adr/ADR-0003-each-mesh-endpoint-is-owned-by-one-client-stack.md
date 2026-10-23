@@ -1,8 +1,8 @@
 # ADR-0003: Each mesh endpoint is owned by one client stack, so both stacks can share a context
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Date:** 2026-10-23  
-**Last updated:** 2026-10-23 (the stacks are wired by Boot auto-configuration; `stack` is required only when both client modules are dependencies)  
+**Last updated:** 2026-10-23 (implemented; the stacks are wired by Boot auto-configuration, and `stack` is required only when both client modules are dependencies)  
 **Deciders:** Dirk Haase (maintainer)  
 **Related:** ADR-0001 (the shared mesh wiring both stacks import, which
 this ADR makes stack-aware)
@@ -236,27 +236,21 @@ can replace a stack's verdicts.
 
 ## Implementation status
 
-Nothing is built yet. The work, in order:
+Implemented on 2026-10-23, as decided above:
 
-1. Core:
-   - `EndpointConfig.stack` and `ResolvedTimeouts.stack`;
-   - `endpointsOwnedBy`;
-   - `MeshResilienceRegistrar(stack, verdicts)` with the new bean names;
-   - the ownership check.
-2. Guard: filter its aliases and pools by owner.
-3. Both factories: `endpointsOwnedBy(STACK)`, and the foreign-alias
-   message in `create` and in the engine checks.
-4. Tests:
-   - core: the ownership table, cell by cell, against the ownership
-     check;
-   - a context with both stacks, one alias each: a benign 404 is left
-     unrecorded on both breakers, and each factory refuses the other's
-     alias;
-   - the factories' foreign-alias messages;
-   - an example application with both stacks in `veredium-examples`.
-5. Docs:
-   - the core guide and `mesh-timeout.md` (the ownership rule, the
-     doubled sidecar connections);
-   - both client guides;
-   - the CHANGELOG (the new key, the renamed beans);
-   - this record set to `Accepted`.
+- Core: `EndpointConfig.stack` / `ResolvedTimeouts.stack`, `MeshProperties.endpointsOwnedBy` (and
+  `endpointsOwnedByOthers` for the messages), `MeshResilienceRegistrar(stack, verdicts)` with the stack in every
+  bean name, and `MeshOwnershipCheck`, declared as a static `BeanFactoryPostProcessor` by
+  `MeshResilienceConfiguration`.
+- Guard: `MeshResilienceStartupGuard` checks the endpoints its stack owns; the pool check already filtered by alias.
+- Factories: `MeshClientPlan` takes the stack and covers its endpoints only; `create` of another stack's alias
+  fails with an `IllegalArgumentException` naming the owner, and so does an engine override for it
+  (`EngineSelection.requireKnownAliases`).
+- Tests: `MeshOwnershipCheckTest` (the ownership table, cell by cell, in real contexts with two stand-in stacks),
+  each stack's foreign-alias test, and `MixedExampleTest` in `veredium-examples` (both stacks in one context: a call
+  per stack, each factory refusing the other's alias, each breaker on its owner's verdicts).
+- Docs: the core guide and `mesh-timeout.md`, both client guides, the reactive configuration guide, the examples'
+  README, the CHANGELOG.
+
+The stack names are `RestClientMeshRegistrar.STACK` (`restclient`) and `WebClientMeshRegistrar.STACK`
+(`webclient`).

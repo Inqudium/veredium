@@ -75,6 +75,12 @@ The mesh wiring comes in two halves, and neither is registered on its own: each 
 (`VerediumRestClientAutoConfiguration` / `VerediumWebClientAutoConfiguration`) `@Import`s both, so a host that
 depends on its stack's module gets the mesh wiring with it.
 
+With both client modules as dependencies, both stacks run in one context and each endpoint names the stack that
+serves it (`stack: restclient` / `stack: webclient`); each stack's customizers, guard and factory cover its own
+endpoints only, and `MeshOwnershipCheck` fails the start for an endpoint claimed by both or by none. Each stack
+opens its own pools to the sidecar: `defaults.transport.max-connections` applies per stack, so the sidecar can see
+up to twice as many connections from one host. With one client module, `stack` is never needed.
+
 - `MeshResilienceConfiguration`, the `@Configuration` of this package, is stack-neutral: the `app.mesh` binding
   (`MeshProperties`) and `MeshLadderLogger`, the startup line below.
 - `MeshResilienceRegistrar`, a Spring `BeanRegistrar` (because the number of beans follows the endpoint list),

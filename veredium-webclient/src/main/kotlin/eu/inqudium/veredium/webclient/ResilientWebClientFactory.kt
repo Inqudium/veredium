@@ -97,7 +97,7 @@ class ResilientWebClientFactory(
      * The endpoints, the drain window, the default headers, the size meter and the validation - derived the same way
      * as on the blocking stack ([MeshClientPlan]).
      */
-    private val plan = MeshClientPlan(meshProperties, "app.webclient", properties.validation, validatorFactory, logger)
+    private val plan = MeshClientPlan(meshProperties, WebClientMeshRegistrar.STACK, "app.webclient", properties.validation, validatorFactory, logger)
 
     /** Standalone HTTP observation toggle (see [WebClientProperties.Observability]) - reads only this module's property. */
     private val observationEnabled: Boolean = properties.observability.httpObservationEnabled
@@ -128,7 +128,7 @@ class ResilientWebClientFactory(
     private val engineByBackend: Map<String, WebClientEngine> = meshByBackend.keys.associateWith(properties.engine::engineFor)
 
     init {
-        WebClientEngineChecks.requireKnownAliases(properties.engine, meshByBackend.keys)
+        WebClientEngineChecks.requireKnownAliases(properties.engine, meshByBackend.keys, plan.foreignEndpoints)
         WebClientEngineChecks.requireLibraries(properties.engine, engineByBackend, resourceLoader?.classLoader ?: javaClass.classLoader)
         WebClientEngineChecks.requireJettyQueue(engineByBackend, properties.pool)
         WebClientEngineChecks.requireJdkHostHeader(engineByBackend)

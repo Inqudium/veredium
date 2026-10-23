@@ -92,6 +92,15 @@ admit more calls (`sum(max-concurrent-calls)`) than the shared pool has connecti
 `MeshResilienceConfiguration` (the `app.mesh` binding, the ladder logger) next to its registrar, so a host that
 depends on its stack's module gets all of it.
 
+**Who serves an endpoint.** Each stack's registrar, guard and factory serve the endpoints that stack owns
+(`MeshProperties.endpointsOwnedBy`): those whose `app.mesh.endpoints[].stack` names it, and those that name no
+stack. A host with one client module therefore never sets `stack`. A host that depends on both runs both stacks in
+one context, and every endpoint names its stack; `MeshOwnershipCheck`, a `BeanFactoryPostProcessor`, fails the start
+before any registry or pool exists when an endpoint is claimed by both stacks or by none, naming the key
+([ADR-0003](../../docs/adr/ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md)). The bean names carry the
+stack - `meshCircuitBreakerCustomizer.<stack>.<alias>`, `meshTimeLimiterCustomizer.<stack>.<alias>`,
+`meshResilienceStartupGuard.<stack>`.
+
 **The blocking decorator.** `BlockingResilienceDecorator` runs a `() -> T` as
 `CircuitBreaker( TimeLimiter( Bulkhead( call ) ) )` - Resilience4j's own aspect order - on a fresh
 virtual worker thread, because a blocking call cannot time itself out: the caller waits on the

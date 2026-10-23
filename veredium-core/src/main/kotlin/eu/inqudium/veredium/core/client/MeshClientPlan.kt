@@ -16,12 +16,15 @@ import java.time.Duration
  * response-size meter and the response validation - each stack's factory adds only its builder, its engines and its
  * client.
  *
+ * @param stack The stack's name (`restclient`, `webclient`): the plan covers the endpoints that stack owns
+ *   ([MeshProperties.endpointsOwnedBy]) and nothing else.
  * @param propertiesPrefix The stack's properties prefix (`app.restclient`, `app.webclient`), named in the meter's
  *   description.
  * @param logger The factory's logger, which the validation startup line goes to.
  */
 class MeshClientPlan(
     meshProperties: MeshProperties,
+    private val stack: String,
     private val propertiesPrefix: String,
     validationProperties: ResponseValidationProperties,
     validatorFactory: ValidatorFactory?,
@@ -30,8 +33,14 @@ class MeshClientPlan(
     /** Which backends validate, with which validator, and whether a violation fails the call. */
     val validation: ResponseValidation = ResponseValidation(validationProperties, validatorFactory)
 
-    /** The mesh-derived ladder per backend, keyed by the endpoint alias (which must equal the backend name). */
-    val endpoints: Map<String, ResolvedTimeouts> = meshProperties.resolveAll().values.associateBy { it.alias }
+    /**
+     * The mesh-derived ladder of every backend this stack owns, keyed by the endpoint alias (which must equal the
+     * backend name).
+     */
+    val endpoints: Map<String, ResolvedTimeouts> = meshProperties.endpointsOwnedBy(stack)
+
+    /** The endpoints another stack owns, as alias -> owning stack - named where this stack refuses them. */
+    val foreignEndpoints: Map<String, String> = meshProperties.endpointsOwnedByOthers(stack)
 
     /** Global mesh transport caps (connect / pending-acquire / max-connections) shared by the engines and clients. */
     val transport: MeshProperties.Transport = meshProperties.defaults.transport
@@ -66,12 +75,20 @@ class MeshClientPlan(
     /**
      * The mesh endpoint of [backendName].
      *
+     * @throws IllegalArgumentException if the endpoint belongs to another stack - its client is that stack's to build.
      * @throws IllegalStateException if no mesh endpoint with that alias is configured - failing fast at startup beats a
      *   confusing 404 or connection error at the first call.
      */
-    fun endpoint(backendName: String): ResolvedTimeouts =
-        endpoints[backendName]
+    fun endpoint(backendName: String): ResolvedTimeouts {
+        foreignEndpoints[backendName]?.let { owner ->
+            throw IllegalArgumentException(
+                "Backend '$backendName' is owned by the $owner stack (app.mesh.endpoints[].stack=$owner), not by the $stack " +
+                    "stack: build its client with the $owner stack's factory.",
+            )
+        }
+        return endpoints[backendName]
             ?: error("No mesh endpoint configured for backend '$backendName'. Add an app.mesh.endpoints[] entry whose alias equals '$backendName'.")
+    }
 
     /**
      * The default headers of [endpoint]'s client, in the order they are set: the `Host` the sidecar routes on (from the

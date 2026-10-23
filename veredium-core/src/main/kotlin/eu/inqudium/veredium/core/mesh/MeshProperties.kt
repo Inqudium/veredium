@@ -41,6 +41,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  * - `time-limiter.enabled` / `circuit-breaker.enabled` (Boolean?, `null` -> inherit the `defaults` toggle;
  *   tri-state: an explicit `true`/`false` overrides the default). See [BackendToggle] for what `enabled` means -
  *   `false` does NOT disable the backend, it just leaves its config untouched.
+ * - `stack` (String?, `null`) - the client stack that owns the endpoint, `restclient` or `webclient`. Needed only when
+ *   a host depends on BOTH client modules; with one, the endpoint belongs to it (see [endpointsOwnedBy]).
  *
  * **`margins`** (under `defaults` only - shapes the derived ladder of every endpoint; see [Margins]):
  * - `global-margin-ms` (Long, `200`, `>= 0`) - buffer folded into `global = (1 + maxRetries)*individual + globalMargin`;
@@ -134,6 +136,8 @@ data class MeshProperties(
      * @property headers Extra static headers beyond the Host header derived from the [triplet].
      * @property timeLimiter The tri-state TimeLimiter toggle; `null` inherits [Defaults.timeLimiter].
      * @property circuitBreaker The tri-state CircuitBreaker toggle; `null` inherits [Defaults.circuitBreaker].
+     * @property stack The client stack that owns the endpoint; `null` lets the only stack in the context own it
+     *   ([endpointsOwnedBy]).
      */
     data class EndpointConfig(
         val triplet: String,
@@ -144,6 +148,7 @@ data class MeshProperties(
         val headers: Map<String, String> = emptyMap(),
         val timeLimiter: BackendToggleOverride? = null,
         val circuitBreaker: BackendToggleOverride? = null,
+        val stack: String? = null,
     ) {
         /** Configured alias, or a deterministic one derived from the triplet. */
         fun effectiveAlias(): String = alias ?: aliasFromTriplet()
@@ -324,6 +329,18 @@ data class MeshProperties(
     /** Resolve every endpoint to its ladder, keyed by the canonical triplet (unique per the `init` guard). */
     fun resolveAll(): Map<String, ResolvedTimeouts> = resolved
 
+    /**
+     * The endpoints [stack] serves, keyed by alias: those whose `stack` names it, and those that name no stack.
+     *
+     * The rule of ADR-0003 ("each mesh endpoint is owned by one client stack"): an endpoint without a `stack` belongs to
+     * the one stack in the context. With two stacks both claim it, and the ownership check
+     * ([eu.inqudium.veredium.core.resilience.MeshOwnershipCheck]) fails the start before anything is built.
+     */
+    fun endpointsOwnedBy(stack: String): Map<String, ResolvedTimeouts> = resolveAll().values.filter { it.stack == null || it.stack == stack }.associateBy { it.alias }
+
+    /** The endpoints another stack than [stack] owns explicitly, as alias -> owning stack - for the messages that name it. */
+    fun endpointsOwnedByOthers(stack: String): Map<String, String> = resolveAll().values.mapNotNull { endpoint -> endpoint.stack?.takeIf { it != stack }?.let { endpoint.alias to it } }.toMap()
+
     private fun resolveEndpoints(): Map<String, ResolvedTimeouts> =
         endpoints.associate { e ->
             e.triplet to
@@ -342,6 +359,7 @@ data class MeshProperties(
                     // tri-state: a per-endpoint flag wins; null inherits the shared default.
                     timeLimiterEnabled = e.timeLimiter?.enabled ?: defaults.timeLimiter.enabled,
                     circuitBreakerEnabled = e.circuitBreaker?.enabled ?: defaults.circuitBreaker.enabled,
+                    stack = e.stack,
                 )
         }
 

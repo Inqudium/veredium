@@ -86,9 +86,14 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  *
  * The benign-4xx probe comes from the stack ([BreakerVerdicts.benignClientErrorProbe]): the record predicate is
  * applied to a 404 in the exact shape that stack throws, which is the only shape its policy recognises.
+ *
+ * Each stack has its own guard ([stack]), and it checks the endpoints that stack owns
+ * ([MeshProperties.endpointsOwnedBy]) - with two stacks in one context, each probes its own aliases with its own
+ * verdicts and sizes its own pools.
  */
 class MeshResilienceStartupGuard(
     private val meshProperties: MeshProperties,
+    private val stack: String,
     private val verdicts: BreakerVerdicts,
     // The three property beans Resilience4j's Boot configuration binds `resilience4j.*` into - the record of
     // what the operator DECLARED, as opposed to what the registries ended up holding.
@@ -114,7 +119,7 @@ class MeshResilienceStartupGuard(
      * @throws IllegalStateException naming every mesh alias that is undeclared or unreached, with the key to add.
      */
     fun verify() {
-        val endpoints = meshProperties.resolveAll().values.sortedBy { it.alias }
+        val endpoints = meshProperties.endpointsOwnedBy(stack).values.sortedBy { it.alias }
         val problems = endpoints.flatMap(::problemsOf)
         check(problems.isEmpty()) {
             "Resilience4j is not wired for every mesh endpoint - the call path would silently run on registry " +

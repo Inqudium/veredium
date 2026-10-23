@@ -62,6 +62,8 @@ data class ResolvedTimeouts(
     val timeLimiterEnabled: Boolean,
     /** Whether mesh derives + overrides this endpoint's CircuitBreaker (the resolved tri-state of [MeshProperties.BackendToggleOverride]). */
     val circuitBreakerEnabled: Boolean,
+    /** The client stack that owns the endpoint, or `null` for the only stack in the context ([MeshProperties.endpointsOwnedBy]). */
+    val stack: String? = null,
 ) {
     /**
      * The sidecar's `global` budget, DERIVED from the measured per-endpoint anchor rather than configured: the

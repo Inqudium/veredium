@@ -439,6 +439,7 @@ class MeshResilienceStartupGuardTest {
     ): MeshResilienceStartupGuard =
         MeshResilienceStartupGuard(
             props,
+            TestMeshRegistrar.STACK,
             TestVerdicts.breakerVerdicts,
             wiring.circuitBreakerProperties,
             wiring.timeLimiterProperties,
