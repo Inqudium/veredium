@@ -24,15 +24,13 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
  * resource, not shipped (a library ships no `application.yml`). Compatibility: the class is named "Shipped"
  * all the same, because veredium-core, the ADRs and the blocking twin refer to it by that name.
  *
- * What is tested: that the context starts, and that every instance the file declares shows the customizer's
- * effect with the verdicts this module ships: a 404 in the shape `WebClient` throws it is not recorded, the
- * codec's limit exception is ignored even behind its 200-reporting wrapper, the derived budget is on every
- * TimeLimiter.
- * Success criteria: the context has not failed and every endpoint's instances pass the probes.
- * Why it matters: the mechanism - customizer beans, the guard, both directions of failure - is pinned once in
- * the core (`MeshResilienceContextTest`) with a stand-in stack. A file that declared a single TimeLimiter
- * instance while mesh derives four would leave three endpoints on the library default without a word; the
- * guard in this context refuses that.
+ * The context must start, and every instance the file declares must show the customizer's effect with the
+ * verdicts this module ships: a 404 in the shape `WebClient` throws it is not recorded, the codec's limit
+ * exception is ignored even behind its 200-reporting wrapper, the derived budget is on every TimeLimiter. The
+ * mechanism - the per-alias customizers, the guard, both directions of failure - is pinned once in the core
+ * (`MeshResilienceContextTest`) with a stand-in stack. A file that declared a single TimeLimiter instance while
+ * mesh derives four would leave three endpoints on the library default without a word; the guard in this
+ * context refuses that.
  *
  * Determinism: a real context, no I/O beyond the classpath, no WireMock - nothing is called, only configured.
  */
@@ -75,11 +73,16 @@ class MeshResilienceShippedConfigTest {
         }
     }
 
-    /** Resilience4j's three auto-configurations on the reference keys, plus this stack's verdicts configuration. */
+    /**
+     * Resilience4j's three auto-configurations on the reference keys, plus [WebClientConfiguration], which imports
+     * the core's mesh binding and [WebClientMeshRegistrar] with this stack's verdicts.
+     */
     private fun referenceContext(): ApplicationContextRunner =
         ApplicationContextRunner()
             .withInitializer { context ->
-                context.environment.propertySources.addFirst(MapPropertySource("reference-application-yml", referenceProperties()))
+                context.environment.propertySources.addFirst(
+                    MapPropertySource("reference-application-yml", ConfigurationFiles.referenceProperties("resilience4j.", "app.mesh.")),
+                )
             }.withConfiguration(
                 AutoConfigurations.of(
                     TimeLimiterAutoConfiguration::class.java,
@@ -87,11 +90,6 @@ class MeshResilienceShippedConfigTest {
                     BulkheadAutoConfiguration::class.java,
                 ),
             ).withUserConfiguration(WebClientConfiguration::class.java)
-
-    /** The `resilience4j.*` and `app.mesh.*` keys of the reference file, flattened the way Boot would load them. */
-    private fun referenceProperties(): Map<String, Any> =
-        (ConfigurationFiles.flatten(ConfigurationFiles.REFERENCE, "resilience4j.") + ConfigurationFiles.flatten(ConfigurationFiles.REFERENCE, "app.mesh."))
-            .also { loaded -> assertThat(loaded.keys).anyMatch { it.startsWith("resilience4j.") }.anyMatch { it.startsWith("app.mesh.") } }
 
     /** The codec failure in the exact shape the client produces it: a 200-reporting response exception with the limit beneath. */
     private fun wrappedBufferLimit(): Throwable =

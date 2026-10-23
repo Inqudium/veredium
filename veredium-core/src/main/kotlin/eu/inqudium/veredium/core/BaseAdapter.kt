@@ -15,12 +15,12 @@ import java.time.Duration
  * single logical call.
  *
  * The two values are layered, not alternatives, and the ladder fixes their order
- * (`eu.inqudium.veredium.core.mesh.ResolvedTimeouts`: `timeLimiter = responseTimeout + transport margin`). The
+ * ([eu.inqudium.veredium.core.mesh.ResolvedTimeouts]: `timeLimiter = responseTimeout + transport margin`). The
  * TimeLimiter is the outer, hard deadline after which the CALLER is released - a blocking caller with a
  * `TimeoutException`, a reactive chain by cancellation. The transport's response timeout is the tighter bound
  * underneath it on the response phase alone, so under normal conditions the transport is what trips, and the
  * TimeLimiter covers the phases before the response (connect, pending-acquire) that the response timeout does
- * not. See the ordering in `eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator` and in the
+ * not. See the ordering in [eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator] and in the
  * reactive stack's `ReactiveResilienceDecorator`.
  */
 interface BaseAdapter {

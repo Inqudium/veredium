@@ -1,11 +1,3 @@
-spring:
-  security:
-    enabled: false
-  r2dbc:
-    url: r2dbc:h2:mem:///testdb;DB_CLOSE_DELAY=-1
-    username: sa
-    password: pass
-
 # Test-owned configuration fixture. The mesh/resilience4j/logging CONTRACT and BINDING tests bind THIS file
 # (via ClassPathResource("application-test.yml")), NOT the reference configuration application.yml next to it
 # (src/test/resources; a library ships no application.yml), so that edits to the reference - e.g. enabling
@@ -46,7 +38,8 @@ adapter-logging:
   # The library's default logger name, kept so its documentation applies verbatim.
   logger-name: adapter-http-exchange
   request-headers:
-    # Every request header is logged; the runbook reads them (the Host header, the token's fingerprint). Everything selected is MASKED by default (masked: ["*"]); plaintext is an allowlist.
+    # Every request header is logged; an operator reads them (the Host header, the token's fingerprint).
+    # Everything selected is MASKED by default (masked: ["*"]); plaintext is an allowlist.
     includes: ["*"]
     # Plaintext only for headers that carry no secret. Host is the second view of the backend next to
     # adapter_name. Everything else - X-Access-Token, Authorization, cookies, the unknown - stays a
@@ -58,7 +51,7 @@ adapter-logging:
     # up masked first and are added here after being seen.
     unmasked: ["Content-Type", "Content-Length", "Date", "Cache-Control"]
   # Bodies on every outcome but success (a failure, a rejected 4xx, a cancel): every body of every call would
-  # be customer data on every line. The error body is what the runbook needs.
+  # be customer data on every line. The error body is what an operator needs.
   log-request-body: on-failure
   log-response-body: on-failure
   # The default, explicit so the cap is a visible decision, independent of the codec limit:
@@ -71,8 +64,6 @@ adapter-logging:
   slow-request-threshold: 5s
 
 app:
-  oracle:
-    enabled: false
   webclient:
     # Mirrors the reference configuration's codec ceiling. Tests that need a smaller boundary pass it explicitly.
     #
@@ -166,8 +157,8 @@ resilience4j:
   # derived budget on every endpoint whose time-limiter toggle is on (the default) WHILE that instance is built.
   # An alias an endpoint uses but this block does not declare still gets an instance (Resilience4j creates one
   # for the customizer) - on the registry default, not on mesh-backend, silently; MeshResilienceStartupGuard
-  # therefore fails the start and names the missing key. This file once declared a single instance here;
-  # MeshResilienceShippedConfigTest boots the auto-configuration against it.
+  # therefore fails the start and names the missing key. ResilienceConfigContractTest checks this file's
+  # declarations; MeshResilienceShippedConfigTest boots the auto-configuration on the reference application.yml.
   timelimiter:
     configs:
       mesh-backend:

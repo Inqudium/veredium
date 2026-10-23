@@ -13,7 +13,7 @@ logging:
         veredium: DEBUG
     # The exchange stream: one event per outbound HTTP exchange, written by legatium-restclient-logging (see the
     # adapter-logging block below). INFO = every call; WARN = only failures, timeouts, cancellations, slow
-    # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Unlike the module's former exchange diary, raising this level FILTERS
+    # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Raising this level FILTERS
     # the stream instead of switching it off - severity and semantics are decoupled, dashboards key on
     # adapter_outcome. Both names are pinned by LoggingLevelContractTest.
     adapter-http-exchange: INFO
@@ -30,8 +30,8 @@ adapter-logging:
   # interceptor/filter, no customizer, no beans.
   enabled: true
 
-  # Logger the exchange events are emitted on: the library's default name, kept so its documentation and the
-  # runbook queries apply verbatim. It must be the SAME string as the `logging.level` key above - the level
+  # Logger the exchange events are emitted on: the library's default name, kept so its documentation and log
+  # queries written against it apply verbatim. It must be the SAME string as the `logging.level` key above - the level
   # line addresses the logger by this name, and a mismatch leaves the level filtering nothing (the stream
   # would silently inherit the root level instead). LoggingLevelContractTest pins the pair in this file.
   logger-name: adapter-http-exchange
@@ -70,14 +70,18 @@ adapter-logging:
   # explicit note of the total size.
   max-body-bytes: 16384
 
-  # Keys the masking fingerprint. Empty (the default) keeps the unkeyed length:hash fingerprint;
-  masking-key: "CustomerProducts"
+  # Keys the masking fingerprint. Empty (the default) keeps the unkeyed length:hash fingerprint; any other value
+  # turns it into an HMAC-SHA256 under this key, so a log reader without the key cannot confirm a guessed value by
+  # hashing it. A SECRET in a real host: supply it like one (environment variable, vault-backed property), never
+  # as a literal in a checked-in file. The literal here is a placeholder that puts the tests binding this file on
+  # the keyed path.
+  masking-key: "example-masking-key"
 
 app:
   restclient:
     # Upper bound on a buffered response body, enforced by ResilientRestClient's own bounded read - the blocking
     # client has no codec limit of its own. 256 KB is the reactive twin's ceiling, kept so both modules size
-    # their buffers identically; the former 8 KB rejected a real access-profile list. The bound applies per
+    # their buffers identically; 8 KB is too small for an access-profile list response. The bound applies per
     # concurrently buffered response, so increases must still be chosen deliberately. It does not bound what is
     # LOGGED of a body - that is adapter-logging.max-body-bytes above, an independent number.
     #
@@ -105,7 +109,8 @@ app:
       # (opt-in, RestClientProperties.Observability); this reference configuration switches it on, so a host
       # that copies it gets observed calls and legatium's traced identity (trace id as request id) whenever the host has a tracer.
       # Effective only with a recording ObservationRegistry bean - the factory's startup line reports the
-      # difference between "on" and "on, but nothing is observed". The chart sets the same key per stage.
+      # difference between "on" and "on, but nothing is observed". A deployment that differs per stage sets the
+      # same key per stage.
       http-observation-enabled: true
     # Whether a deserialised response is checked against its DTO's Bean Validation constraints. Default OFF,
     # because the constraints are generated from the published OpenAPI specs and those are stricter than

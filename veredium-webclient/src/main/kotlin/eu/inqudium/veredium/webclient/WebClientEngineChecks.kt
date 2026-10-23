@@ -32,7 +32,7 @@ internal object WebClientEngineChecks {
      * The "no call waits" value `0` of `pool.pending-acquire-max-count` cannot be expressed on Jetty: its request
      * queue holds a request until it is ON a connection, including while a new connection is opened for it, so
      * a capacity small enough to let nothing wait behind busy connections would also reject a burst the pool
-     * could serve - and a capacity of 0 rejects every request ([JettyTransport.jettyQueueCapacity]).
+     * could serve - and a capacity of 0 rejects every request ([JettyEngineTransport.jettyQueueCapacity]).
      */
     fun requireJettyQueue(
         engineByBackend: Map<String, WebClientEngine>,

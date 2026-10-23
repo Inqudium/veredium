@@ -107,7 +107,7 @@ the UI with a written reason.
   comment only LOOKS checked, so the CI job rejects it - name the symbol in backticks there, or
   move the sentence into the enclosing declaration's KDoc.
 - Every behavior change needs a test in the module it touches.
-- Test helpers both client modules need (the raw-socket backends, the thread-safe log capture, the
+- Test helpers both client modules need (the raw-socket backends, the thread-safe log capture and its `capturing` scope, the
   bounded `eventually`, the WireMock arrival listener, the configuration-file binding, the test payloads,
   the customized Resilience4j registries) live in `veredium-test-support`, a build-only module the client
   modules take at test scope and nothing publishes. A helper that only one module needs stays in that
@@ -116,7 +116,11 @@ the UI with a written reason.
   cites a guide section by number or cites an assessment report, that no Kotlin source has an unused
   import (`.github/scripts/check-unused-imports.py`), and that every rationale block has the three labels
   in order and a bare `//` line before its first stage line
-  (`python3 .github/scripts/generate-test-catalog.py --check`).
+  (`python3 .github/scripts/generate-test-catalog.py --check`). It also rejects, anywhere under
+  `veredium-*/src`, words that lean on the project the modules were ported from (its consumers, its
+  runbook, the removed exchange diary) - state the constraint itself, or point at an ADR or
+  `veredium-restclient/docs/decisions.md` - and, in production KDoc, a veredium class named by its full
+  name in backticks instead of linked.
 - Test classes follow the existing `*Test.kt` naming (Surefire picks up `**/*Test.kt`).
 - Test rationale comments follow the existing three-line pattern at the top of the
   test body (`What is tested:` / `Success criteria:` / `Why it matters:`), followed

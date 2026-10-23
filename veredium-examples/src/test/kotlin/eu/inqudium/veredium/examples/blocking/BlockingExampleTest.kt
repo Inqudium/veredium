@@ -1,29 +1,22 @@
 package eu.inqudium.veredium.examples.blocking
 
+import eu.inqudium.veredium.examples.ExampleContext
 import eu.inqudium.veredium.examples.Sidecar
 import eu.inqudium.veredium.examples.Sidecar.ADA
 import eu.inqudium.veredium.examples.Sidecar.ADAS_ORDERS
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.test.context.DynamicPropertyRegistry
-import org.springframework.test.context.DynamicPropertySource
 
-/**
- * The blocking example as a host runs it: the whole Boot application, its adapter calling the stand-in sidecar.
- *
- * Both examples' contexts run in one test JVM, so neither joins Micrometer's global registry: the second one would
- * join it after the first had registered meters there, and Micrometer warns about that.
- */
-@SpringBootTest(classes = [BlockingExampleApplication::class], properties = ["management.metrics.use-global-registry=false"])
-class BlockingExampleTest {
-    @Autowired
-    private lateinit var adapter: BlockingCustomerAdapter
-
+/** The blocking example as a host runs it: the whole Boot application, its adapter calling the stand-in sidecar. */
+@ExampleContext(BlockingExampleApplication::class)
+class BlockingExampleTest(
+    private val adapter: BlockingCustomerAdapter,
+) {
     @BeforeEach
-    fun stubBackends() = Sidecar.reset()
+    fun stubBackends() {
+        Sidecar.reset()
+    }
 
     @Test
     fun `should read a customer through the sidecar, addressed by the host of its triplet`() {
@@ -77,11 +70,5 @@ class BlockingExampleTest {
         // Then
         assertThat(response).isPositive()
         assertThat(budget).isGreaterThan(response)
-    }
-
-    companion object {
-        @JvmStatic
-        @DynamicPropertySource
-        fun sidecar(registry: DynamicPropertyRegistry) = Sidecar.register(registry)
     }
 }

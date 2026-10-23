@@ -21,16 +21,15 @@ JDK's `java.net.http.HttpClient`, Jetty or Apache HttpClient 5 - scoped to this 
 WebClients keep the connector Boot gave them. What each engine applies of the mesh transport and pool
 settings, which meters it has and what it needs: [configuration guide](webclient-config-guide.md) §1.6.
 
-**The response contract.** A client's `Mono<T>` emits exactly one value or an error. Since 2026-10-21 a 2xx
-answer without a body (204, empty 200) fails with `EmptyResponseBodyException` instead of completing the
-`Mono` empty - a behaviour change for any caller that relied on the empty completion; see the
+**The response contract.** A client's `Mono<T>` emits exactly one value or an error: a 2xx answer without a
+body (204, empty 200) fails with `EmptyResponseBodyException` rather than completing the `Mono` empty; see the
 [configuration guide](webclient-config-guide.md) §3.4.
 
 ## Prerequisites
 
 - Java 21 or newer at runtime (the build itself needs JDK 24+, see the
   [README](../../README.md)).
-- Spring Boot 4.1, Resilience4j 2.4 (`resilience4j-spring-boot4`), legatium 1.2.
+- Spring Boot 4.1, Resilience4j 2.4 (`resilience4j-spring-boot4`), legatium 1.3.
 
 ## Dependency
 
@@ -99,7 +98,9 @@ app:
   names what does not apply. The per-request and pool meters exist on `reactor-netty` only.
 - **Fail fast.** The start fails, naming the key, for an override key that is no mesh alias, for a missing engine
   library (with its coordinates), and for `jdk` without the Host-header flag.
-- **Cancellation.** A TimeLimiter expiry or a cancelled subscription aborts the exchange on every engine.
+- **Cancellation.** A TimeLimiter expiry or a cancelled subscription aborts the exchange on every engine while
+  it waits for the response head. A body cancelled after the head arrived drops the connection on every engine
+  but `jdk`, whose client reads such a body to its end (its startup line says so).
 
 Every detail, with the mapping table per engine: [configuration guide](webclient-config-guide.md) §1.6.
 

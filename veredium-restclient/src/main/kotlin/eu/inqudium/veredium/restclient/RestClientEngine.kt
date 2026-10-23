@@ -19,7 +19,7 @@ import eu.inqudium.veredium.core.engine.HttpEngine
  * startup line per engine in use and in the guide's mapping table; the per-engine classes carry the detail.
  *
  * The three properties are those of [HttpEngine], shared with the reactive module's engines, which the start-time
- * checks of `eu.inqudium.veredium.core.engine.EngineSelection` read.
+ * checks of [eu.inqudium.veredium.core.engine.EngineSelection] read.
  */
 enum class RestClientEngine(
     override val key: String,

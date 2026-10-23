@@ -31,8 +31,7 @@ import java.time.Duration
  * indistinguishable from real outages. (legatium's exchange event classifies on its own terms: a 4xx answer is
  * `rejected` with its status there, INFO except for 401/403/408/429.) The cause is attached ONLY to the
  * unexpected branch: a benign 4xx must not carry a stack trace that explains nothing the status and URL do not
- * - the reactive stack once lost exactly that distinction when the two branches were folded into a shared
- * helper that took the cause unconditionally.
+ * - so the two branches must not be folded into a shared helper that takes the cause unconditionally.
  *
  * A cancellation - the caller going away, its budget expired or its scope cancelled - is DEBUG, deliberately:
  * normal, correlated with load, and under a disturbance arriving all at once, which is exactly when WARN must
@@ -134,7 +133,7 @@ class ClientCallLog(
      * contract problem, not an outage, and must not open the circuit breaker.
      */
     fun <T : Any> validate(value: T): T {
-        validator?.let { validator ->
+        if (validator != null) {
             log(Level.TRACE, "Going to validate response value for backend '{}'", backendName)
             val violations = validator.validate(value).orEmpty()
             if (violations.isNotEmpty()) {
@@ -153,7 +152,9 @@ class ClientCallLog(
             } else {
                 log(Level.DEBUG, "Response from backend '{}' has no violations", backendName)
             }
-        } ?: log(Level.TRACE, "Validation of the response value for backend '{}' disabled", backendName)
+        } else {
+            log(Level.TRACE, "Validation of the response value for backend '{}' disabled", backendName)
+        }
         return value
     }
 
@@ -292,11 +293,17 @@ class ClientCallLog(
         }
 
         /**
-         * The two wire names the transport lines share with legatium's exchange event (`ClientLogField.NAME`
-         * and `.URL_TEMPLATE` there). Spelled out because that enum is internal to the library; they are a
-         * contract with the log index and with the runbook, and each stack's integration test pins them.
+         * The backend-name wire name the transport lines share with legatium's exchange event
+         * (`ClientLogField.NAME` there). Spelled out because that enum is internal to the library; it is a
+         * contract with the log index and with the operators' log queries, and each stack's integration test
+         * pins it.
          */
         const val ADAPTER_NAME_FIELD: String = "adapter_name"
+
+        /**
+         * The URI-template wire name the transport lines share with legatium's exchange event
+         * (`ClientLogField.URL_TEMPLATE` there); spelled out and pinned like [ADAPTER_NAME_FIELD].
+         */
         const val URL_TEMPLATE_FIELD: String = "adapter_url_template"
     }
 }

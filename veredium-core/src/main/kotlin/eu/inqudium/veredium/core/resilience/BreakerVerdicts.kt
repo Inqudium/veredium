@@ -14,7 +14,7 @@ import org.slf4j.spi.LoggingEventBuilder
  * The exchange event itself (legatium's `adapter-http-exchange` logger) is NOT a consumer: the library
  * classifies on its own terms - a 4xx answer is `rejected` with its status there, at INFO except for
  * 401/403/408/429 (legatium ADR-0012) - and this policy does not reach into it. The 404-means-business-case
- * reading lives in the two consumers above and in the runbook's reading of `adapter_response_status_code`.
+ * reading lives in the two consumers above and in an operator's reading of `adapter_response_status_code`.
  *
  * What is stack-neutral is the RULE: which statuses are benign, how the cause chain is walked, what the policy
  * line says. What is NOT is the SHAPE of the exceptions the rule is applied to - the blocking client throws
@@ -23,9 +23,8 @@ import org.slf4j.spi.LoggingEventBuilder
  * therefore lives here as a class that is handed the stack's reading of a throwable, and each stack holds its
  * one instance (`RestClientVerdicts`, `WebClientVerdicts`).
  *
- * A neutral policy object rather than a member of either consumer, for the reason the reactive stack learned
- * the hard way: a resilience/transport policy hidden in a logging class is the wrong owner and the wrong
- * dependency direction. The consumers reference a policy, not each other.
+ * Rationale: a neutral policy object rather than a member of either consumer, because a resilience/transport
+ * policy hidden in a logging class is the wrong owner and the wrong dependency direction. The consumers reference a policy, not each other.
  *
  * @property responseStatus The HTTP status [Throwable] carries when it is a response exception of this stack -
  *   the status-carrying root type and its subclasses - or `null` for every other throwable. The ONE thing the
@@ -162,15 +161,16 @@ class ClientSideFailurePolicy(
 
     companion object {
         /** Bound on the cause walk, so a pathological cause chain cannot spin. */
-        const val MAX_CAUSE_DEPTH = 10
+        const val MAX_CAUSE_DEPTH: Int = 10
     }
 }
 
 /**
  * What a client stack tells the shared resilience wiring about itself: its two breaker verdicts and a probe
  * for the startup guard. One object per stack (`RestClientVerdicts`, `WebClientVerdicts`), handed to the shared
- * wiring directly - to [MeshResilienceRegistrar] by the stack's subclass of it, and to `ClientCallLog` by the
- * stack's client - and never declared as a bean, so nothing in a host's context can replace it.
+ * wiring directly - to [MeshResilienceRegistrar] by the stack's subclass of it, and to
+ * [eu.inqudium.veredium.core.client.ClientCallLog] by the stack's client - and never declared as a bean, so
+ * nothing in a host's context can replace it.
  *
  * @property httpExchangeError The benign-4xx rule, with this stack's reading of a response exception.
  * @property clientSideFailure The client-side-failure rule, with this stack's exception types.

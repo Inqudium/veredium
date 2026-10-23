@@ -2,8 +2,6 @@ package eu.inqudium.veredium.webclient
 
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
-import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.read.ListAppender
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.aResponse
 import com.github.tomakehurst.wiremock.client.WireMock.absent
@@ -30,6 +28,7 @@ import eu.inqudium.veredium.testsupport.LookupRequest
 import eu.inqudium.veredium.testsupport.SilentBackend
 import eu.inqudium.veredium.testsupport.UnansweredConnectBackend
 import eu.inqudium.veredium.testsupport.WireMockArrivals
+import eu.inqudium.veredium.testsupport.capturing
 import eu.inqudium.veredium.testsupport.causeNames
 import eu.inqudium.veredium.testsupport.eventually
 import io.github.resilience4j.bulkhead.BulkheadConfig
@@ -527,19 +526,11 @@ class WebClientEngineIntegrationTest {
             // Given: a backend that never answers, a 300 ms budget, a one-permit bulkhead, Reactor's log and the
             // client's DEBUG lines captured
             val reactorLog = LoggerFactory.getLogger("reactor.core.publisher.Operators") as Logger
-            val dropped = CapturingAppender().apply { start() }
             val clientLog = LoggerFactory.getLogger(ResilientWebClient::class.java) as Logger
-            val clientLines = CapturingAppender().apply { start() }
-            val clientLevel = clientLog.level
-            reactorLog.addAppender(dropped)
-            clientLog.addAppender(clientLines)
-            clientLog.level = Level.DEBUG
-            try {
-                abortAndAssert(engine, dropped, clientLines)
-            } finally {
-                reactorLog.detachAppender(dropped)
-                clientLog.detachAppender(clientLines)
-                clientLog.level = clientLevel
+            capturing(reactorLog) { dropped ->
+                capturing(clientLog, Level.DEBUG) { clientLines ->
+                    abortAndAssert(engine, dropped, clientLines)
+                }
             }
         }
 
@@ -684,7 +675,7 @@ class WebClientEngineIntegrationTest {
             //   pool); on reactor-netty over TWO - its provider keys sub-pools by remote address AND the client's
             //   configuration, and each backend's HttpClient carries its own response timeout and URI tagger.
             // Why it matters: a connector built on a client of its own per backend would still answer every call -
-            //   while opening its own connections, threads and (Apache) I/O reactor per backend, of which release()
+            //   while opening its own connections, threads and (Apache) I/O reactor per backend, of which shutdown()
             //   would only ever find the last. For reactor-netty the case pins the documented per-backend
             //   sub-pool, the reason max-connections there bounds each backend rather than the engine.
             //
@@ -755,7 +746,7 @@ class WebClientEngineIntegrationTest {
 
             // Then
             assertThat(threads).singleElement().asString().startsWith(ResilientWebClientFactory.POOL_NAME)
-            val transport = factory.startedEngines().getValue(WebClientEngine.REACTOR_NETTY) as ReactorNettyTransport
+            val transport = factory.startedEngines().getValue(WebClientEngine.REACTOR_NETTY) as ReactorNettyEngineTransport
             val endpoint = meshFor(listOf("where"), wireMock.baseUrl()).resolveAll().values.single()
             assertThat(transport.httpClientFor(endpoint).configuration().resolver()).isSameAs(DefaultAddressResolverGroup.INSTANCE)
         }
@@ -763,7 +754,7 @@ class WebClientEngineIntegrationTest {
         @Test
         fun `should dispose the reactor-netty loops after the drain delay, once nothing can still need them`() {
             // What is tested: the deferred disposal of the engine's own event loops.
-            // Success criteria: release() disposes the pool at once and leaves the loops running; the loops are
+            // Success criteria: shutdown() disposes the pool at once and leaves the loops running; the loops are
             //   disposed once the delay passed (bounded wait, a 50 ms delay here).
             // Why it matters: closing a loop group closes every channel on it, so disposing it together with the
             //   pool would cut the in-flight calls the pool disposal lets finish
@@ -772,13 +763,13 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             val transport =
-                ReactorNettyTransport(WebClientProperties(), MeshProperties.Transport(), "loops-probe", Duration.ofMillis(50)) { disposal, _ -> disposal.block() }
+                ReactorNettyEngineTransport(WebClientProperties(), MeshProperties.Transport(), "loops-probe", Duration.ofMillis(50)) { disposal, _ -> disposal.block() }
 
             // When
-            transport.release(System.nanoTime() + GENEROUS_BUDGET.toNanos(), System::nanoTime)
+            transport.shutdown(System.nanoTime() + GENEROUS_BUDGET.toNanos(), System::nanoTime)
 
             // Then
-            assertThat(transport.isReleased()).isTrue()
+            assertThat(transport.isClosed).isTrue()
             assertThat(transport.loops.isDisposed).isFalse()
             val disposed =
                 Flux
@@ -802,19 +793,17 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = CapturingAppender().apply { start() }
-            logger.addAppender(lines)
-            try {
+            capturing(logger) { lines ->
                 val recorded = mutableListOf<Duration>()
                 val transport =
-                    ReactorNettyTransport(WebClientProperties(), MeshProperties.Transport(), "left-probe", Duration.ofMillis(50)) { disposal, left ->
+                    ReactorNettyEngineTransport(WebClientProperties(), MeshProperties.Transport(), "left-probe", Duration.ofMillis(50)) { disposal, left ->
                         recorded += left
                         disposal.block()
                     }
                 val factory = newFactory(WebClientEngine.REACTOR_NETTY, "late")
 
                 // When
-                transport.release(System.nanoTime() - 1, System::nanoTime)
+                transport.shutdown(System.nanoTime() - 1, System::nanoTime)
                 val started = System.nanoTime()
                 factory.awaitPoolDisposal(Mono.never(), Duration.ofMillis(100))
                 val waited = Duration.ofNanos(System.nanoTime() - started)
@@ -824,8 +813,6 @@ class WebClientEngineIntegrationTest {
                 assertThat(waited).isLessThan(Duration.ofSeconds(1))
                 assertThat(lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage })
                     .anySatisfy { assertThat(it).contains("did not drain within PT0.1S") }
-            } finally {
-                logger.detachAppender(lines)
             }
         }
 
@@ -845,14 +832,14 @@ class WebClientEngineIntegrationTest {
             val factory = newFactory(engine, "bye")
             factory.create("bye").get(Greeting::class.java) { it.uri("/bye") }.block()
             val transport = factory.startedEngines().getValue(engine)
-            assertThat(transport.isReleased()).isFalse()
+            assertThat(transport.isClosed).isFalse()
 
             // When
             factory.shutdown()
             val second = catchThrowable { factory.shutdown() }
 
             // Then
-            assertThat(transport.isReleased()).isTrue()
+            assertThat(transport.isClosed).isTrue()
             assertThat(second).isNull()
         }
     }
@@ -868,13 +855,13 @@ class WebClientEngineIntegrationTest {
             // What is tested: the release of the engines that WAIT for in-flight exchanges here - the JDK client's
             //   orderly shutdown, and Jetty's and Apache's wait on their exchanges in flight before they stop -
             //   against an exchange that never ends, with a deadline 300 ms ahead and one that has already passed.
-            // Success criteria: release() returns within 2 s; the transport reports itself released; the held
+            // Success criteria: shutdown() returns within 2 s; the transport reports itself released; the held
             //   exchange's connection is closed and its CALL fails at once (not at its 30 s budget); and the
             //   factory's logger has a WARN for the engine - "did not drain by the factory's shutdown deadline"
             //   for every engine, each of which waits for the exchange up to the deadline; and no ERROR is logged,
             //   neither by Apache nor by the factory (a
             //   reactor closed hard while a worker is still shutting down reports a ClosedSelectorException, which
-            //   during the release is the worker's expected end).
+            //   during the shutdown is the worker's expected end).
             // Why it matters: the bound is the whole point of a draining shutdown - a context close must not wait
             //   for an exchange the backend never ends, and the caller of that exchange must not be left waiting
             //   for its budget either (Apache's hard close completes no callback of an exchange in flight). A deadline already spent by an engine released before
@@ -882,47 +869,42 @@ class WebClientEngineIntegrationTest {
             //
             // Given: a call held by a backend that never answers, the factory's log captured
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = CapturingAppender().apply { start() }
             val engineLog = LoggerFactory.getLogger("org.apache.hc.client5.http.impl.async") as Logger
-            val engineLines = CapturingAppender().apply { start() }
-            logger.addAppender(lines)
-            engineLog.addAppender(engineLines)
-            try {
-                SilentBackend().use { backend ->
-                    val factory =
-                        newFactory(
-                            WebClientProperties.Engine(default = engine),
-                            listOf("held"),
-                            mesh = meshFor(listOf("held"), backend.baseUrl, anchors = mapOf("held" to LONG_ANCHOR_MS)),
-                        )
-                    val held = factory.create("held").get(Greeting::class.java) { it.uri("/held") }.toFuture()
-                    assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
-                    val transport = factory.startedEngines().getValue(engine)
+            capturing(logger) { lines ->
+                capturing(engineLog) { engineLines ->
+                    SilentBackend().use { backend ->
+                        val factory =
+                            newFactory(
+                                WebClientProperties.Engine(default = engine),
+                                listOf("held"),
+                                mesh = meshFor(listOf("held"), backend.baseUrl, anchors = mapOf("held" to LONG_ANCHOR_MS)),
+                            )
+                        val held = factory.create("held").get(Greeting::class.java) { it.uri("/held") }.toFuture()
+                        assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
+                        val transport = factory.startedEngines().getValue(engine)
 
-                    // When
-                    val started = System.nanoTime()
-                    transport.release(started + TimeUnit.MILLISECONDS.toNanos(deadlineMillis), System::nanoTime)
-                    val elapsed = Duration.ofNanos(System.nanoTime() - started)
+                        // When
+                        val started = System.nanoTime()
+                        transport.shutdown(started + TimeUnit.MILLISECONDS.toNanos(deadlineMillis), System::nanoTime)
+                        val elapsed = Duration.ofNanos(System.nanoTime() - started)
 
-                    // Then
-                    assertThat(elapsed).isLessThan(Duration.ofSeconds(2))
-                    val warnings = lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage }
-                    val drained = "did not drain by the factory's shutdown deadline"
-                    assertThat(warnings).anySatisfy { assertThat(it).contains("'$engine'", drained) }
-                    assertThat(transport.isReleased()).isTrue()
-                    assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
-                    assertThat(catchThrowable { held.get(2, TimeUnit.SECONDS) }).isNotNull().isNotInstanceOf(TimeoutException::class.java)
-                    // The hard close does not join the reactor's workers: a ClosedSelectorException arrives after
-                    // release() returned, if at all. Wait for the workers to end, so "no ERROR" is a statement.
-                    assertThat(eventually { Thread.getAllStackTraces().keys.none { it.name.startsWith(ApacheTransport.THREAD_NAME_PREFIX) } })
-                        .`as`("the Apache engine's I/O threads must end")
-                        .isTrue()
-                    assertThat(engineLines.events.filter { it.level == Level.ERROR }.map { it.throwableProxy?.className }).isEmpty()
-                    assertThat(lines.events.filter { it.level == Level.ERROR }.map { it.formattedMessage }).isEmpty()
+                        // Then
+                        assertThat(elapsed).isLessThan(Duration.ofSeconds(2))
+                        val warnings = lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage }
+                        val drained = "did not drain by the factory's shutdown deadline"
+                        assertThat(warnings).anySatisfy { assertThat(it).contains("'$engine'", drained) }
+                        assertThat(transport.isClosed).isTrue()
+                        assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
+                        assertThat(catchThrowable { held.get(2, TimeUnit.SECONDS) }).isNotNull().isNotInstanceOf(TimeoutException::class.java)
+                        // The hard close does not join the reactor's workers: a ClosedSelectorException arrives after
+                        // shutdown() returned, if at all. Wait for the workers to end, so "no ERROR" is a statement.
+                        assertThat(eventually { Thread.getAllStackTraces().keys.none { it.name.startsWith(ApacheEngineTransport.THREAD_NAME_PREFIX) } })
+                            .`as`("the Apache engine's I/O threads must end")
+                            .isTrue()
+                        assertThat(engineLines.events.filter { it.level == Level.ERROR }.map { it.throwableProxy?.className }).isEmpty()
+                        assertThat(lines.events.filter { it.level == Level.ERROR }.map { it.formattedMessage }).isEmpty()
+                    }
                 }
-            } finally {
-                logger.detachAppender(lines)
-                engineLog.detachAppender(engineLines)
             }
         }
     }
@@ -934,7 +916,7 @@ class WebClientEngineIntegrationTest {
         fun `should let an in-flight exchange finish before closing the engine`(engine: WebClientEngine) {
             // What is tested: the drain of every engine's release - an exchange still on the wire when the release
             //   starts, answered 500 ms later, well before the deadline.
-            // Success criteria: the call SUCCEEDS with the backend's answer; release() waited for it (at least
+            // Success criteria: the call SUCCEEDS with the backend's answer; shutdown() waited for it (at least
             //   100 ms) and then closed the engine; the transport reports itself released; the factory logs no WARN.
             // Why it matters: a graceful shutdown must not fail the calls still in flight on one engine while the
             //   others let them finish - Jetty's stop and Apache's reactor shutdown each end what is still running,
@@ -944,9 +926,7 @@ class WebClientEngineIntegrationTest {
             wireMock.stubFor(get(urlEqualTo("/finishing")).willReturn(okJson("""{"message":"finished"}""").withFixedDelay(500)))
             val arrived = arrivals.arrivalOf("/finishing")
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = CapturingAppender().apply { start() }
-            logger.addAppender(lines)
-            try {
+            capturing(logger) { lines ->
                 val factory = newFactory(engine, "draining")
                 val call = factory.create("draining").get(Greeting::class.java) { it.uri("/finishing") }.toFuture()
                 assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
@@ -954,16 +934,14 @@ class WebClientEngineIntegrationTest {
 
                 // When
                 val started = System.nanoTime()
-                transport.release(started + TimeUnit.SECONDS.toNanos(5), System::nanoTime)
+                transport.shutdown(started + TimeUnit.SECONDS.toNanos(5), System::nanoTime)
                 val waited = Duration.ofNanos(System.nanoTime() - started)
 
                 // Then
                 assertThat(call.get(2, TimeUnit.SECONDS)?.message).isEqualTo("finished")
-                assertThat(waited).`as`("release() must have waited for the exchange").isGreaterThan(Duration.ofMillis(100))
-                assertThat(transport.isReleased()).isTrue()
+                assertThat(waited).`as`("shutdown() must have waited for the exchange").isGreaterThan(Duration.ofMillis(100))
+                assertThat(transport.isClosed).isTrue()
                 assertThat(lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage }).isEmpty()
-            } finally {
-                logger.detachAppender(lines)
             }
         }
 
@@ -984,9 +962,7 @@ class WebClientEngineIntegrationTest {
             wireMock.stubFor(get(urlEqualTo("/queued")).willReturn(okJson("""{"message":"served"}""").withFixedDelay(500)))
             val arrived = arrivals.arrivalOf("/queued")
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = CapturingAppender().apply { start() }
-            logger.addAppender(lines)
-            try {
+            capturing(logger) { lines ->
                 val factory =
                     newFactory(
                         WebClientProperties.Engine(default = engine),
@@ -1006,15 +982,13 @@ class WebClientEngineIntegrationTest {
                 val transport = factory.startedEngines().getValue(engine)
 
                 // When
-                transport.release(System.nanoTime() + TimeUnit.SECONDS.toNanos(5), System::nanoTime)
+                transport.shutdown(System.nanoTime() + TimeUnit.SECONDS.toNanos(5), System::nanoTime)
 
                 // Then
                 assertThat(first.get(2, TimeUnit.SECONDS)?.message).isEqualTo("served")
                 assertThat(second.get(2, TimeUnit.SECONDS)?.message).isEqualTo("served")
-                assertThat(transport.isReleased()).isTrue()
+                assertThat(transport.isClosed).isTrue()
                 assertThat(lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage }).isEmpty()
-            } finally {
-                logger.detachAppender(lines)
             }
         }
     }
@@ -1027,7 +1001,7 @@ class WebClientEngineIntegrationTest {
             // What is tested: the interrupt exit of the release of each engine that waits for its exchanges (the JDK
             //   client's awaitTermination, Jetty's and Apache's drain), against an exchange that never ends and a
             //   deadline far off.
-            // Success criteria: release() on an interrupted thread returns within 2 s, the flag is still set, the
+            // Success criteria: shutdown() on an interrupted thread returns within 2 s, the flag is still set, the
             //   WARN names the engine and the interrupt, and the engine is released shortly after (Jetty's stop
             //   runs on a thread of its own), which closes the held connection.
             // Why it matters: a container tearing the context down under its own deadline interrupts the
@@ -1036,9 +1010,7 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = CapturingAppender().apply { start() }
-            logger.addAppender(lines)
-            try {
+            capturing(logger) { lines ->
                 SilentBackend().use { backend ->
                     val factory =
                         newFactory(
@@ -1055,22 +1027,20 @@ class WebClientEngineIntegrationTest {
                         CompletableFuture.supplyAsync(
                             {
                                 Thread.currentThread().interrupt()
-                                transport.release(System.nanoTime() + TimeUnit.MINUTES.toNanos(1), System::nanoTime)
+                                transport.shutdown(System.nanoTime() + TimeUnit.MINUTES.toNanos(1), System::nanoTime)
                                 Thread.currentThread().isInterrupted
                             },
                             { task -> Thread.ofVirtual().start(task) },
                         )
 
                     // Then
-                    assertThat(release.get(2, TimeUnit.SECONDS)).`as`("the interrupt flag must survive release()").isTrue()
+                    assertThat(release.get(2, TimeUnit.SECONDS)).`as`("the interrupt flag must survive shutdown()").isTrue()
                     assertThat(lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage })
                         .anySatisfy { assertThat(it).contains("'$engine'", "because the shutdown thread was interrupted") }
-                    assertThat(eventually { transport.isReleased() }).`as`("the %s engine is released", engine).isTrue()
+                    assertThat(eventually { transport.isClosed }).`as`("the %s engine is released", engine).isTrue()
                     assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
                     assertThat(catchThrowable { held.get(2, TimeUnit.SECONDS) }).isNotNull().isNotInstanceOf(TimeoutException::class.java)
                 }
-            } finally {
-                logger.detachAppender(lines)
             }
         }
     }
@@ -1353,27 +1323,23 @@ class WebClientEngineIntegrationTest {
             val global = CopyOnWriteArrayList<Throwable>()
             val local = CopyOnWriteArrayList<Throwable>()
             val clientLog = LoggerFactory.getLogger(ResilientWebClient::class.java) as Logger
-            val clientLines = CapturingAppender().apply { start() }
-            val clientLevel = clientLog.level
-            clientLog.addAppender(clientLines)
-            clientLog.level = Level.DEBUG
             Hooks.onErrorDropped { global += it }
             try {
-                // When
-                client.get(Greeting::class.java) { it.uri("/late-error") }.block()
-                client
-                    .get(Greeting::class.java) { it.uri("/late-error") }
-                    .contextWrite { it.put(ON_ERROR_DROPPED_KEY, Consumer<Throwable> { error -> local += error }) }
-                    .block()
+                capturing(clientLog, Level.DEBUG) { clientLines ->
+                    // When
+                    client.get(Greeting::class.java) { it.uri("/late-error") }.block()
+                    client
+                        .get(Greeting::class.java) { it.uri("/late-error") }
+                        .contextWrite { it.put(ON_ERROR_DROPPED_KEY, Consumer<Throwable> { error -> local += error }) }
+                        .block()
 
-                // Then
-                assertThat(global).singleElement().extracting { it.message }.isEqualTo("late error of a misbehaving publisher")
-                assertThat(local).singleElement().extracting { it.message }.isEqualTo("late error of a misbehaving publisher")
-                assertThat(clientLines.events.map { it.formattedMessage }).noneMatch { it.contains("ended after cancellation") }
+                    // Then
+                    assertThat(global).singleElement().extracting { it.message }.isEqualTo("late error of a misbehaving publisher")
+                    assertThat(local).singleElement().extracting { it.message }.isEqualTo("late error of a misbehaving publisher")
+                    assertThat(clientLines.events.map { it.formattedMessage }).noneMatch { it.contains("ended after cancellation") }
+                }
             } finally {
                 Hooks.resetOnErrorDropped()
-                clientLog.detachAppender(clientLines)
-                clientLog.level = clientLevel
             }
         }
     }
@@ -1392,9 +1358,7 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = ListAppender<ILoggingEvent>().apply { start() }
-            logger.addAppender(lines)
-            try {
+            capturing(logger) { lines ->
                 // When
                 newFactory(
                     WebClientProperties.Engine(endpoints = mapOf("alpha" to WebClientEngine.JDK, "gamma" to WebClientEngine.JDK)),
@@ -1402,7 +1366,7 @@ class WebClientEngineIntegrationTest {
                 )
 
                 // Then
-                val engineLines = lines.list.filter { it.level == Level.INFO && it.formattedMessage.startsWith("HTTP engine") }.map { it.formattedMessage }
+                val engineLines = lines.events.filter { it.level == Level.INFO && it.formattedMessage.startsWith("HTTP engine") }.map { it.formattedMessage }
                 assertThat(engineLines).hasSize(3)
                 assertThat(engineLines[0])
                     .isEqualTo("HTTP engine per backend (app.webclient.engine, default reactor-netty): alpha=jdk, beta=reactor-netty, gamma=jdk")
@@ -1412,8 +1376,6 @@ class WebClientEngineIntegrationTest {
                 assertThat(engineLines[2])
                     .startsWith("HTTP engine 'jdk' (JdkClientHttpConnector over java.net.http.HttpClient) for [alpha, gamma]: applies ")
                     .contains("does NOT apply max-connections=100", "transport meters none")
-            } finally {
-                logger.detachAppender(lines)
             }
         }
     }

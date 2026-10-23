@@ -29,6 +29,14 @@
     </properties>
 
     <dependencies>
+        <!-- What a host declares for each example: the core for the decorator example, which uses it directly; a
+             client module for each client example; jackson-module-kotlin, which only the reactive client brings,
+             for the blocking, the asynchronous and the decorator example. -->
+        <dependency>
+            <groupId>eu.inqudium</groupId>
+            <artifactId>veredium-core</artifactId>
+            <version>${revision}</version>
+        </dependency>
         <dependency>
             <groupId>eu.inqudium</groupId>
             <artifactId>veredium-restclient</artifactId>
@@ -42,6 +50,10 @@
         <dependency>
             <groupId>org.jetbrains.kotlin</groupId>
             <artifactId>kotlin-stdlib</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>tools.jackson.module</groupId>
+            <artifactId>jackson-module-kotlin</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.httpcomponents</groupId>

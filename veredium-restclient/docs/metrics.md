@@ -92,8 +92,8 @@ pool also has **no per-request meters** of its own here (no `connect.time`, no `
 per-request view is §3.
 
 **The `pool` tag is the constant `restclient-apache`** (`RestClientMetrics.POOL_NAME`). It also names the
-evictor thread (`restclient-apache-evictor`) and the pool in the shutdown line. One factory, one pool: no
-deployment runs two in one registry, so the name is not a property.
+evictor thread (`restclient-apache-evictor`); the shutdown line names the engine (`'apache'`). A factory has at
+most one Apache pool and no deployment runs two factories in one registry, so the name is not a property.
 
 **`max` is not a gauge.** The pool's capacity is configuration (`app.mesh.defaults.transport.max-connections`,
 default 100, applied as both `maxConnTotal` and `maxConnPerRoute`), and the factory logs it at startup; the

@@ -21,6 +21,7 @@ import org.springframework.http.MediaType
 import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
+import tools.jackson.databind.ObjectMapper
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ScheduledExecutorService
@@ -39,7 +40,7 @@ import java.util.concurrent.ScheduledExecutorService
  * ## Engines
  *
  * Which HTTP engine carries a backend's exchanges is `app.restclient.engine` ([RestClientProperties.Engine]):
- * Apache HttpClient 5 by default (the wiring this factory has always had), or the JDK
+ * Apache HttpClient 5 by default, or the JDK
  * client, Jetty or Reactor Netty, for all backends or per alias. Each engine in use is created ONCE, when the
  * factory is - an engine no backend selects is never created - and shared by the backends on it; the factory
  * owns it and closes it in [shutdown]. Its request factory goes onto the backend's clone of Boot's builder and
@@ -60,7 +61,7 @@ class ResilientRestClientFactory(
     private val properties: RestClientProperties,
     private val meshProperties: MeshProperties,
     private val resilience: BlockingResilienceDecorator,
-    private val objectMapper: tools.jackson.databind.ObjectMapper,
+    private val objectMapper: ObjectMapper,
     // Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; Spring injects
     // the auto-configured factory when a Bean Validation provider is on the classpath. Absent -> validation
     // cannot run for ANY backend, whatever the properties say, which the startup line reports rather than
@@ -87,7 +88,7 @@ class ResilientRestClientFactory(
      * Monotonic clock for the ONE wait this factory makes - the drain deadline in [shutdown]. Injectable so the
      * deadline branch can be reached by a test that controls time instead of one that holds a connection open
      * past the derived window; defaults to `System::nanoTime`, so production wiring is unchanged. The same
-     * shape as `ResilientRestClient`'s clock, and like it never used for a timestamp.
+     * shape as [ResilientRestClient]'s clock, and like it never used for a timestamp.
      */
     private val nanoTime: () -> Long = System::nanoTime,
     /**
@@ -108,7 +109,7 @@ class ResilientRestClientFactory(
     /** Which backends validate, with which validator, and whether a violation fails the call - see [ResponseValidation]. */
     private val validation = ResponseValidation(properties.validation, validatorFactory)
 
-    /** Standalone HTTP observation toggle (see [RestClientProperties.Observability]) - no sync-bridge coupling. */
+    /** Standalone HTTP observation toggle (see [RestClientProperties.Observability]) - this module's own property alone. */
     private val observationEnabled: Boolean = properties.observability.httpObservationEnabled
 
     /**
@@ -208,9 +209,9 @@ class ResilientRestClientFactory(
      * The JDK client has no connection bound, so its pool carries none.
      */
     override fun connectionPools(): List<MeshConnectionPool> =
-        transports.keys.map { engine ->
+        transports.map { (engine, transport) ->
             MeshConnectionPool(
-                name = "restclient-${engine.key}",
+                name = transport.name,
                 maxConnections = meshTransport.maxConnections.takeUnless { engine == RestClientEngine.JDK },
                 aliases = engineByBackend.filterValues { it == engine }.keys,
             )
@@ -400,8 +401,9 @@ object RestClientMetrics {
     const val POOL_TAG: String = "pool"
 
     /**
-     * The one pool's name: the [POOL_TAG] value, the evictor thread's name and the name the shutdown line
-     * reports. A constant, not a property: one factory, one pool, and no deployment runs two in one registry.
+     * The Apache engine's pool name: the [POOL_TAG] value on its gauges and the stem of its evictor thread's name. A
+     * constant, not a property: a factory has at most one Apache pool, and no deployment runs two factories in one
+     * registry.
      */
     const val POOL_NAME: String = "restclient-apache"
 

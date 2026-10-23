@@ -45,8 +45,9 @@ data class LegacyDirectoryProperties(
  *   context (`@PreDestroy` on [BlockingResilienceDecorator.shutdown]);
  * - the breaker customizer the decorator needs: its pipeline raises three failures itself - a full bulkhead, an
  *   interrupted caller, a call after shutdown - and a breaker that counted them would open against a backend
- *   that was never called. [BlockingResilienceDecorator.SELF_INFLICTED_FAILURES] lists them, and so does the
- *   "customer unknown" answer, which is a valid answer of the backend, not a fault;
+ *   that was never called. The customizer ignores those listed in
+ *   [BlockingResilienceDecorator.SELF_INFLICTED_FAILURES], and also [UnknownCustomerException], the "customer
+ *   unknown" answer, which is a valid answer of the backend, not a fault;
  * - the native HttpClient 4, closed with the context.
  */
 @Configuration(proxyBeanMethods = false)
@@ -69,7 +70,7 @@ class DecoratorConfiguration {
 
     @Bean
     fun legacyDirectoryBreaker(): CircuitBreakerConfigCustomizer =
-        CircuitBreakerConfigCustomizer.of(LegacyCustomerDirectory.NAME) { builder ->
+        CircuitBreakerConfigCustomizer.of(DecoratorCustomerAdapter.NAME) { builder ->
             builder.ignoreExceptions(*(BlockingResilienceDecorator.SELF_INFLICTED_FAILURES + UnknownCustomerException::class.java).toTypedArray())
         }
 
@@ -79,7 +80,7 @@ class DecoratorConfiguration {
      * redirects, no cookies.
      */
     @Bean
-    fun legacyHttpClient(properties: LegacyDirectoryProperties): CloseableHttpClient =
+    fun legacyDirectoryHttpClient(properties: LegacyDirectoryProperties): CloseableHttpClient =
         HttpClients
             .custom()
             .setConnectionManager(

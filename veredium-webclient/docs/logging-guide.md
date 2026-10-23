@@ -1,11 +1,11 @@
 # Logging Guide: Reactive WebClient Adapters
 
-> **Ownership & baseline.** Maintained by **Dirk Haase**. Verified against the code at commit `589d3890` (2026-07-30)
+> **Ownership & baseline.** Maintained by **Dirk Haase**. Reviewed against the code on 2026-10-23 (§0 and §1; the rest is the superseded design, kept as written).
 > Where this text and the code disagree, the code
 > wins.
 
 > **Which sections describe today.** Only §0 and §1. §4–§8 described the module's own exchange diary, which
-> was **replaced by `legatium-webclient-logging` on 2026-09-18** (ticket 30) — §0 says what changed and where
+> was **replaced by `legatium-webclient-logging`** — §0 says what changed and where
 > the current configuration is documented. §2 and §3 describe the **ORIGINAL** implementation and were history
 > already: their code samples are quoted from the pre-refactor codebase and are not expected to match anything
 > in the tree — the classes they name (`DefaultWebClientConfigurer`, `InvolvedPartyAPIReactiveAdapter`,
@@ -23,16 +23,14 @@ replaces it, and is honest about the trade-offs the new design carries.
 
 ## 0. Superseded — the diary was replaced by legatium (2026-09-18)
 
-> **Read this before anything below.** As of ticket 30
-> (the ticket that introduced it in the origin project, dhaase/tool-box) the design in §4–§8
-> is **no longer in the tree**. `ExchangeDiaryLogging.kt` and `ExchangeDiary` were deleted; `ResilientWebClient`
-> creates no diary and captures no body; `ResilientWebClientFactory` attaches no filter. (Since 2026-10-21
-> `ResilientWebClient` takes an MDC snapshot again, for its OWN transport lines only - the error, cancellation
-> and closing lines, written on the event loop under the caller's keys; see `webclient-config-guide.md` §4.1.
-> The exchange event does not use it.)
+> **Read this before anything below.** The design in §4–§8 is **not in the tree**. `ExchangeDiaryLogging.kt` and `ExchangeDiary` were deleted; `ResilientWebClient`
+> creates no diary and captures no body; `ResilientWebClientFactory` attaches no filter. (`ResilientWebClient`
+> takes an MDC snapshot for its OWN transport lines only - the error, cancellation and closing lines, written on
+> the event loop under the caller's keys; see `webclient-config-guide.md` §4.1. The exchange event does not use
+> it.)
 > The exchange event is written by the library
 > [`legatium-webclient-logging`](https://github.com/Inqudium/legatium) (1.3.0), whose auto-configuration hangs
-> its filter on Boot's `WebClient.Builder` bean — the bean the factory clones per backend since ticket 29.
+> its filter on Boot's `WebClient.Builder` bean — the bean the factory clones per backend.
 >
 > **What the library does that the diary did**, in the diary's own terms: one event per exchange (§6.1) on the
 > logger `adapter-http-exchange`; structured `adapter_*` fields (§6.2), fourteen of them, mapped by the
@@ -62,9 +60,8 @@ replaces it, and is honest about the trade-offs the new design carries.
 > §1 still describes the adapter layer as it is. §2–§3 were history already. §4–§8 are now history too: the
 > reasoning in them — why one event, why structured fields, why the emission must not be queued, why the bound
 > on a body must be a parameter — is what the library implements, and it is kept here as the record of how
-> the requirements were arrived at. Where the text below says "is", read "was, until 2026-09-18". The current
-> configuration is in [`webclient-config-guide.md`](webclient-config-guide.md) §4.1; the queries in
-> the origin project's Kibana runbook (`web-client/docs/runbooks/operation/ops-kibana-queries-web-client.md` in dhaase/tool-box, not ported).
+> the requirements were arrived at. Where the text below says "is", read "was". The current configuration is in
+> [`webclient-config-guide.md`](webclient-config-guide.md) §4.1.
 
 ---
 
@@ -117,14 +114,13 @@ that calls `LOGGER.info(...)`.* That single sentence is what shaped the whole
 design — the application had to provide the asynchrony itself, because the
 logging library would not.
 
-**That constraint no longer holds.** The deployment runs
-`SequencingAsyncAppender` (module `logback-kafka-appender`), a drop-in
-replacement for Logback's `AsyncAppender` that queues events and hands them to
-a Kafka appender on its own worker. The application-side queue that existed to
-compensate has therefore been deleted; §4.3 records what it was and why it
-went. The rest of the design — one event per exchange, the diary, MDC
-restoration, level resolution before the event is built — is unaffected,
-because none of it followed from this constraint.
+**That constraint does not hold for this module.** It leaves the queueing to
+the host's appender: an asynchronous appender (Logback's `AsyncAppender` or a
+drop-in replacement) queues events and hands them on on its own worker, so the
+module keeps no application-side queue of its own; §4.3 records the queue the
+superseded design had and why it went. One event per exchange, MDC restoration
+and level resolution before the event is built - now legatium's - did not
+follow from this constraint.
 
 What did NOT change is the reason the design cares about the calling thread at
 all: emission happens on a Netty event loop, and the appender's queue offer is
@@ -525,9 +521,8 @@ was pure gain:
   guaranteed by the appender's queue instead — `SequencingAsyncAppender` is
   likewise single-worker — so the property survives, but it is no longer this
   module's to guarantee.
-- *The drop counter* was a Micrometer gauge this module owned
-  (`lap.webclient.logger.dropped`). It is gone; see `metrics.md` §1 for what
-  answers the same question now.
+- *The drop counter* was a Micrometer gauge this module owned. It is gone;
+  whether log events are lost under load is the host appender's to report.
 - *The event-loop hand-off* was a `queue.offer` that could never block. Emission
   is now synchronous on the completing thread, so what the event loop pays is
   whatever the appender's own offer costs. For an asynchronous appender that is

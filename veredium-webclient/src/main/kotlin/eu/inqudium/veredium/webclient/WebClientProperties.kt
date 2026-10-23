@@ -15,7 +15,8 @@ import java.time.Duration
  * Only knobs with no mesh equivalent stay here: `maxInMemorySize`, the pool lifecycle and the engine. The mesh
  * transport config owns `maxConnections` / `pendingAcquireTimeout`, the ladder owns the response timeout.
  *
- * Every value is checked while BINDING, the way `MeshProperties` and `ResolvedTimeouts` do it - and for the
+ * Every value is checked while BINDING, the way [eu.inqudium.veredium.core.mesh.MeshProperties] and
+ * [eu.inqudium.veredium.core.mesh.ResolvedTimeouts] do it - and for the
  * same reason: a wrong number here does not announce itself. It binds, the context starts, and the effect
  * shows up as a runtime symptom that points anywhere but at the configuration. The messages therefore name
  * the PROPERTY KEY, not the Kotlin field, because the key is what the person reading the failure has to edit.
@@ -26,14 +27,12 @@ data class WebClientProperties(
      * Upper bound for buffered response bodies. Guards against unbounded memory use on large payloads.
      *
      * **Why 256 KB and not less.** This is Spring's own `ExchangeStrategies` default, so it is the value a
-     * reader already expects; a deviation is what needs justifying, not this. The previous default was 8 KB,
-     * and on 2026-08-07 one access-profile response exceeded it: the backend answered `200 OK` in 130-260 ms
-     * and the codec aborted mid-buffer, ten times over five cycles on the same involved party. Two backfill
-     * rows spent their whole retry cap on it and were rejected. 8 KB is simply too small for a list response
-     * from these backends.
+     * reader already expects; a deviation is what needs justifying, not this. 8 KB proved too small for a list
+     * response from these backends: the backend answers `200 OK` promptly and the codec aborts mid-buffer, on
+     * every retry of the same call.
      *
      * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and the shared pool is bounded
-     * at `maxConnections` (100, `mesh.MeshProperties.Transport`). At 256 KB the worst case is ~25 MB of
+     * at `maxConnections` (100, [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst case is ~25 MB of
      * response buffers; at the 1 MB some other clients use it would be ~100 MB, which is real money on a
      * service that otherwise needs little heap.
      *
@@ -52,7 +51,7 @@ data class WebClientProperties(
      * ([WebClientEngine]; the configuration guide tabulates it).
      */
     val pool: Pool = Pool(),
-    /** HTTP client Micrometer Observation - standalone, self-contained (does NOT depend on sync-bridge). */
+    /** HTTP client Micrometer Observation - self-contained; it reads only this module's property. */
     val observability: Observability = Observability(),
     /**
      * Whether a deserialised response is checked against its DTO's Bean Validation constraints. A global default
@@ -70,7 +69,7 @@ data class WebClientProperties(
     val userAgent: String? = null,
     /**
      * Which HTTP engine carries the clients of this module - a default with per-backend (mesh alias)
-     * overrides, see [Engine]. The code default is Reactor Netty, the wiring this module always had.
+     * overrides, see [Engine]. The code default is Reactor Netty, the engine Boot's own WebClient auto-configuration prefers.
      */
     val engine: Engine = Engine(),
 ) {
@@ -176,19 +175,18 @@ data class WebClientProperties(
 
     /**
      * Toggle for Spring WebClient's NATIVE Micrometer Observation on the outbound HTTP calls of THIS module.
-     * [ResilientWebClientFactory] clones Boot's auto-configured `WebClient.Builder`, on which Boot's
+     * [ResilientWebClientFactory] clones Boot's auto-configured [org.springframework.web.reactive.function.client.WebClient.Builder], on which Boot's
      * `ObservationWebClientCustomizer` has already placed the host's `ObservationRegistry` (and observation
      * convention) - the factory does not wire the registry itself. This flag has two jobs: it gates the JVM-wide
-     * Reactor context-propagation hook (`WebClientReactorContextPropagationConfiguration`), and when `false` it
+     * Reactor context-propagation hook ([WebClientReactorContextPropagationConfiguration]), and when `false` it
      * REPLACES the registry Boot wired with a NOOP, so this module's clients open no `http.client.requests`
      * observation while every other WebClient of the host keeps its own. When `true`, each request opens that
      * observation; with a tracing bridge on the (host's) classpath that becomes a CLIENT span and injects the
      * W3C `traceparent` into the outgoing request. With only a metrics registry it records the client timer;
      * with no `ObservationRegistry` bean at all Boot wires nothing and it is a NOOP.
      *
-     * This is DELIBERATELY self-contained: it resolves from this module's own property and references NOTHING
-     * from sync-bridge - the adapter traces its HTTP calls whether or not sync-bridge is on the classpath. The
-     * central switch for ALL WebClients of the host is Spring's `management.observations.enable.*` filter,
+     * This is DELIBERATELY self-contained: it resolves from this module's own property and from nothing else of
+     * the host, so the module traces its HTTP calls whatever else is on the classpath. The central switch for ALL WebClients of the host is Spring's `management.observations.enable.*` filter,
      * which acts on the registry itself and is orthogonal to this flag.
      *
      * @property httpObservationEnabled Default `false` (opt-in): the module traces its HTTP calls only when the

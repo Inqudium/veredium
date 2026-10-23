@@ -33,7 +33,9 @@ them have run their tests. Neither the existing modules nor the parent can be th
 
 A separate module that depends on all library modules fixes both:
 
-- The reactor orders it last, because it depends on every other module.
+- The reactor builds it after the three library modules, because it depends on them. It runs last of all only
+  because the parent declares it last; `veredium-examples` and `veredium-test-support` are not among its
+  dependencies.
 - `report-aggregate` knows exactly which modules to include.
 - No library module gains a dependency.
 
@@ -48,5 +50,7 @@ them.
 - `dokka.skip` and absence from the `-pl` lists of the Dokka steps: the API reference has no page for it.
 
 The test helper module [`veredium-test-support`](../veredium-test-support/README.md) and the usage examples in
-[`veredium-examples`](../veredium-examples/README.md) are kept out of publication the same way. Neither is part of
-the aggregate: their classes are test infrastructure and example code, not library code.
+[`veredium-examples`](../veredium-examples/README.md) skip the deploy and leave the Central bundle the same way.
+Dokka differs: both declare the Dokka plugin with `skip`, and `veredium-test-support` is even named in the `-pl`
+lists of the Dokka steps, because the client modules need it built there; it skips itself instead of being left
+out. Neither is part of the aggregate: their classes are test infrastructure and example code, not library code.

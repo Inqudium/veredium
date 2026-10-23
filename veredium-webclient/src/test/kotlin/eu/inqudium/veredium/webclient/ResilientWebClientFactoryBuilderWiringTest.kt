@@ -34,21 +34,16 @@ import java.util.function.Supplier
  * Wiring test for [ResilientWebClientFactory]'s base builder: it must be Boot's auto-configured
  * `WebClient.Builder` bean, not a builder of its own.
  *
- * 1. What is tested: that whatever the host puts on Boot's builder - a `WebClientCustomizer` bean of its own,
- *    and the `ObservationRegistry` Boot's `ObservationWebClientCustomizer` places there - reaches the clients
- *    this factory produces; that the module toggle `http-observation-enabled=false` still switches the
- *    observation of THESE clients off although Boot wired the registry; and that a context without the
- *    builder bean fails to start rather than running silently on a bare builder.
- * 2. Success criteria: a marker header set by a test customizer arrives at a local WireMock backend; an
- *    `http.client.requests` meter appears in a `SimpleMeterRegistry` behind the context's `ObservationRegistry`
- *    when the toggle is on and does NOT appear when it is off; and the builder-less context's startup failure
- *    names `WebClient.Builder`.
- * 3. Why it matters: a factory built on `WebClient.builder()` would have to reimplement the one piece of Boot's
- *    wiring it needs (the registry), and every other customizer - a host correlation header, a custom
- *    observation convention, Boot's codec settings - would reach every WebClient of the host except these.
- *    And a Kotlin default on the parameter would let Spring treat the bean as optional, so a host that
- *    excluded `WebClientAutoConfiguration` would lose its CLIENT span without a log line. Both are invisible
- *    at runtime; only a context test pins them.
+ * Whatever the host puts on Boot's builder - a `WebClientCustomizer` bean of its own, and the
+ * `ObservationRegistry` Boot's `ObservationWebClientCustomizer` places there - must reach the clients this
+ * factory produces; the module toggle `http-observation-enabled=false` must still switch the observation of
+ * THESE clients off although Boot wired the registry; and a context without the builder bean must fail to start
+ * rather than run silently on a bare builder. A factory built on `WebClient.builder()` would have to reimplement
+ * the one piece of Boot's wiring it needs (the registry), and every other customizer - a host correlation
+ * header, a custom observation convention, Boot's codec settings - would reach every WebClient of the host
+ * except these. And a Kotlin default on the parameter would let Spring treat the bean as optional, so a host
+ * that excluded `WebClientAutoConfiguration` would lose its CLIENT span without a log line. Both are invisible
+ * at runtime; only a context test pins them.
  *
  * The contexts are driven with an [ApplicationContextRunner] - a real Spring context, no mocks - and the
  * backend is a local WireMock on a dynamic port, as in `ResilientWebClientIntegrationTest`. No inner

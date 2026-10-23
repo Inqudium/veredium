@@ -16,34 +16,6 @@ import org.springframework.beans.factory.BeanRegistry
 import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.core.env.Environment
 
-/*
- * How the mesh ladder and the client stack's verdicts reach the Resilience4j instances the decorators use.
- *
- * Resilience4j's Spring integration builds one config per `resilience4j.<layer>.instances.<name>` entry when it
- * creates the registry bean, and consults a `*ConfigCustomizer` bean named after the instance as the LAST step
- * of that build - after the named base config and the instance's own properties have been applied, and before
- * the instance exists. A customizer therefore sees the operator's YAML on its builder and shapes the instance
- * that the metric and health binders then bind to: no second lifecycle, no remove + recreate, no re-binding.
- *
- * Two things follow, and both are load-bearing:
- *
- *  - **One customizer per instance name.** Resilience4j rejects a second customizer for the same name at
- *    startup, so everything the wiring wants on an instance - the two breaker verdicts below and, when
- *    enabled, the mesh-derived rungs - is ONE customizer per alias, built by [circuitBreakerCustomizer] and
- *    [timeLimiterCustomizer].
- *  - **An undeclared instance is created on the default.** For a customizer name it finds no `instances.<name>`
- *    entry for, the Boot configuration creates the instance anyway - on the registry DEFAULT config, not on the
- *    named base config the operator chose (`mesh-backend`). The verdicts and the derived budget arrive, every
- *    value of the shipped policy is silently lost. [MeshResilienceStartupGuard] turns that silence into a
- *    failed start.
- *
- * The verdicts themselves live in the stack's [BreakerVerdicts]; this file only installs them. They are
- * installed in CODE rather than written as `ignore-exceptions` / `record-exceptions` into YAML because they
- * are structural invariants of the stack's decorator pipeline - the code that raises `BulkheadFullException`
- * is the code that must discount it - and a YAML entry would be silently lost whenever an instance referenced
- * a different named config.
- */
-
 /** The slow-call rate an enabled circuit breaker is pinned to when the derived slow-call sits below `individual`. */
 internal const val SLOW_CALL_RATE_PIN_PERCENT: Float = 100f
 
@@ -67,9 +39,9 @@ internal const val SLOW_CALL_RATE_PIN_PERCENT: Float = 100f
  *
  * The middle row is the one that is easy to get wrong in the safe-looking direction. Ignoring a benign 4xx
  * also keeps it out of the sliding window, so on a 4xx-dominated backend the window fills with whatever was
- * left over and a few genuine faults become its entire content - on 2026-07-31, 41,903 filtered-out benign 4xx
- * left five 504 timeouts as the whole sample of the resolver breaker, which opened at a nominal 100 % failure
- * rate. A 4xx is positive evidence that the backend is alive and serving, and enters the window as such. What
+ * left over and a few genuine faults become its entire content, until the breaker opens at a nominal 100 %
+ * failure rate on a handful of timeouts (the measured case is recorded under D2, "Answered means healthy", in
+ * `veredium-restclient/docs/decisions.md`). A 4xx is positive evidence that the backend is alive and serving, and enters the window as such. What
  * stays IGNORED is the call that carries no evidence about the backend at all.
  *
  * ## Additive, not replacing
@@ -141,7 +113,7 @@ fun timeLimiterCustomizer(endpoint: ResolvedTimeouts): TimeLimiterConfigCustomiz
  * Abstract, because the verdicts are a fact about the client STACK - which exception carries a response status,
  * which failures the client raises itself - and the stack is known at compile time. Each stack subclasses it with
  * its verdicts object (`RestClientMeshRegistrar`, `WebClientMeshRegistrar`) and imports the subclass next to
- * `MeshResilienceConfiguration`. The verdicts therefore never pass through the context: a host can neither replace
+ * [eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration]. The verdicts therefore never pass through the context: a host can neither replace
  * them with a bean of its own nor override them by accident, and the guard probes with the verdicts the customizers
  * actually installed.
  *
@@ -151,6 +123,32 @@ fun timeLimiterCustomizer(endpoint: ResolvedTimeouts): TimeLimiterConfigCustomiz
  * bean supplies is built from the [MeshProperties] BEAN, so every consumer (the client factory, the ladder
  * logger, the guard, these customizers) reasons about the one resolved set of [ResolvedTimeouts] the context
  * holds. The bean name carries the alias so two customizers can never collide on a Spring name either.
+ *
+ * ## How the customizers reach the instances
+ *
+ * Resilience4j's Spring integration builds one config per `resilience4j.<layer>.instances.<name>` entry when it
+ * creates the registry bean, and consults a `*ConfigCustomizer` bean named after the instance as the LAST step
+ * of that build - after the named base config and the instance's own properties have been applied, and before
+ * the instance exists. A customizer therefore sees the operator's YAML on its builder and shapes the instance
+ * that the metric and health binders then bind to: no second lifecycle, no remove + recreate, no re-binding.
+ *
+ * Two things follow, and both are load-bearing:
+ *
+ *  - **One customizer per instance name.** Resilience4j rejects a second customizer for the same name at
+ *    startup, so everything the wiring wants on an instance - the two breaker verdicts and, when enabled, the
+ *    mesh-derived rungs - is ONE customizer per alias, built by [circuitBreakerCustomizer] and
+ *    [timeLimiterCustomizer].
+ *  - **An undeclared instance is created on the default.** For a customizer name it finds no `instances.<name>`
+ *    entry for, the Boot configuration creates the instance anyway - on the registry DEFAULT config, not on the
+ *    named base config the operator chose (`mesh-backend`). The verdicts and the derived budget arrive, every
+ *    value of the shipped policy is silently lost. [MeshResilienceStartupGuard] turns that silence into a
+ *    failed start.
+ *
+ * The verdicts themselves live in the stack's [BreakerVerdicts]; the registrar only installs them. They are
+ * installed in CODE rather than written as `ignore-exceptions` / `record-exceptions` into YAML because they
+ * are structural invariants of the stack's decorator pipeline - the code that raises `BulkheadFullException`
+ * is the code that must discount it - and a YAML entry would be silently lost whenever an instance referenced
+ * a different named config.
  */
 abstract class MeshResilienceRegistrar(
     private val verdicts: BreakerVerdicts,
@@ -165,15 +163,15 @@ abstract class MeshResilienceRegistrar(
                 .bind(MeshProperties.PREFIX, MeshProperties::class.java)
                 .orElseGet { MeshProperties() }
         mesh.resolveAll().values.sortedBy { it.alias }.forEach { endpoint ->
-            registry.registerBean(CIRCUIT_BREAKER_BEAN_PREFIX + endpoint.alias, CircuitBreakerConfigCustomizer::class.java) { spec ->
+            registry.registerBean("$CIRCUIT_BREAKER_BEAN_PREFIX${endpoint.alias}", CircuitBreakerConfigCustomizer::class.java) { spec ->
                 spec
-                    .description("mesh circuit-breaker customizer for " + endpoint.triplet)
+                    .description("mesh circuit-breaker customizer for ${endpoint.triplet}")
                     .supplier { context -> circuitBreakerCustomizer(resolved(context, endpoint.triplet), verdicts) }
             }
             if (endpoint.timeLimiterEnabled) {
-                registry.registerBean(TIME_LIMITER_BEAN_PREFIX + endpoint.alias, TimeLimiterConfigCustomizer::class.java) { spec ->
+                registry.registerBean("$TIME_LIMITER_BEAN_PREFIX${endpoint.alias}", TimeLimiterConfigCustomizer::class.java) { spec ->
                     spec
-                        .description("mesh time-limiter customizer for " + endpoint.triplet)
+                        .description("mesh time-limiter customizer for ${endpoint.triplet}")
                         .supplier { context -> timeLimiterCustomizer(resolved(context, endpoint.triplet)) }
                 }
             }
@@ -207,8 +205,13 @@ abstract class MeshResilienceRegistrar(
             .getValue(triplet)
 
     companion object {
-        const val CIRCUIT_BREAKER_BEAN_PREFIX = "meshCircuitBreakerCustomizer."
-        const val TIME_LIMITER_BEAN_PREFIX = "meshTimeLimiterCustomizer."
-        const val STARTUP_GUARD_BEAN_NAME = "meshResilienceStartupGuard"
+        /** The Spring bean name of an alias's circuit-breaker customizer is this prefix plus the alias. */
+        const val CIRCUIT_BREAKER_BEAN_PREFIX: String = "meshCircuitBreakerCustomizer."
+
+        /** The Spring bean name of an alias's time-limiter customizer is this prefix plus the alias. */
+        const val TIME_LIMITER_BEAN_PREFIX: String = "meshTimeLimiterCustomizer."
+
+        /** The Spring bean name of the [MeshResilienceStartupGuard] the registrar declares. */
+        const val STARTUP_GUARD_BEAN_NAME: String = "meshResilienceStartupGuard"
     }
 }

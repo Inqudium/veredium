@@ -12,6 +12,7 @@ import java.io.IOException
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.LockSupport
 
 /** The helpers the client suites rely on, held to the promises those suites make with them. */
@@ -70,54 +71,62 @@ class TestSupportTest {
 
     @Test
     fun `should capture only the accepted events and wait for the ones it is told to`() {
-        // What is tested: CapturingAppender with a filter on the message, fed two events, one of them accepted.
-        // Success criteria: events holds only the accepted one; awaitEvents for it returns at once with it.
+        // What is tested: capturing with a filter on the message and a level, fed two events, one of them accepted.
+        // Success criteria: events holds only the accepted one; awaitEvents for it returns at once with it;
+        //   afterwards the appender is detached and stopped and the logger has its own level back.
         // Why it matters: the suites capture one call's lines out of a logger every test writes to; a filter that
-        //   let others through, or a wait that did not see the line, would make their assertions lie.
+        //   let others through, or a wait that did not see the line, would make their assertions lie, and a
+        //   recorder or level left behind would leak into the next test.
         //
         // Given
         val logger = LoggerFactory.getLogger("capture-probe") as Logger
-        logger.level = Level.INFO
-        val appender = CapturingAppender { it.formattedMessage.contains("wanted") }.apply { start() }
-        logger.addAppender(appender)
-        try {
-            // When
-            logger.info("a wanted line")
-            logger.info("another line")
+        logger.level = Level.WARN
 
-            // Then
-            assertThat(appender.events.map { it.formattedMessage }).containsExactly("a wanted line")
-            assertThat(appender.awaitEvents(until = { it.formattedMessage.startsWith("a wanted") })).hasSize(1)
-        } finally {
-            logger.detachAppender(appender)
-        }
+        // When
+        val (appender, during, awaited) =
+            capturing(logger, Level.INFO, accept = { it.formattedMessage.contains("wanted") }) { appender ->
+                logger.info("a wanted line")
+                logger.info("another line")
+                Triple(appender, appender.events.map { it.formattedMessage }, appender.awaitEvents(until = { it.formattedMessage.startsWith("a wanted") }))
+            }
+
+        // Then
+        assertThat(during).containsExactly("a wanted line")
+        assertThat(awaited).hasSize(1)
+        assertThat(logger.isAttached(appender)).isFalse()
+        assertThat(appender.isStarted).isFalse()
+        assertThat(logger.level).isEqualTo(Level.WARN)
     }
 
     @Test
     fun `should open the latch of a URL only for that URL, and forget it once cleared`() {
-        // What is tested: WireMockArrivals, through its listener method, for the registered URL, another URL, and
-        //   the registered URL after clear.
-        // Success criteria: the latch opens for its own URL only; after clear, a new latch for the same URL stays
-        //   closed when the action of the earlier test is gone.
+        // What is tested: WireMockArrivals, through its listener method: a latch for one URL, fed a request to
+        //   another URL and then to its own; an action for a second URL, fed a request to it before and after clear.
+        // Success criteria: the latch opens for its own URL only; the action runs for the request before clear and
+        //   not for the one after it.
         // Why it matters: it replaces the per-test listeners that piled up across tests and fired for a later
         //   test's request to the same URL.
         //
         // Given
         val arrivals = WireMockArrivals()
         val held = arrivals.arrivalOf("/held")
+        val seen = AtomicInteger()
+        arrivals.onArrival("/seen") { seen.incrementAndGet() }
 
         // When
         arrivals.requestReceived(request("/other"), RESPONSE)
         val beforeOwn = held.count
         arrivals.requestReceived(request("/held"), RESPONSE)
+        arrivals.requestReceived(request("/seen"), RESPONSE)
+        val beforeClear = seen.get()
         arrivals.clear()
-        val later = arrivals.arrivalOf("/later")
-        arrivals.requestReceived(request("/held"), RESPONSE)
+        arrivals.requestReceived(request("/seen"), RESPONSE)
 
         // Then
         assertThat(beforeOwn).isEqualTo(1)
         assertThat(held.await(0, TimeUnit.SECONDS)).isTrue()
-        assertThat(later.count).isEqualTo(1)
+        assertThat(beforeClear).isEqualTo(1)
+        assertThat(seen.get()).`as`("the action of the cleared test").isEqualTo(1)
     }
 
     // ---------------------------------------------------------------------------

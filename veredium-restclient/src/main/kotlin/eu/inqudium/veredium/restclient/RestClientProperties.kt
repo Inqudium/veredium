@@ -15,7 +15,8 @@ import java.time.Duration
  * Only knobs with no mesh equivalent stay here: `maxInMemorySize`, the pool lifecycle and the HTTP [engine]. The
  * mesh transport config owns `maxConnections` / `pendingAcquireTimeout`, the ladder owns the response timeout.
  *
- * Every value is checked while BINDING, the way `MeshProperties` and `ResolvedTimeouts` do it - and for the
+ * Every value is checked while BINDING, the way [eu.inqudium.veredium.core.mesh.MeshProperties] and
+ * [eu.inqudium.veredium.core.mesh.ResolvedTimeouts] do it - and for the
  * same reason: a wrong number here does not announce itself. It binds, the context starts, and the effect
  * shows up as a runtime symptom that points anywhere but at the configuration. The messages therefore name
  * the PROPERTY KEY, not the Kotlin field, because the key is what the person reading the failure has to edit.
@@ -29,15 +30,15 @@ data class RestClientProperties(
      * The bound is therefore enforced by [ResilientRestClient] itself, which reads the body through a bounded
      * buffer and fails the call with a [ResponseBodyLimitExceededException] once the limit is passed - the
      * counterpart of the reactive codec's `DataBufferLimitException`, and discounted by the circuit breaker for
-     * the same reason (see `RestClientVerdicts.clientSideFailure`).
+     * the same reason (see [RestClientVerdicts.clientSideFailure]).
      *
      * **Why 256 KB and not less.** This is the WebClient twin's ceiling, kept so that the two modules size their
-     * buffers identically against the same backends: on 2026-08-07 one access-profile response exceeded the 8 KB
-     * the reactive module shipped with, and two backfill rows spent their whole retry cap on it. 8 KB is simply
-     * too small for a list response from these backends.
+     * buffers identically against the same backends. 8 KB is too small for a list response from these backends:
+     * an access-profile list exceeds it, and a call refused on its buffer spends its whole retry cap on the same
+     * answer.
      *
      * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and the shared pool is bounded
-     * at `maxConnections` (100, `mesh.MeshProperties.Transport`). At 256 KB the worst case is ~25 MB of
+     * at `maxConnections` (100, [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst case is ~25 MB of
      * response buffers; at the 1 MB some other clients use it would be ~100 MB, which is real money on a
      * service that otherwise needs little heap.
      *
@@ -53,7 +54,7 @@ data class RestClientProperties(
      * and Reactor Netty take the ones they have an equivalent for, the JDK engine none (see [Pool]).
      */
     val pool: Pool = Pool(),
-    /** HTTP client Micrometer Observation - standalone, self-contained (does NOT depend on sync-bridge). */
+    /** HTTP client Micrometer Observation - self-contained; reads only this module's own property. */
     val observability: Observability = Observability(),
     /**
      * Whether a deserialised response is checked against its DTO's Bean Validation constraints. A global default
@@ -168,8 +169,8 @@ data class RestClientProperties(
      * the JDK engine on a backend whose `Host` header it cannot send each fail the context start with a message
      * naming the key, checked by the factory (which knows the aliases) rather than at binding.
      *
-     * @property default The engine of every backend without an override. [RestClientEngine.APACHE], the
-     *   module's wiring before the property existed.
+     * @property default The engine of every backend without an override. [RestClientEngine.APACHE], the one
+     *   engine that applies every knob of the [Pool] block.
      * @property endpoints Per-backend-alias overrides; an alias not present runs on [default].
      */
     data class Engine(
@@ -200,11 +201,11 @@ data class RestClientProperties(
      * `ObservationRegistry` bean at all Boot wires nothing and it is a NOOP.
      *
      * Unlike the WebClient twin there is no JVM-wide hook to gate: the observation reaches the exchange across
-     * the blocking decorator's thread hand-off because `BlockingResilienceDecorator` reopens the caller's
+     * the blocking decorator's thread hand-off because [eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator] reopens the caller's
      * observation scope on the worker thread - a per-call, local act, not process-wide state.
      *
-     * This is DELIBERATELY self-contained: it resolves from this module's own property and references NOTHING
-     * from sync-bridge - the adapter traces its HTTP calls whether or not sync-bridge is on the classpath. The
+     * This is DELIBERATELY self-contained: it resolves from this module's own property and reads no other
+     * module's switch - the adapter traces its HTTP calls whatever else is on the host's classpath. The
      * central switch for ALL RestClients of the host is Spring's `management.observations.enable.*` filter,
      * which acts on the registry itself and is orthogonal to this flag.
      *

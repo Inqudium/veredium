@@ -28,6 +28,7 @@ import eu.inqudium.veredium.testsupport.Greeting
 import eu.inqudium.veredium.testsupport.LookupRequest
 import eu.inqudium.veredium.testsupport.Unserialisable
 import eu.inqudium.veredium.testsupport.WireMockArrivals
+import eu.inqudium.veredium.testsupport.capturing
 import eu.inqudium.veredium.testsupport.eventually
 import eu.inqudium.veredium.testsupport.leapingClock
 import io.github.resilience4j.bulkhead.BulkheadConfig
@@ -64,6 +65,7 @@ import org.springframework.web.client.HttpServerErrorException
 import org.springframework.web.client.ResourceAccessException
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientResponseException
+import tools.jackson.core.JacksonException
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.net.SocketTimeoutException
@@ -102,13 +104,6 @@ class ResilientRestClientIntegrationTest {
          * its outcome, and hence the terminal marker whenever the client logger is capturing at DEBUG.
          */
         private const val COMPLETED_PREFIX = "Completed request"
-
-        /**
-         * The TimeLimiter budget of every client a test does not give a budget of its own: far beyond any
-         * loopback exchange, so only a test ABOUT timeouts ever sees one (Resilience4j's 1 s default would make
-         * every real-HTTP test here depend on the build machine's load).
-         */
-        private val GENEROUS_BUDGET: TimeLimiterConfig = TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build()
 
         /** The factory's drain line: marker within the message, and the prefix it starts with. */
         private const val DRAIN_MARKER = "did not drain"
@@ -161,6 +156,9 @@ class ResilientRestClientIntegrationTest {
 
     /** Runs the calls a test needs to interrupt from a thread other than the test's. */
     private val callers: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
+
+    /** The client's own logger, whose lines the log-line tests capture. */
+    private val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
 
     @BeforeEach
     fun resetStubs() {
@@ -216,15 +214,7 @@ class ResilientRestClientIntegrationTest {
             //
             // Given: an endpoint whose triplet names a foreign host, served by the local WireMock
             wireMock.stubFor(get(urlEqualTo("/hosted")).willReturn(okJson("""{"message":"hi"}""")))
-            val meshProperties =
-                MeshProperties(
-                    defaults =
-                        MeshProperties.Defaults(
-                            individualRequestTimeoutMs = 1000,
-                            transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl()),
-                        ),
-                    endpoints = listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/api.example.com/GET/hosted", alias = "hosted")),
-                )
+            val meshProperties = meshOf(wireMock.baseUrl(), "api.example.com", "hosted")
             val client = newFactory("hosted", meshProperties = meshProperties).create("hosted")
 
             // When
@@ -656,12 +646,7 @@ class ResilientRestClientIntegrationTest {
             // the line then reads `Content-Length=unknown` - the documented lower-bound caveat, not a defect.
             val body = """{"message":"${"X".repeat(4000)}"}"""
             wireMock.stubFor(get(urlEqualTo("/big")).willReturn(okJson(body)))
-            val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
-            val appender = linesNaming("backend 'limit-line'")
-            val previousLevel = clientLogger.level
-            clientLogger.level = Level.DEBUG
-            clientLogger.addAppender(appender)
-            try {
+            capturingLinesNaming(clientLogger, "backend 'limit-line'", Level.DEBUG) { appender ->
                 val client =
                     newFactory(
                         "limit-line",
@@ -679,9 +664,6 @@ class ResilientRestClientIntegrationTest {
                     .contains("limit=200 bytes")
                     .contains("Content-Length=${body.toByteArray().size}")
                     .contains("app.restclient.max-in-memory-size")
-            } finally {
-                clientLogger.detachAppender(appender)
-                clientLogger.level = previousLevel
             }
         }
 
@@ -857,18 +839,13 @@ class ResilientRestClientIntegrationTest {
             // Why it matters: it pins a TRADE, not a removal. A cancellation is the caller going away
             //   (its budget expired, its scope cancelled) - normal, correlated with load, and therefore arriving in
             //   floods on WARN, the level operators alert on, exactly when the lines that matter are needed. The
-            //   cancelled worker's exchange still ends in legatium's event, as a `failure` - the other half of the
+            //   cancelled worker's exchange still ends in legatium's event, as a WARN `cancelled` - the other half of the
             //   trade, pinned in LegatiumExchangeLoggingIntegrationTest.
             //
             // Given: a backend that does not answer within the test's window, and the client logger capturing
             wireMock.stubFor(get(urlEqualTo("/never")).willReturn(okJson("{}").withFixedDelay(30_000)))
             val inFlight = arrivals.arrivalOf("/never")
-            val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
-            val clientEvents = linesNaming("backend 'cancelled'")
-            val previousClientLevel = clientLogger.level
-            clientLogger.level = Level.DEBUG
-            clientLogger.addAppender(clientEvents)
-            try {
+            capturingLinesNaming(clientLogger, "backend 'cancelled'", Level.DEBUG) { clientEvents ->
                 val client = newClient("cancelled", timeLimiter = TimeLimiterConfig.custom().timeoutDuration(Duration.ofMinutes(5)).build())
                 val callerThread = AtomicReference<Thread>()
                 val started = CountDownLatch(1)
@@ -891,9 +868,6 @@ class ResilientRestClientIntegrationTest {
                     .`as`("a cancellation is the caller's business, not an operational fault")
                     .isEqualTo(Level.DEBUG)
                 assertThat(cancelLine.formattedMessage).containsPattern("duration so far: \\d+ms")
-            } finally {
-                clientLogger.detachAppender(clientEvents)
-                clientLogger.level = previousClientLevel
             }
         }
 
@@ -987,12 +961,9 @@ class ResilientRestClientIntegrationTest {
             //
             // Given: a failing backend and the client logger capturing
             wireMock.stubFor(get(urlEqualTo("/boom")).willReturn(aResponse().withStatus(500)))
-            val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
             // The client logger keeps its configured level here, so the DEBUG closing line is never emitted and
             // cannot serve as the terminal marker - the WARN failure line itself is the last one.
-            val appender = linesNaming("backend 'own-clock-duration'")
-            clientLogger.addAppender(appender)
-            try {
+            capturingLinesNaming(clientLogger, "backend 'own-clock-duration'") { appender ->
                 val client = newClient("own-clock-duration")
 
                 // When: the call fails
@@ -1001,8 +972,6 @@ class ResilientRestClientIntegrationTest {
                 // Then: the failure line carries a measured duration, not a null
                 val message = appender.awaitThrough(ERROR_PREFIX).single { it.formattedMessage.startsWith(ERROR_PREFIX) }.formattedMessage
                 assertThat(message).containsPattern("duration so far: \\d+ms")
-            } finally {
-                clientLogger.detachAppender(appender)
             }
         }
     }
@@ -1052,12 +1021,7 @@ class ResilientRestClientIntegrationTest {
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/reported")).willReturn(okJson("""{"message":"far too long for the schema"}""")))
-            val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
-            val appender = linesNaming("backend 'reported'")
-            val previousLevel = clientLogger.level
-            clientLogger.level = Level.DEBUG
-            clientLogger.addAppender(appender)
-            try {
+            capturingLinesNaming(clientLogger, "backend 'reported'", Level.DEBUG) { appender ->
                 val client =
                     newFactory(
                         "reported",
@@ -1075,9 +1039,6 @@ class ResilientRestClientIntegrationTest {
                     .contains("violates its own schema")
                     .contains("reported only, not enforced")
                     .contains("app.restclient.validation.fail-on-violation=false")
-            } finally {
-                clientLogger.detachAppender(appender)
-                clientLogger.level = previousLevel
             }
         }
     }
@@ -1087,7 +1048,7 @@ class ResilientRestClientIntegrationTest {
         @Test
         fun `should report a pool that does not drain within the deadline and close it anyway`() {
             // What is tested: the deadline branch of shutdown() - a connection still leased when the drain window
-            //   has passed is reported as a WARN naming the pool, and the pool is closed regardless.
+            //   has passed is reported as a WARN naming the engine, and the pool is closed regardless.
             // Success criteria: with a worker parked in a slow exchange (the connection stays leased) and a
             //   clock that is past the deadline on its next read, shutdown() returns, writes exactly one WARN
             //   "did not drain within", and does not throw.
@@ -1190,7 +1151,7 @@ class ResilientRestClientIntegrationTest {
             //   pool is closed.
             // Why it matters: shutdown() runs as a @PreDestroy, where Spring can only catch what it
             //   throws and log it as a destroy method that failed. The drain deadline is an outcome, reported as a
-            //   WARN naming the pool; that branch is covered by the two cases above, on an injected clock.
+            //   WARN naming the engine; that branch is covered by the two cases above, on an injected clock.
             //
             // Given: one completed exchange, which leaves its connection in the pool (keep-alive is on)
             wireMock.stubFor(get(urlEqualTo("/bye")).willReturn(okJson("""{"message":"bye"}""")))
@@ -1356,7 +1317,7 @@ class ResilientRestClientIntegrationTest {
             val outcome = client.getAsync(Greeting::class.java) { it.uri("/garbage") }.handle { _, t -> t }.get(5, TimeUnit.SECONDS)
 
             // Then
-            assertThat(outcome).isInstanceOf(tools.jackson.core.JacksonException::class.java)
+            assertThat(outcome).isInstanceOf(JacksonException::class.java)
             assertThat(circuitBreakers.circuitBreaker("async-garbage").metrics.numberOfFailedCalls).isZero()
             assertThat(circuitBreakers.circuitBreaker("async-garbage").metrics.numberOfSuccessfulCalls).isEqualTo(1)
         }
@@ -1382,12 +1343,7 @@ class ResilientRestClientIntegrationTest {
             val inFlight = arrivals.arrivalOf("/never-async")
             val bulkheads = BulkheadRegistry.ofDefaults()
             val meters = SimpleMeterRegistry()
-            val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
-            val clientEvents = linesNaming("backend 'cancelled-async'")
-            val previousClientLevel = clientLogger.level
-            clientLogger.level = Level.DEBUG
-            clientLogger.addAppender(clientEvents)
-            try {
+            capturingLinesNaming(clientLogger, "backend 'cancelled-async'", Level.DEBUG) { clientEvents ->
                 val client =
                     newFactory(
                         "cancelled-async",
@@ -1421,9 +1377,6 @@ class ResilientRestClientIntegrationTest {
                 val cancelLine = events.single { it.formattedMessage.startsWith("Cancelled request") }
                 assertThat(cancelLine.level).isEqualTo(Level.DEBUG)
                 assertThat(events.last().formattedMessage).endsWith("outcome=cancelled")
-            } finally {
-                clientLogger.detachAppender(clientEvents)
-                clientLogger.level = previousClientLevel
             }
         }
 
@@ -1443,12 +1396,7 @@ class ResilientRestClientIntegrationTest {
             // Given: a builder whose interceptor throws a CancellationException inside the exchange
             val thrown = CancellationException("cancelled inside the exchange")
             val cancelling = RestClient.builder().requestInterceptor { _, _, _ -> throw thrown }
-            val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
-            val clientEvents = linesNaming("backend 'self-cancelled'")
-            val previousClientLevel = clientLogger.level
-            clientLogger.level = Level.DEBUG
-            clientLogger.addAppender(clientEvents)
-            try {
+            capturingLinesNaming(clientLogger, "backend 'self-cancelled'", Level.DEBUG) { clientEvents ->
                 val client = newFactory("self-cancelled", restClientBuilder = cancelling).create("self-cancelled")
 
                 // When
@@ -1459,9 +1407,6 @@ class ResilientRestClientIntegrationTest {
                 assertThat(outcome).isInstanceOf(CancellationException::class.java).hasMessage(thrown.message)
                 assertThat(future.isDone).isTrue()
                 assertThat(clientEvents.awaitThrough().last().formattedMessage).endsWith("outcome=error")
-            } finally {
-                clientLogger.detachAppender(clientEvents)
-                clientLogger.level = previousClientLevel
             }
         }
     }
@@ -1477,8 +1422,8 @@ class ResilientRestClientIntegrationTest {
             // Why it matters: passed on, the empty string reaches Jackson, which fails with a parse error naming
             //   neither the backend nor the cause, while the reactive twin would complete its Mono empty without any
             //   error. One named exception on both stacks gives a caller one thing to catch; raised outside the
-            //   decoration, it
-            //   cannot open the circuit against a backend that answered promptly with a success status.
+            //   decoration, it cannot open the circuit against a backend that answered promptly with a success
+            //   status.
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/no-content")).willReturn(aResponse().withStatus(204)))
@@ -1674,6 +1619,7 @@ class ResilientRestClientIntegrationTest {
             // Then
             assertThat(result.message).isEqualTo("Grüße aus Köln")
             val summary = registry.find(RestClientMetrics.RESPONSE_BODY_SIZE).tag(ResponseBodyMetrics.ADAPTER_TAG, "latin1").summary()
+            assertThat(summary).isNotNull()
             assertThat(summary!!.max()).isEqualTo(text.toByteArray(Charsets.UTF_8).size.toDouble())
             assertThat(summary.max()).isGreaterThan(text.toByteArray(Charsets.ISO_8859_1).size.toDouble())
         }
@@ -1695,15 +1641,7 @@ class ResilientRestClientIntegrationTest {
     private fun meshFor(
         backendName: String,
         individualRequestTimeoutMs: Long = 1000,
-    ): MeshProperties =
-        MeshProperties(
-            defaults =
-                MeshProperties.Defaults(
-                    individualRequestTimeoutMs = individualRequestTimeoutMs,
-                    transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl()),
-                ),
-            endpoints = listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/$backendName", alias = backendName)),
-        )
+    ): MeshProperties = meshOf(wireMock.baseUrl(), "localhost", backendName, individualRequestTimeoutMs = individualRequestTimeoutMs)
 
     /**
      * A factory over registries built for this one test. The TimeLimiter defaults to [GENEROUS_BUDGET]: a test
@@ -1771,14 +1709,7 @@ class ResilientRestClientIntegrationTest {
 
     /** Attaches a capture of the factory's drain line for the duration of [block]. */
     private fun capturingDrainLine(block: (CapturingAppender) -> Unit) {
-        val factoryLogger = LoggerFactory.getLogger(ResilientRestClientFactory::class.java) as Logger
-        val appender = linesNaming(DRAIN_MARKER)
-        factoryLogger.addAppender(appender)
-        try {
-            block(appender)
-        } finally {
-            factoryLogger.detachAppender(appender)
-        }
+        capturingLinesNaming(LoggerFactory.getLogger(ResilientRestClientFactory::class.java) as Logger, DRAIN_MARKER, block = block)
     }
 
     /**
@@ -1787,7 +1718,7 @@ class ResilientRestClientIntegrationTest {
      *
      * The logger is raised to DEBUG for the duration on purpose: the benign-4xx line is emitted at exactly that
      * level, so at the default level the event would never be created and every assertion on it would pass
-     * vacuously. Restored in the `finally`, since the level is global to the logger.
+     * vacuously. Restored afterwards, since the level is global to the logger.
      */
     private fun errorLineFor(
         status: Int,
@@ -1795,18 +1726,10 @@ class ResilientRestClientIntegrationTest {
     ): ILoggingEvent {
         val path = "/status-$status"
         wireMock.stubFor(get(urlEqualTo(path)).willReturn(aResponse().withStatus(status)))
-        val clientLogger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
-        val appender = linesNaming("backend '$backendName'")
-        val previousLevel = clientLogger.level
-        clientLogger.level = Level.DEBUG
-        clientLogger.addAppender(appender)
-        try {
+        return capturingLinesNaming(clientLogger, "backend '$backendName'", Level.DEBUG) { appender ->
             val client = newClient(backendName)
             runCatching { client.get(Greeting::class.java) { it.uri(path) } }
-            return appender.awaitThrough().single { it.formattedMessage.startsWith(ERROR_PREFIX) }
-        } finally {
-            clientLogger.detachAppender(appender)
-            clientLogger.level = previousLevel
+            appender.awaitThrough().single { it.formattedMessage.startsWith(ERROR_PREFIX) }
         }
     }
 
@@ -1864,7 +1787,8 @@ class ResilientRestClientIntegrationTest {
     }
 
     /**
-     * A capture of the log lines naming [marker], readable from a thread OTHER than the one that logged them,
+     * Runs [block] with a capture of [logger]'s lines naming [marker] attached, the logger opened to [level] when
+     * one is given - see [capturing]. The capture is readable from a thread OTHER than the one that logged them,
      * which some assertions in this class need: the client's own lines are written on the calling thread, but a
      * call driven from a helper thread (the interruption case) logs there.
      *
@@ -1872,7 +1796,12 @@ class ResilientRestClientIntegrationTest {
      * from an earlier test (an abandoned worker, a late timeout) would otherwise be captured as well. Every
      * message of interest names its backend (`... backend '<name>' ...`), and backend names are unique per test.
      */
-    private fun linesNaming(marker: String): CapturingAppender = CapturingAppender { it.formattedMessage.contains(marker) }.apply { start() }
+    private fun <T> capturingLinesNaming(
+        logger: Logger,
+        marker: String,
+        level: Level? = null,
+        block: (CapturingAppender) -> T,
+    ): T = capturing(logger, level, accept = { it.formattedMessage.contains(marker) }, block = block)
 
     /**
      * Everything captured, once the line starting with [terminalPrefix] - the last one the call can produce - has

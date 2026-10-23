@@ -26,6 +26,7 @@ import eu.inqudium.veredium.testsupport.Greeting
 import eu.inqudium.veredium.testsupport.LookupRequest
 import eu.inqudium.veredium.testsupport.Unserialisable
 import eu.inqudium.veredium.testsupport.WireMockArrivals
+import eu.inqudium.veredium.testsupport.capturing
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException
@@ -126,7 +127,7 @@ class ResilientWebClientIntegrationTest {
         @JvmStatic
         @BeforeAll
         fun startWireMock() {
-            // Dynamic port keeps this test independent of the :8080 performance harness and of any other
+            // Dynamic port keeps this test independent of any fixed-port service on the machine and of any other
             // WireMock instance, so it can run in the default build alongside everything else.
             wireMock =
                 WireMockServer(wireMockConfig().dynamicPort())
@@ -587,9 +588,7 @@ class ResilientWebClientIntegrationTest {
             wireMock.stubFor(get(urlEqualTo("/no-content")).willReturn(aResponse().withStatus(204)))
             val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
             val client = newClient("no-content", circuitBreakers = circuitBreakers)
-            val lines = linesOf("backend 'no-content'")
-            clientLogger.addAppender(lines)
-            try {
+            capturing(clientLogger, accept = naming("backend 'no-content'")) { lines ->
                 // When
                 val failure = catchThrowable { runBlocking { client.get(Greeting::class.java) { it.uri("/no-content") }.awaitSingle() } }
 
@@ -606,8 +605,6 @@ class ResilientWebClientIntegrationTest {
                 val line = lines.awaitCall().single { it.formattedMessage.startsWith(ERROR_PREFIX) }
                 assertThat(line.level).isEqualTo(Level.WARN)
                 assertThat(line.throwableProxy?.className).isEqualTo(EmptyResponseBodyException::class.java.name)
-            } finally {
-                clientLogger.detachAppender(lines)
             }
         }
 
@@ -873,14 +870,9 @@ class ResilientWebClientIntegrationTest {
             //
             // Given: a backend that does not answer within the test's window, and the client logger capturing
             wireMock.stubFor(get(urlEqualTo("/never")).willReturn(okJson("{}").withFixedDelay(30_000)))
-            val clientLogger = LoggerFactory.getLogger(ResilientWebClient::class.java) as Logger
             // Captures an asynchronously written line: dispose() returns immediately, while doOnCancel runs on the
             // event loop afterwards - so the line is awaited, not read.
-            val clientEvents = linesOf("backend 'cancelled'")
-            val previousClientLevel = clientLogger.level
-            clientLogger.level = Level.DEBUG
-            clientLogger.addAppender(clientEvents)
-            try {
+            capturing(clientLogger, Level.DEBUG, accept = naming("backend 'cancelled'")) { clientEvents ->
                 val client = newClient("cancelled")
 
                 // When: the subscriber walks away before the answer arrives
@@ -891,9 +883,6 @@ class ResilientWebClientIntegrationTest {
                 assertThat(cancelLine.level)
                     .`as`("a cancellation is the caller's business, not an operational fault")
                     .isEqualTo(Level.DEBUG)
-            } finally {
-                clientLogger.detachAppender(clientEvents)
-                clientLogger.level = previousClientLevel
             }
         }
 
@@ -965,8 +954,8 @@ class ResilientWebClientIntegrationTest {
             //   them - so one dashboard field groups both loggers.
             // Success criteria: the error line for a 500 carries both key-values with the backend alias and
             //   the endpoint's template; and `adapter_target_name`, a name of the module's own, is absent.
-            // Why it matters: these names leave the process and are a contract with the log index (the origin
-            //   project's Kibana runbook groups by them). The module writes only these two, taken from the
+            // Why it matters: these names leave the process and are a contract with the log index (an operator's
+            //   queries group by them). The module writes only these two, taken from the
             //   library's ClientLogField, so this line is the whole pin.
             //
             // Given / When: the backend answers 500
@@ -992,12 +981,9 @@ class ResilientWebClientIntegrationTest {
             //
             // Given: a failing backend and the client logger capturing
             wireMock.stubFor(get(urlEqualTo("/boom")).willReturn(aResponse().withStatus(500)))
-            val clientLogger = LoggerFactory.getLogger(ResilientWebClient::class.java) as Logger
             // The WARN failure line itself is the terminal marker here: it is the line under test, and the
             // client logs it at any level it may run at.
-            val appender = linesOf("backend 'own-clock-duration'")
-            clientLogger.addAppender(appender)
-            try {
+            capturing(clientLogger, accept = naming("backend 'own-clock-duration'")) { appender ->
                 val client = newClient("own-clock-duration")
 
                 // When: the call fails
@@ -1006,8 +992,6 @@ class ResilientWebClientIntegrationTest {
                 // Then: the failure line carries a measured duration, not a null
                 val message = appender.awaitCall(ERROR_PREFIX).single { it.formattedMessage.startsWith(ERROR_PREFIX) }.formattedMessage
                 assertThat(message).containsPattern("duration so far: \\d+ms")
-            } finally {
-                clientLogger.detachAppender(appender)
             }
         }
     }
@@ -1031,24 +1015,22 @@ class ResilientWebClientIntegrationTest {
             // Given: a failing backend, the client logger capturing, and the caller's key in its MDC
             wireMock.stubFor(get(urlEqualTo("/mdc-error")).willReturn(aResponse().withStatus(500)))
             val client = newClient("mdc-error")
-            val lines = linesOf("backend 'mdc-error'")
-            clientLogger.addAppender(lines)
             val afterHook = AtomicReference<Pair<Thread, Map<String, String>?>>()
-            MDC.put(CORRELATION_KEY, CORRELATION_VALUE)
-            try {
-                // When: the caller subscribes on this thread
-                runCatching {
-                    client
-                        .get(Greeting::class.java) { it.uri("/mdc-error") }
-                        .doOnError { afterHook.set(Thread.currentThread() to MDC.getCopyOfContextMap()) }
-                        .block()
+            capturing(clientLogger, accept = naming("backend 'mdc-error'")) { lines ->
+                MDC.put(CORRELATION_KEY, CORRELATION_VALUE)
+                try {
+                    // When: the caller subscribes on this thread
+                    runCatching {
+                        client
+                            .get(Greeting::class.java) { it.uri("/mdc-error") }
+                            .doOnError { afterHook.set(Thread.currentThread() to MDC.getCopyOfContextMap()) }
+                            .block()
+                    }
+                } finally {
+                    MDC.remove(CORRELATION_KEY)
                 }
-            } finally {
-                MDC.remove(CORRELATION_KEY)
-            }
 
-            // Then: the line was written elsewhere, under the caller's key ...
-            try {
+                // Then: the line was written elsewhere, under the caller's key ...
                 val line = lines.awaitCall().single { it.formattedMessage.startsWith(ERROR_PREFIX) }
                 assertThat(line.threadName).isNotEqualTo(Thread.currentThread().name)
                 assertThat(line.mdcPropertyMap).containsEntry(CORRELATION_KEY, CORRELATION_VALUE)
@@ -1056,8 +1038,6 @@ class ResilientWebClientIntegrationTest {
                 val (eventLoop, mdcAfter) = afterHook.get()
                 assertThat(eventLoop.name).`as`("the premise: the probe ran on the thread that wrote the line").isEqualTo(line.threadName)
                 assertThat(mdcAfter.orEmpty()).doesNotContainKey(CORRELATION_KEY)
-            } finally {
-                clientLogger.detachAppender(lines)
             }
         }
 
@@ -1076,9 +1056,7 @@ class ResilientWebClientIntegrationTest {
             // Given: a backend far slower than a 200 ms budget, and the client logger capturing
             wireMock.stubFor(get(urlEqualTo("/mdc-slow")).willReturn(okJson("{}").withFixedDelay(2_000)))
             val client = newClient("mdc-slow", timeLimiter = TimeLimiterConfig.custom().timeoutDuration(Duration.ofMillis(200)).build())
-            val lines = linesOf("backend 'mdc-slow'")
-            clientLogger.addAppender(lines)
-            try {
+            capturing(clientLogger, accept = naming("backend 'mdc-slow'")) { lines ->
                 // When: a coroutine caller with its key in MDCContext
                 runCatching {
                     runBlocking(MDCContext(mapOf(CORRELATION_KEY to CORRELATION_VALUE))) {
@@ -1091,8 +1069,6 @@ class ResilientWebClientIntegrationTest {
                 assertThat(line.throwableProxy?.className).isEqualTo(TimeoutException::class.java.name)
                 assertThat(line.threadName).isNotEqualTo(Thread.currentThread().name)
                 assertThat(line.mdcPropertyMap).containsEntry(CORRELATION_KEY, CORRELATION_VALUE)
-            } finally {
-                clientLogger.detachAppender(lines)
             }
         }
     }
@@ -1109,8 +1085,9 @@ class ResilientWebClientIntegrationTest {
             //   throws and log it as a destroy method that failed. A drain deadline reported as an
             //   IllegalStateException out of block(Duration) would be indistinguishable from a real disposal error,
             //   and the last thing in the log before the process exits. The deadline is therefore an outcome,
-            //   reported as a WARN naming the pool - that branch is the next-but-one test's, an in-flight call the
-            //   next one's.
+            //   reported as a WARN naming the engine - that branch is pinned by "should WARN and complete when the
+            //   pool does not drain within the derived timeout", an in-flight call by "should let an in-flight call
+            //   finish before the pool is disposed, without the drain WARN".
             //
             // Given: one completed exchange, which leaves its connection in the pool (keep-alive is on)
             wireMock.stubFor(get(urlEqualTo("/bye")).willReturn(okJson("""{"message":"bye"}""")))
@@ -1147,9 +1124,7 @@ class ResilientWebClientIntegrationTest {
             val arrived = arrivals.arrivalOf("/in-flight")
             val factory = newFactory("in-flight")
             val client = factory.create("in-flight")
-            val factoryLines = linesOf("Connection pool")
-            factoryLogger.addAppender(factoryLines)
-            try {
+            capturing(factoryLogger, accept = naming("did not drain")) { factoryLines ->
                 val call = client.get(Greeting::class.java) { it.uri("/in-flight") }.toFuture()
                 assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the request must reach the backend first").isTrue()
 
@@ -1160,8 +1135,6 @@ class ResilientWebClientIntegrationTest {
                 assertThat(call.isDone).`as`("the disposal waits for the call in flight").isTrue()
                 assertThat(call.get(0, TimeUnit.SECONDS)?.message).isEqualTo("late")
                 assertThat(factoryLines.events).isEmpty()
-            } finally {
-                factoryLogger.detachAppender(factoryLines)
             }
         }
 
@@ -1171,7 +1144,7 @@ class ResilientWebClientIntegrationTest {
             //   disposal and the timer as arguments: a disposal that never completes, on a virtual clock.
             // Success criteria: the timeout is the derived one (the endpoint's response timeout + connect +
             //   pending-acquire + 1 s); one millisecond before it nothing has happened; at it, the wait COMPLETES
-            //   normally - no exception - and the factory logs one WARN naming the pool and the timeout.
+            //   normally - no exception - and the factory logs one WARN naming the engine and the timeout.
             // Why it matters: the branch exists so that a pool that will not drain ends shutdown with a statement,
             //   not with an IllegalStateException Spring logs as a failed destroy method - and so that it ends at
             //   all. The real pool drains in milliseconds, so without the seam the branch could only be reached by
@@ -1183,28 +1156,27 @@ class ResilientWebClientIntegrationTest {
             val timeout = factory.poolDisposeTimeout
             assertThat(timeout).isEqualTo(responseTimeout.plusMillis(100 + 200).plusSeconds(1))
             val clock = VirtualTimeScheduler.create()
-            val factoryLines = linesOf("Connection pool")
-            factoryLogger.addAppender(factoryLines)
             try {
-                // When: the wait starts and the clock runs to just before the timeout
-                val drained = factory.drain(Mono.never(), clock).toFuture()
-                clock.advanceTimeBy(timeout.minusMillis(1))
+                capturing(factoryLogger, accept = naming("did not drain")) { factoryLines ->
+                    // When: the wait starts and the clock runs to just before the timeout
+                    val drained = factory.drain(Mono.never(), clock).toFuture()
+                    clock.advanceTimeBy(timeout.minusMillis(1))
 
-                // Then: still waiting, nothing said
-                assertThat(drained.isDone).isFalse()
-                assertThat(factoryLines.events).isEmpty()
+                    // Then: still waiting, nothing said
+                    assertThat(drained.isDone).isFalse()
+                    assertThat(factoryLines.events).isEmpty()
 
-                // When: the timeout is reached
-                clock.advanceTimeBy(Duration.ofMillis(1))
+                    // When: the timeout is reached
+                    clock.advanceTimeBy(Duration.ofMillis(1))
 
-                // Then: completed normally, with the WARN
-                assertThat(drained.isDone).isTrue()
-                assertThat(drained.isCompletedExceptionally).isFalse()
-                val warn = factoryLines.events.single()
-                assertThat(warn.level).isEqualTo(Level.WARN)
-                assertThat(warn.formattedMessage).contains("'webclient-reactor-netty'", "did not drain within $timeout")
+                    // Then: completed normally, with the WARN
+                    assertThat(drained.isDone).isTrue()
+                    assertThat(drained.isCompletedExceptionally).isFalse()
+                    val warn = factoryLines.events.single()
+                    assertThat(warn.level).isEqualTo(Level.WARN)
+                    assertThat(warn.formattedMessage).contains("HTTP engine 'reactor-netty'", "did not drain within $timeout")
+                }
             } finally {
-                factoryLogger.detachAppender(factoryLines)
                 clock.dispose()
             }
         }
@@ -1385,7 +1357,7 @@ class ResilientWebClientIntegrationTest {
      *
      * The logger is raised to DEBUG for the duration on purpose: the benign-4xx line is emitted at exactly that
      * level, so at the default level the event would never be created and every assertion on it would pass
-     * vacuously. Restored in the `finally`, since the level is global to the logger.
+     * vacuously. Restored afterwards, since the level is global to the logger.
      *
      * Raising the level is also what makes the capture racy, hence [awaitCall]: at DEBUG the
      * closing `On signalType=...` line exists, and it is written AFTER `block()` has already returned.
@@ -1396,18 +1368,10 @@ class ResilientWebClientIntegrationTest {
     ): ILoggingEvent {
         val path = "/status-$status"
         wireMock.stubFor(get(urlEqualTo(path)).willReturn(aResponse().withStatus(status)))
-        val clientLogger = LoggerFactory.getLogger(ResilientWebClient::class.java) as Logger
-        val appender = linesOf("backend '$backendName'")
-        val previousLevel = clientLogger.level
-        clientLogger.level = Level.DEBUG
-        clientLogger.addAppender(appender)
-        try {
+        return capturing(clientLogger, Level.DEBUG, accept = naming("backend '$backendName'")) { appender ->
             val client = newClient(backendName)
             runCatching { client.get(Greeting::class.java) { it.uri(path) }.block() }
-            return appender.awaitCall().single { it.formattedMessage.startsWith(ERROR_PREFIX) }
-        } finally {
-            clientLogger.detachAppender(appender)
-            clientLogger.level = previousLevel
+            appender.awaitCall().single { it.formattedMessage.startsWith(ERROR_PREFIX) }
         }
     }
 
@@ -1450,12 +1414,12 @@ class ResilientWebClientIntegrationTest {
         ).create(backendName)
 
     /**
-     * A started [CapturingAppender] for the lines naming [marker]. The logger is a shared, process-wide one, so a
+     * The capture filter for the lines naming [marker]. The logger is a shared, process-wide one, so a
      * lingering call from an earlier test (a cancelled call, a late timeout) would otherwise be captured as well
      * and could satisfy the wait before this call's own lines arrive. Every message of interest names its backend
      * (`... backend '<name>' ...`), and backend names are unique per test.
      */
-    private fun linesOf(marker: String): CapturingAppender = CapturingAppender { it.formattedMessage.contains(marker) }.apply { start() }
+    private fun naming(marker: String): (ILoggingEvent) -> Boolean = { it.formattedMessage.contains(marker) }
 
     /**
      * Everything captured, once the line starting with [terminalPrefix] - the last one the call can produce - has

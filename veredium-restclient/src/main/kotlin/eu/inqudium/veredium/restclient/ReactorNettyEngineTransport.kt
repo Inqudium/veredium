@@ -81,6 +81,8 @@ internal class ReactorNettyEngineTransport(
     private val meshTransport = settings.transport
     private val pool = settings.pool
 
+    override val name: String = POOL_NAME
+
     /** The pools' statistics for the drain, and their gauges when the host has a registry. */
     private val pools = PoolMeters(settings.meterRegistry)
 
@@ -152,7 +154,7 @@ internal class ReactorNettyEngineTransport(
 
     override val isClosed: Boolean get() = provider.isDisposed && loops.isDisposed
 
-    override fun connectionsInUse(): Int = pools.acquired()
+    override fun exchangesInFlight(): Int = pools.acquired()
 
     /**
      * Waits until the deadline for the leased connections to come back (the same drain and line as the Apache
@@ -171,7 +173,7 @@ internal class ReactorNettyEngineTransport(
     ) {
         if (isClosed) return
         try {
-            drainOrReport(engine, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
+            drainOrReport(engine, ::exchangesInFlight, deadlineNanos, nanoTime, window, logger)
             if (Thread.currentThread().isInterrupted) {
                 provider.dispose()
                 loops.dispose()
@@ -353,7 +355,7 @@ internal class ReactorNettyEngineTransport(
     }
 
     companion object {
-        /** The pool's name: its `name` tag, the event-loop and offload threads' prefix, the shutdown line's pool. */
+        /** The engine's [name]: the pool's `name` tag, the event-loop and offload threads' prefix. */
         const val POOL_NAME: String = "restclient-reactor-netty"
 
         /**

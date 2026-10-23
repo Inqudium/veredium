@@ -11,6 +11,10 @@ import java.io.InputStream
  * configured limit ([ResilientRestClient]). [contentLength] is the `Content-Length` the response declared, or
  * `-1` when it declared none (chunked encoding) - a LOWER bound on the body, since the header is the wire size
  * and the body may have been compressed.
+ *
+ * @property backendName The backend whose response was refused - its mesh alias.
+ * @property limitBytes The buffer limit the body exceeded, in bytes.
+ * @property contentLength The declared `Content-Length`, or `-1` when the response declared none.
  */
 class ResponseBodyLimitExceededException(
     val backendName: String,

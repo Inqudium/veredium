@@ -24,6 +24,7 @@ import eu.inqudium.veredium.testsupport.Greeting
 import eu.inqudium.veredium.testsupport.LookupRequest
 import eu.inqudium.veredium.testsupport.Unserialisable
 import eu.inqudium.veredium.testsupport.WireMockArrivals
+import eu.inqudium.veredium.testsupport.capturing
 import eu.inqudium.veredium.testsupport.causeChain
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
@@ -71,26 +72,24 @@ import java.util.function.Supplier
  * `adapter-http-exchange` logger, written by legatium-restclient-logging's interceptor, which reaches the
  * factory's clients through Boot's `RestClient.Builder` bean and nothing else.
  *
- * 1. What is tested: the wiring end to end - a real context with Boot's RestClient auto-configuration, the
- *    library's auto-configuration and the values of the module's reference `application.yml`, a client of
- *    [ResilientRestClientFactory], a local WireMock - and the SEMANTICS the library gives the blocking stack: a
- *    4xx is `rejected` with its status, a 5xx a WARN `failure`, the transport timeout a WARN `timeout`, and a
- *    CANCELLED call - the caller interrupted, or the TimeLimiter expired - an ERROR `failure` written promptly by
- *    the worker whose socket the cancellation closed; bodies capped; the backend name as `adapter_name`; the Host
- *    header in plaintext next to the token's fingerprint; and whether a value the CALLER put in its MDC reaches
- *    an event written on the worker.
- * 2. Success criteria: per case, the captured event on `adapter-http-exchange` carries the expected level,
- *    outcome, status and fields.
- * 3. Why it matters: every runbook query and alert keys on this event's outcome vocabulary, and the blocking
- *    stack's vocabulary differs from the reactive twin's at exactly the point pinned here (no `cancelled`: a
- *    cancelled exchange is a `failure` with `Closed by interrupt` as its cause), so the difference is recorded as
- *    a test rather than rediscovered as a "bug" in production.
+ * The tests run the wiring end to end - a real context with Boot's RestClient auto-configuration, the library's
+ * auto-configuration and the values of the module's reference `application.yml`, a client of
+ * [ResilientRestClientFactory], a local WireMock - and pin the SEMANTICS the library gives the blocking stack: a
+ * 4xx is `rejected` with its status, a 5xx a WARN `failure`, the transport timeout a WARN `timeout`, and a
+ * CANCELLED call - the caller interrupted, or the TimeLimiter expired - a WARN `cancelled` on every engine,
+ * written promptly by the worker whose exchange the cancellation ended; bodies capped; the backend name as
+ * `adapter_name`; the Host header in plaintext next to the token's fingerprint; and whether a value the CALLER
+ * put in its MDC reaches an event written on the worker. Each case asserts the level, outcome, status and fields
+ * of the captured event. Every log query and alert keys on this event's outcome vocabulary, which is the reactive
+ * twin's, so the meaning is recorded as a test rather than rediscovered as a "bug" in production.
  *
  * Contexts run through an [ApplicationContextRunner] with the `adapter-logging` AND `app.restclient` blocks of
  * the reference `application.yml` ([ConfigurationFiles.REFERENCE], a test resource no consumer receives) as a
- * property source, so the configuration under test is the one the docs recommend - not a copy in this file. `RestClientProperties` is bound by its own [RestClientConfiguration] instead of being
- * handed in as a code-default instance, so a key like `app.restclient.observability.http-observation-enabled`
- * reaches [ResilientRestClientFactory] here by exactly the route it takes in the running application.
+ * property source, so the configuration under test is the one the docs recommend - not a copy in this file.
+ * [RestClientProperties] is bound from that property source by [BoundRestClientProperties], the binding half of
+ * [RestClientConfiguration], instead of being handed in as a code-default instance, so a key like
+ * `app.restclient.observability.http-observation-enabled` reaches [ResilientRestClientFactory] here by exactly
+ * the route it takes in the running application.
  *
  * `app.mesh.*` is deliberately left out of that property source: the endpoints are hand-built per case (WireMock's
  * dynamic port, a per-case TimeLimiter budget), and the reference triplets would point these tests at a real mesh.
@@ -123,7 +122,7 @@ class LegatiumExchangeLoggingIntegrationTest {
         private const val TOKEN_HEADER = "X-Access-Token"
         private const val TOKEN_VALUE = "a-bearer-secret-that-must-never-be-logged"
 
-        /** A caller-side MDC key/value, shaped like sync-bridge's outbound correlation id. */
+        /** A caller-side MDC key/value, shaped like an outbound correlation id a host sets. */
         private const val CORRELATION_KEY = "CORRELATION_ID"
         private const val CORRELATION_VALUE = "Out:7cc0270abf0da42c"
 
@@ -181,7 +180,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             //   decorator's worker thread.
             // Why it matters: the event reaches the factory's clients only through Boot's builder bean, and the
             //   backend name only through a request attribute; either missing makes every exchange anonymous on
-            //   the dashboards the runbook is built on.
+            //   the dashboards built on this event.
             //
             // Given: a host context and a 200 answer
             wireMock.stubFor(get(urlEqualTo("/things/42")).willReturn(okJson("""{"message":"hi"}""")))
@@ -191,7 +190,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                     context.client("things").get(Greeting::class.java) { it.uri("/things/42") }
 
                     // Then: one event, on the library's logger, INFO / success, naming the backend and the
-                    // template - the two fields the runbook groups by - written on the decorator's worker
+                    // template - the two fields a log query groups by - written on the decorator's worker
                     val event = appender.awaitEvents().last()
                     assertThat(event.loggerName).isEqualTo(EXCHANGE_LOGGER)
                     assertThat(event.level).isEqualTo(Level.INFO)
@@ -583,14 +582,14 @@ class LegatiumExchangeLoggingIntegrationTest {
             //   properties class in a host-shaped context.
             // Success criteria: enabled, the library's default logger name, every header included, bodies in
             //   `always` mode, the 16 KB cap.
-            // Why it matters: the runbook's queries assume these values; a key that does not bind (a typo, a
+            // Why it matters: the log queries assume these values; a key that does not bind (a typo, a
             //   renamed property after a library upgrade) silently falls back to the library default.
             //
             // Given / When: the context bound the reference file
             hostContext("config").run { context ->
                 val properties = context.getBean(ClientLoggingProperties::class.java)
 
-                // Then: the values the runbook relies on
+                // Then: the values the log queries rely on
                 assertThat(properties.enabled).isTrue()
                 assertThat(properties.loggerName).isEqualTo(EXCHANGE_LOGGER)
                 assertThat(properties.requestHeaders.includes).containsExactly("*")
@@ -654,11 +653,13 @@ class LegatiumExchangeLoggingIntegrationTest {
             //   reads them side by side at startup, and a context in which they contradicted each other would
             //   send that reading the wrong way.
             //
-            // Given: recorders on both loggers, in place before the context refreshes
+            // Given: recorders on both loggers, in place before the context refreshes - the lines are written
+            // during the refresh - and opened to DEBUG, the level of legatium's wiring verdict, which
+            // logback-test.xml's INFO root would drop
             val reportLogger = LoggerFactory.getLogger(RestClientObservationReport::class.java) as Logger
             val libraryLogger = LoggerFactory.getLogger(ClientLoggingAutoConfiguration::class.java) as Logger
-            recording(reportLogger) { reportLines ->
-                recording(libraryLogger) { libraryLines ->
+            capturing(reportLogger, Level.DEBUG) { reportLines ->
+                capturing(libraryLogger, Level.DEBUG) { libraryLines ->
                     // When
                     hostContext("observation-toggle").run { context ->
                         // The premise, asserted rather than assumed: a registry exists AND records.
@@ -758,7 +759,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             wireMock.stubFor(get(urlEqualTo("/things/11")).willReturn(okJson("""{"message":"hi"}""")))
             val libraryLogger = LoggerFactory.getLogger(ClientLoggingAutoConfiguration::class.java) as Logger
             lateinit var correlationHeader: String
-            recording(libraryLogger) { libraryLines ->
+            capturing(libraryLogger, Level.DEBUG) { libraryLines ->
                 // When
                 hostContext("traced", tracer = Tracer.NOOP).run { context ->
                     assertThat(context)
@@ -873,7 +874,7 @@ class LegatiumExchangeLoggingIntegrationTest {
         val bulkheads = BulkheadRegistry.ofDefaults()
         return ApplicationContextRunner()
             .withInitializer { context ->
-                val properties = referenceProperties(*REFERENCE_PREFIXES.toTypedArray()) + ("app.restclient.engine.default" to engine.key)
+                val properties = ConfigurationFiles.referenceProperties(*REFERENCE_PREFIXES.toTypedArray()) + ("app.restclient.engine.default" to engine.key)
                 context.environment.propertySources.addFirst(MapPropertySource(REFERENCE_PROPERTY_SOURCE, properties))
             }.withConfiguration(
                 AutoConfigurations.of(
@@ -931,45 +932,10 @@ class LegatiumExchangeLoggingIntegrationTest {
         backend: String,
         block: (CapturingAppender) -> Unit,
     ) {
-        val appender =
-            CapturingAppender { event -> event.keyValuePairs.orEmpty().any { it.key == "adapter_name" && it.value == backend } }
-                .apply { start() }
-        exchangeLogger.addAppender(appender)
-        try {
-            block(appender)
-        } finally {
-            exchangeLogger.detachAppender(appender)
-            appender.stop()
-        }
+        capturing(exchangeLogger, accept = { event -> event.keyValuePairs.orEmpty().any { it.key == "adapter_name" && it.value == backend } }, block = block)
     }
 
     private fun AssertableApplicationContext.client(backend: String): ResilientRestClient = getBean(ResilientRestClientFactory::class.java).create(backend)
-
-    /**
-     * Runs [block] with a recorder attached to [logger], and returns whatever it returns.
-     *
-     * For lines written while the context REFRESHES - the factory's configuration summary, the library's wiring
-     * verdict - the recorder has to be in place around `run(...)` rather than inside the context consumer, where
-     * they have already been written.
-     */
-    private fun <T> recording(
-        logger: Logger,
-        block: (CapturingAppender) -> T,
-    ): T {
-        val appender = CapturingAppender().apply { start() }
-        // The wiring verdicts are DEBUG lines (legatium's report; the factory's summary is INFO) and
-        // logback-test.xml roots at INFO, so the logger is opened to DEBUG for the recording and restored after.
-        val previousLevel = logger.level
-        logger.level = Level.DEBUG
-        logger.addAppender(appender)
-        try {
-            return block(appender)
-        } finally {
-            logger.detachAppender(appender)
-            appender.stop()
-            logger.level = previousLevel
-        }
-    }
 
     /** The one recorded line containing [needle], as its rendered message. */
     private fun CapturingAppender.lineContaining(needle: String): String = events.map { it.formattedMessage }.single { it.contains(needle) }

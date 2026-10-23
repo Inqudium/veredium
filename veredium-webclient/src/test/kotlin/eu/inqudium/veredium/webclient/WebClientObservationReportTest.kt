@@ -1,15 +1,14 @@
 package eu.inqudium.veredium.webclient
 
 import ch.qos.logback.classic.Logger
-import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.read.ListAppender
+import eu.inqudium.veredium.testsupport.capturing
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
 import org.springframework.mock.env.MockEnvironment
 
 /**
- * Pins what this module adds to the core's `HttpObservationReport` (whose four verdicts and the central
+ * Pins what this module adds to the core's [eu.inqudium.veredium.core.observation.HttpObservationReport] (whose four verdicts and the central
  * disable-filter are tested there): the stack name and the property key on the toggle line, written under
  * this class's logger name - which is what a logging configuration and an operator's search key on.
  */
@@ -22,13 +21,11 @@ class WebClientObservationReportTest {
         //   the module's property key and its value, and the report writes exactly its two lines.
         // Why it matters: an operator who finds no client span searches the startup log for that key; a line
         //   naming another stack's key, or written under the core's logger name, would not be found where the
-        //   logging configuration and the runbook look for it.
+        //   logging configuration and an operator's log query look for it.
         //
         // Given: the report's logger capturing
         val logger = LoggerFactory.getLogger(WebClientObservationReport::class.java) as Logger
-        val appender = ListAppender<ILoggingEvent>().apply { start() }
-        logger.addAppender(appender)
-        try {
+        capturing(logger) { appender ->
             // When
             WebClientObservationReport(
                 WebClientProperties(observability = WebClientProperties.Observability(httpObservationEnabled = true)),
@@ -36,11 +33,9 @@ class WebClientObservationReportTest {
             )
 
             // Then
-            val toggleLine = appender.list.map { it.formattedMessage }.single { it.contains("HTTP observation module toggle") }
+            val toggleLine = appender.events.map { it.formattedMessage }.single { it.contains("HTTP observation module toggle") }
             assertThat(toggleLine).startsWith("WebClient HTTP observation module toggle ${WebClientObservationReport.TOGGLE_PROPERTY}=true")
-            assertThat(appender.list).hasSize(2)
-        } finally {
-            logger.detachAppender(appender)
+            assertThat(appender.events).hasSize(2)
         }
     }
 }

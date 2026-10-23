@@ -90,8 +90,8 @@ class WebClientEngineIsolationTest {
         private val MODULE_ENGINE_THREAD =
             mapOf(
                 WebClientEngine.REACTOR_NETTY to "${ResilientWebClientFactory.POOL_NAME}-.*",
-                WebClientEngine.JETTY to "${JettyTransport.THREAD_NAME_PREFIX}-.*",
-                WebClientEngine.APACHE to "${ApacheTransport.THREAD_NAME_PREFIX}-.*",
+                WebClientEngine.JETTY to "${JettyEngineTransport.THREAD_NAME_PREFIX}-.*",
+                WebClientEngine.APACHE to "${ApacheEngineTransport.THREAD_NAME_PREFIX}-.*",
                 // The JDK client delivers on its default executor's threads (`HttpClient-<n>-Worker-<m>`) or hands a
                 // completion to the common fork-join pool, depending on timing - both seen; no other engine, Boot's
                 // included, delivers a response on either.

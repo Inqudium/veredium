@@ -19,6 +19,7 @@ import org.springframework.context.annotation.Configuration
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(MeshProperties::class)
 class MeshResilienceConfiguration {
+    /** The startup line of the derived ladder, over the bound [MeshProperties]. */
     @Bean
     fun meshLadderLogger(meshProperties: MeshProperties): MeshLadderLogger = MeshLadderLogger(meshProperties)
 }

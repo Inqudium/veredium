@@ -26,9 +26,10 @@ import java.util.function.Supplier
 
 /**
  * Boots Resilience4j's own Boot auto-configuration on the `resilience4j.*` and `app.mesh.*` blocks of the test
- * fixture, with the shared mesh wiring the way a client stack imports it (`TestStackConfiguration`: the verdicts
- * bean plus `MeshResilienceConfiguration` - the per-alias customizer beans, the startup guard, the ladder logger) - and
- * pins both directions of the guard.
+ * fixture, with the shared mesh wiring the way a client stack imports it ([TestStackConfiguration], which imports
+ * [eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration] - the `app.mesh` binding and the ladder logger -
+ * next to [TestMeshRegistrar], which registers the per-alias customizer beans and the startup guard with the
+ * stand-in verdicts handed in as an object, never as a bean) - and pins both directions of the guard.
  *
  * Every instance the fixture declares is built WITH the mesh customizer's effect (the derived budget on each
  * TimeLimiter, the two breaker verdicts on each CircuitBreaker), and a configuration which does not declare an
@@ -219,6 +220,10 @@ class MeshResilienceContextTest {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
     /**
      * The context the way a host assembles its resilience side: Resilience4j's three auto-configurations
      * reading the fixture's `resilience4j.*` keys, and a stack's configuration, which imports the mesh wiring -
@@ -279,8 +284,8 @@ class MeshResilienceContextTest {
     private fun rootCauseOf(failure: Throwable?): Throwable = generateSequence(failure) { it.cause.takeIf { cause -> cause !== it } }.last()
 
     private companion object {
-        private const val FIXTURE = "application-test.yml"
-        private val FIXTURE_PREFIXES = listOf("resilience4j.", "app.mesh.")
-        private const val FIXTURE_PROPERTY_SOURCE = "fixture-application-test-yml"
+        const val FIXTURE = "application-test.yml"
+        val FIXTURE_PREFIXES = listOf("resilience4j.", "app.mesh.")
+        const val FIXTURE_PROPERTY_SOURCE = "fixture-application-test-yml"
     }
 }

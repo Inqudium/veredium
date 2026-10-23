@@ -35,20 +35,19 @@ import java.util.function.Supplier
  * Wiring test for [ResilientRestClientFactory]'s base builder: it must be Boot's auto-configured
  * `RestClient.Builder` bean, not a builder of its own.
  *
- * 1. What is tested: that whatever the host puts on Boot's builder - a `RestClientCustomizer` bean of its own,
- *    and the `ObservationRegistry` Boot's `ObservationRestClientCustomizer` places there - reaches the clients
- *    this factory produces; that the module toggle `http-observation-enabled=false` still switches the
- *    observation of THESE clients off although Boot wired the registry; and that a context without the
- *    builder bean fails to start rather than running silently on a bare builder.
- * 2. Success criteria: a marker header set by a test customizer arrives at a local WireMock backend; an
- *    `http.client.requests` meter appears in a `SimpleMeterRegistry` behind the context's `ObservationRegistry`
- *    when the toggle is on and does NOT appear when it is off; and the builder-less context's startup failure
- *    names `RestClient.Builder`.
- * 3. Why it matters: a factory built on `RestClient.builder()` would reimplement the one piece of Boot's wiring
- *    it needed and lose every other customizer - a host correlation header, a custom observation convention,
- *    Boot's message converters. And a Kotlin default on the parameter would let Spring treat the bean as
- *    optional, so a host that excluded `RestClientAutoConfiguration` would lose its CLIENT span without a log
- *    line. Both are invisible at runtime; only a context test pins them.
+ * The tests pin that whatever the host puts on Boot's builder - a `RestClientCustomizer` bean of its own, and the
+ * `ObservationRegistry` Boot's `ObservationRestClientCustomizer` places there - reaches the clients this factory
+ * produces (a marker header set by a test customizer arrives at a local WireMock backend, an
+ * `http.client.requests` meter appears behind the context's `ObservationRegistry`); that the module toggle
+ * `http-observation-enabled=false` still switches the observation of THESE clients off although Boot wired the
+ * registry (no such meter); and that a context without the builder bean fails to start, naming
+ * `RestClient.Builder`, rather than running silently on a bare builder.
+ *
+ * A factory built on `RestClient.builder()` would reimplement the one piece of Boot's wiring it needed and lose
+ * every other customizer - a host correlation header, a custom observation convention, Boot's message converters.
+ * And a Kotlin default on the parameter would let Spring treat the bean as optional, so a host that excluded
+ * `RestClientAutoConfiguration` would lose its CLIENT span without a log line. Both are invisible at runtime;
+ * only a context test pins them.
  *
  * The contexts are driven with an [ApplicationContextRunner] - a real Spring context, no mocks - and the
  * backend is a local WireMock on a dynamic port, as in `ResilientRestClientIntegrationTest`. No inner

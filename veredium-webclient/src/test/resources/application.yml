@@ -68,8 +68,12 @@ adapter-logging:
   # explicit note of the total size.
   max-body-bytes: 16384
 
-  # Keys the masking fingerprint. Empty (the default) keeps the unkeyed length:hash fingerprint;
-  masking-key: "CustomerProducts"
+  # Keys the masking fingerprint. Empty (the default) keeps the unkeyed length:hash fingerprint; any other value
+  # turns it into an HMAC-SHA256 under this key, so a log reader without the key cannot confirm a guessed value by
+  # hashing it. A SECRET in a real host: supply it like one (environment variable, vault-backed property), never
+  # as a literal in a checked-in file. The literal here is a placeholder that puts the tests binding this file on
+  # the keyed path.
+  masking-key: "example-masking-key"
 
 app:
   webclient:
@@ -104,7 +108,7 @@ app:
       # (opt-in, WebClientProperties.Observability); this reference configuration sets it on, so a host that copies it gets
       # observed calls and legatium's traced identity (trace id as request id) whenever the host has a tracer.
       # Effective only with a recording ObservationRegistry bean - the factory's startup line reports the
-      # difference between "on" and "on, but nothing is observed". The chart sets the same key per stage.
+      # difference between "on" and "on, but nothing is observed".
       http-observation-enabled: true
     # Whether a deserialised response is checked against its DTO's Bean Validation constraints. Default OFF,
     # because the constraints are generated from the published OpenAPI specs and those are stricter than
@@ -198,8 +202,8 @@ resilience4j:
   # derived budget on every endpoint whose time-limiter toggle is on (the default) WHILE that instance is built.
   # An alias an endpoint uses but this block does not declare still gets an instance (Resilience4j creates one
   # for the customizer) - on the registry default, not on mesh-backend, silently; MeshResilienceStartupGuard
-  # therefore fails the start and names the missing key. This file once declared a single instance here;
-  # MeshResilienceShippedConfigTest boots the auto-configuration against it.
+  # therefore fails the start and names the missing key. MeshResilienceShippedConfigTest boots the
+  # auto-configuration on this file and would fail on an undeclared alias.
   timelimiter:
     configs:
       mesh-backend:
@@ -241,19 +245,19 @@ resilience4j:
         # unbounded by the ladder (pinned in ReactiveResilienceDecoratorTest).
         max-wait-duration: 0
         #
-        # ROLE (ADR-006, D3): these bulkheads are a POOL PARTITION and a BACKSTOP - not a load-steering
-        # mechanism. They exist so one hot alias cannot starve the other three out of the shared 100-connection
-        # pool, and so exhaustion surfaces as an immediate, named BulkheadFullException rather than as
-        # pending-acquire queueing. Callers are expected to bound their own concurrency BEFORE reaching here:
-        # the backfill does so with backfill.admission.max-concurrent-rows, which is dimensioned against this
-        # very number (one admitted row occupies one slot in each of two aliases at the same instant).
+        # ROLE: these bulkheads are a POOL PARTITION and a BACKSTOP - not a load-steering mechanism. They exist
+        # so one hot alias cannot starve the other three out of the shared 100-connection pool, and so
+        # exhaustion surfaces as an immediate, named BulkheadFullException rather than as pending-acquire
+        # queueing. Callers are expected to bound their own concurrency BEFORE reaching here, dimensioned
+        # against this very number (one logical operation may occupy one slot in each of two aliases at the
+        # same instant).
         #
-        # A BulkheadFullException from the backfill path is therefore a SIGNAL, not the design working: it says
-        # that caller's own bound is mis-sized, or that a second caller (live relay, inbound listener - all
-        # three share these bulkheads in one JVM) is consuming more of the alias than assumed. Raising this
-        # value is the wrong first response; sum(max-concurrent-calls) <= max-connections is enforced for this
-        # file by ResilienceConfigContractTest (and WARNed about at startup by MeshResilienceStartupGuard), and
-        # raising it here without raising the pool just moves the queueing.
+        # A BulkheadFullException on a known path is therefore a SIGNAL, not the design working: it says that
+        # the caller's own bound is mis-sized, or that a second caller in the same JVM is consuming more of the
+        # alias than assumed. Raising this value is the wrong first response; sum(max-concurrent-calls) <=
+        # max-connections is enforced for this file by ResilienceConfigContractTest (and warned about at startup
+        # by MeshResilienceStartupGuard), and raising it here without raising the pool just moves the queueing.
+        # The decision this inherits is recorded in veredium-restclient/docs/decisions.md (D1).
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
         base-config: mesh-backend

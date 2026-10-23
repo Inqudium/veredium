@@ -2,6 +2,7 @@ package eu.inqudium.veredium.webclient
 
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
+import eu.inqudium.veredium.core.engine.EngineDrain
 import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshConnectionPools
 import eu.inqudium.veredium.core.mesh.MeshProperties
@@ -99,13 +100,13 @@ class ResilientWebClientFactory(
     /** Which backends validate, with which validator, and whether a violation fails the call - see [ResponseValidation]. */
     private val validation = ResponseValidation(properties.validation, validatorFactory)
 
-    /** Standalone HTTP observation toggle (see [WebClientProperties.Observability]) - no sync-bridge coupling. */
+    /** Standalone HTTP observation toggle (see [WebClientProperties.Observability]) - reads only this module's property. */
     private val observationEnabled: Boolean = properties.observability.httpObservationEnabled
 
     /**
      * The shared base builder: Boot's, so the host's WebClientCustomizers (observation, codecs, connector, own
-     * beans) are already on it and every cloned per-endpoint client inherits them. The module toggle no longer
-     * WIRES the observation registry - Boot does, through its ObservationWebClientCustomizer, so each outbound
+     * beans) are already on it and every cloned per-endpoint client inherits them. The module toggle does not
+     * WIRE the observation registry - Boot does, through its ObservationWebClientCustomizer, so each outbound
      * request opens an `http.client.requests` observation (a CLIENT span + `traceparent` injection with a host
      * tracing bridge) - it only REMOVES it when the operator switched this module's HTTP observation off. What
      * the toggle achieves in the host at hand is reported by [WebClientObservationReport], not here.
@@ -173,19 +174,19 @@ class ResilientWebClientFactory(
         EngineTransports(engineByBackend.values.toSet(), logger) { engine ->
             when (engine) {
                 WebClientEngine.REACTOR_NETTY -> {
-                    ReactorNettyTransport(properties, meshTransport, POOL_NAME, poolDisposeTimeout, ::awaitPoolDisposal)
+                    ReactorNettyEngineTransport(properties, meshTransport, POOL_NAME, poolDisposeTimeout, ::awaitPoolDisposal)
                 }
 
                 WebClientEngine.JDK -> {
-                    JdkTransport(meshTransport, logger)
+                    JdkEngineTransport(meshTransport, logger)
                 }
 
                 WebClientEngine.JETTY -> {
-                    JettyTransport(properties, meshTransport, logger)
+                    JettyEngineTransport(properties, meshTransport, logger)
                 }
 
                 WebClientEngine.APACHE -> {
-                    ApacheTransport(properties, meshTransport, logger)
+                    ApacheEngineTransport(properties, meshTransport, logger)
                 }
             }
         }
@@ -324,23 +325,10 @@ class ResilientWebClientFactory(
      * in-flight exchanges finished (or the deadline passed), Apache's I/O reactor shut down gracefully once its
      * exchanges in flight finished (or the deadline passed). An engine that never built a client has nothing
      * to release; afterwards, no client can be built any more ([create]).
-     *
-     * For Reactor Netty the disposal IS the drain: the pool is built with Reactor Netty's `disposeTimeout`
-     * ([poolDisposeTimeout]), so `disposeLater()` refuses new acquires, still serves the calls waiting for a
-     * connection, lets every in-flight call finish on its connection, and completes once all connections came back.
-     * The wait here is bounded by what is left of the shared deadline.
-     *
-     * Expiry is an OUTCOME, not a failure. `block(Duration)` would report it as an `IllegalStateException` -
-     * the same shape as a genuine disposal error, and one that Spring can only catch and log as a destroy
-     * method that threw. The last line before the process exits would then be a stack trace, at the moment
-     * someone is looking for one, saying nothing about what actually happened. `timeout` + `onErrorResume`
-     * turns it into the statement it is: the pool did not drain in time, and it is being dropped anyway.
-     *
-     * The bare `block()` afterwards cannot hang - the timeout guarantees a terminal signal.
      */
     @PreDestroy
     fun shutdown() {
-        transports.release(nanoTime() + poolDisposeTimeout.toNanos(), nanoTime)
+        transports.shutdown(nanoTime() + poolDisposeTimeout.toNanos(), nanoTime)
     }
 
     /**
@@ -358,6 +346,18 @@ class ResilientWebClientFactory(
      * [shutdown]'s bounded wait for [disposal], with the WARN for a disposal that outlives [timeout] - what is
      * left of the shutdown deadline when the Reactor Netty engine's turn comes.
      *
+     * For Reactor Netty the disposal IS the drain: the pool is built with Reactor Netty's `disposeTimeout`
+     * ([poolDisposeTimeout]), so `disposeLater()` refuses new acquires, still serves the calls waiting for a
+     * connection, lets every in-flight call finish on its connection, and completes once all connections came back.
+     *
+     * Expiry is an OUTCOME, not a failure. `block(Duration)` would report it as an `IllegalStateException` -
+     * the same shape as a genuine disposal error, and one that Spring can only catch and log as a destroy
+     * method that threw. The last line before the process exits would then be a stack trace, at the moment
+     * someone is looking for one, saying nothing about what actually happened. `timeout` + `onErrorResume`
+     * turns it into the statement it is: the engine did not drain in time, and it is being closed anyway - on
+     * the same WARN line as every other engine ([EngineDrain.reportUndrained]), named by its engine key. The bare
+     * `block()` in [awaitPoolDisposal] cannot hang - the timeout guarantees a terminal signal.
+     *
      * Separate from [shutdown] for the one reason that the timeout branch can only be tested with a disposal
      * that never ends and a clock that can be advanced: the real pool's disposal finishes in milliseconds, and
      * [poolDisposeTimeout] is longer than any response timeout by construction. [timer] is where the timeout is
@@ -372,11 +372,7 @@ class ResilientWebClientFactory(
         disposal
             .timeout(timeout, timer)
             .onErrorResume(TimeoutException::class.java) {
-                logger.warn(
-                    "Connection pool '{}' did not drain within {} - dropping it with connections still open",
-                    POOL_NAME,
-                    timeout,
-                )
+                EngineDrain.reportUndrained(logger, WebClientEngine.REACTOR_NETTY.key, "within $timeout", left = null)
                 Mono.empty()
             }
 
@@ -426,7 +422,7 @@ object WebClientMetrics {
      *
      * Each endpoint gets its own Reactor-Netty `HttpClient` (the transport builds one per endpoint),
      * and each such client only ever calls its own path - the adapters build the URI from
-     * `ResilientWebClient.pathTemplate`. A mapper holding the templates of ALL endpoints would give a request the
+     * [ResilientWebClient.pathTemplate]. A mapper holding the templates of ALL endpoints would give a request the
      * chance to match a FOREIGN template first and be counted under another endpoint's series.
      * Scoping the mapper to the one template the client can actually call removes that by construction, rather
      * than relying on the prefix ordering to resolve it correctly.

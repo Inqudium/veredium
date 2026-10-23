@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.examples.reactive
 
 import eu.inqudium.veredium.examples.CustomerOverview
+import eu.inqudium.veredium.examples.ExampleContext
 import eu.inqudium.veredium.examples.Sidecar
 import eu.inqudium.veredium.examples.Sidecar.ADA
 import eu.inqudium.veredium.examples.Sidecar.ADAS_ORDERS
@@ -8,25 +9,17 @@ import kotlinx.coroutines.runBlocking
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.test.context.DynamicPropertyRegistry
-import org.springframework.test.context.DynamicPropertySource
 import java.time.Duration
 
-/**
- * The reactive example as a host runs it: the whole Boot application, its adapter calling the stand-in sidecar.
- *
- * Both examples' contexts run in one test JVM, so neither joins Micrometer's global registry: the second one would
- * join it after the first had registered meters there, and Micrometer warns about that.
- */
-@SpringBootTest(classes = [ReactiveExampleApplication::class], properties = ["management.metrics.use-global-registry=false"])
-class ReactiveExampleTest {
-    @Autowired
-    private lateinit var adapter: ReactiveCustomerAdapter
-
+/** The reactive example as a host runs it: the whole Boot application, its adapter calling the stand-in sidecar. */
+@ExampleContext(ReactiveExampleApplication::class)
+class ReactiveExampleTest(
+    private val adapter: ReactiveCustomerAdapter,
+) {
     @BeforeEach
-    fun stubBackends() = Sidecar.reset()
+    fun stubBackends() {
+        Sidecar.reset()
+    }
 
     @Test
     fun `should read a customer through the sidecar, addressed by the host of its triplet`() {
@@ -85,11 +78,7 @@ class ReactiveExampleTest {
         assertThat(budget).isGreaterThan(response)
     }
 
-    companion object {
-        private val WAIT: Duration = Duration.ofSeconds(5)
-
-        @JvmStatic
-        @DynamicPropertySource
-        fun sidecar(registry: DynamicPropertyRegistry) = Sidecar.register(registry)
+    private companion object {
+        val WAIT: Duration = Duration.ofSeconds(5)
     }
 }

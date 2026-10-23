@@ -24,10 +24,12 @@ All of them are configured once in [`application.yml`](src/main/resources/applic
 | [`ReactiveCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveCustomerAdapter.kt) | `ResilientWebClient`: the same adapter on `Mono`s, a 404 turned into an empty `Mono`, `Mono.zip` for both calls, and a `suspend` function for coroutine code. |
 | [`DecoratorExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorExampleApplication.kt) | A host without a client module: it scans only its own package. |
 | [`DecoratorConfiguration`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorConfiguration.kt) | The wiring a host declares itself for `BlockingResilienceDecorator`: the bean over the auto-configured registries, the breaker customizer that ignores `SELF_INFLICTED_FAILURES` and the backend's own "unknown customer" answer, and a native Apache HttpClient 4 with its bounds, no retries and no redirects. |
-| [`LegacyCustomerDirectory`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/LegacyCustomerDirectory.kt) | `decorate` and `decorateAsync` by instance name around a HttpClient 4 exchange that sets its own Host header, a 404 that the breaker ignores, and the two `BaseAdapter` budgets from the decorator and the client. |
+| [`DecoratorCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorCustomerAdapter.kt) | `decorate` and `decorateAsync` by instance name around a HttpClient 4 exchange that sets its own Host header, a 404 that the breaker ignores, and the two `BaseAdapter` budgets from the decorator and the client. |
 
 The tests under [`src/test/kotlin`](src/test/kotlin/eu/inqudium/veredium/examples) start each application as a
-host starts it (`@SpringBootTest`). A WireMock server plays the sidecar. Its stubs answer only the Host header the
+host starts it (`@SpringBootTest`, through the one test annotation `ExampleContext`, which also injects the beans
+through the test's constructor). A WireMock server plays the sidecar (`Sidecar`), and every property that names the
+sidecar is pointed at it in one place. Its stubs answer only the Host header the
 triplet names, so a passing test also shows the routing. The decorator example's tests also show the layered
 bounds: against a silent backend HttpClient 4's socket timeout trips first; against a body that drips in, each read
 inside the socket timeout, the decorator's budget releases the caller and its interrupt ends the worker's read.
@@ -72,4 +74,5 @@ published artifact the same way as [`veredium-coverage`](../veredium-coverage/RE
   exactly one client package, and the decorator example none. `spring.main.web-application-type: none` keeps `spring-webflux`, which the reactive
   client brings, from starting a web server in any of them.
 - **Four Boot contexts share one test JVM.** The tests keep every context off Micrometer's global registry
-  (`management.metrics.use-global-registry=false`). A single host does not need that setting.
+  (`management.metrics.use-global-registry=false`, set once in `ExampleContext`). A single host does not need that
+  setting.

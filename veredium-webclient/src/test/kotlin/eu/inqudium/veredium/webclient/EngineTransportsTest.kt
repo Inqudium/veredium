@@ -12,8 +12,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * The lifecycle [EngineTransports] gives the engines of one factory - the part that does not depend on any
- * engine library, driven here with recording stand-ins: one deadline for all releases, a failing release that
- * does not stop the others, and no engine created after the release.
+ * engine library, driven here with recording stand-ins: one deadline for all engines, a failing shutdown that
+ * does not stop the others, and no engine created after the shutdown.
  */
 class EngineTransportsTest {
     private val endpoint: ResolvedTimeouts =
@@ -24,8 +24,8 @@ class EngineTransportsTest {
 
     @Test
     fun `should hand every engine the same deadline, so the release takes the bound once`() {
-        // What is tested: release() over two started engines.
-        // Success criteria: both engines receive the one deadline passed to release(), in the order created.
+        // What is tested: shutdown() over two started engines.
+        // Success criteria: both engines receive the one deadline passed to shutdown().
         // Why it matters: the engines are released one after another; a bound per engine would let a shutdown
         //   take that bound once per engine - the @PreDestroy of a factory on three engines three times as long.
         //
@@ -36,7 +36,7 @@ class EngineTransportsTest {
         transports.connectorFor(WebClientEngine.APACHE, endpoint)
 
         // When
-        transports.release(DEADLINE) { 0L }
+        transports.shutdown(DEADLINE) { 0L }
 
         // Then
         assertThat(released).containsExactlyInAnyOrder(WebClientEngine.JDK to DEADLINE, WebClientEngine.APACHE to DEADLINE)
@@ -44,9 +44,9 @@ class EngineTransportsTest {
 
     @Test
     fun `should release the other engines when one release fails`() {
-        // What is tested: a release that throws.
-        // Success criteria: release() does not throw, and the other engine is released all the same.
-        // Why it matters: release() runs from a destroy callback; one engine's failure must neither leak the
+        // What is tested: a shutdown that throws.
+        // Success criteria: shutdown() does not throw, and the other engine is released all the same.
+        // Why it matters: shutdown() runs from a destroy callback; one engine's failure must neither leak the
         //   others nor surface as a stack trace where the outcome line belongs.
         //
         // Given
@@ -59,7 +59,7 @@ class EngineTransportsTest {
         transports.connectorFor(WebClientEngine.JDK, endpoint)
 
         // When
-        transports.release(DEADLINE) { 0L }
+        transports.shutdown(DEADLINE) { 0L }
 
         // Then
         assertThat(released).contains(WebClientEngine.JDK to DEADLINE)
@@ -67,7 +67,7 @@ class EngineTransportsTest {
 
     @Test
     fun `should create no engine after the release`() {
-        // What is tested: connectorFor() for an engine in use that no client had created before release().
+        // What is tested: connectorFor() for an engine in use that no client had created before shutdown().
         // Success criteria: it fails with an IllegalStateException naming the shutdown, and the engine is not
         //   created.
         // Why it matters: an engine created after the release owns threads and sockets nothing would release.
@@ -79,7 +79,7 @@ class EngineTransportsTest {
                 created += engine
                 RecordingTransport(engine, CopyOnWriteArrayList())
             }
-        transports.release(DEADLINE) { 0L }
+        transports.shutdown(DEADLINE) { 0L }
 
         // When / Then
         assertThatThrownBy { transports.connectorFor(WebClientEngine.JDK, endpoint) }
@@ -89,7 +89,7 @@ class EngineTransportsTest {
         assertThat(transports.started()).isEmpty()
     }
 
-    /** An engine that records the deadline it was released against, and optionally fails doing so. */
+    /** An engine that records the deadline it was shut down against, and optionally fails doing so. */
     private class RecordingTransport(
         override val engine: WebClientEngine,
         private val released: MutableList<Pair<WebClientEngine, Long>>,
@@ -97,7 +97,7 @@ class EngineTransportsTest {
     ) : EngineTransport {
         override fun connectorFor(endpoint: ResolvedTimeouts): ClientHttpConnector = JdkClientHttpConnector()
 
-        override fun release(
+        override fun shutdown(
             deadlineNanos: Long,
             nanoTime: () -> Long,
         ) {
@@ -105,7 +105,7 @@ class EngineTransportsTest {
             released += engine to deadlineNanos
         }
 
-        override fun isReleased(): Boolean = released.any { it.first == engine }
+        override val isClosed: Boolean get() = released.any { it.first == engine }
     }
 
     private companion object {

@@ -75,7 +75,7 @@ class RestClientPropertiesTest {
         }
 
         @Test
-        fun `should default to 256 KB, the twin's ceiling and the size one oversized access-profile response needed`() {
+        fun `should default to 256 KB, the twin's ceiling, large enough for an access-profile list response`() {
             // What is tested: the code default of the buffer limit, as a value in its own right rather than
             //   as a by-product of the range check above.
             // Success criteria: the default is 256 KB and NOT 8 KB.

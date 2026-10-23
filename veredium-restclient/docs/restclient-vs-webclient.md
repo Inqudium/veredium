@@ -104,7 +104,7 @@ Apache's pool is the one blocking engine Spring supports that expresses everythi
 which is why it is the default (§3.1 for the others). The mapping, as the Apache engine of
 `ResilientRestClientFactory` makes it:
 
-| Reactor Netty (web-client)                     | Apache HttpClient 5 (rest-client)                                        |
+| Reactor Netty (webclient)                      | Apache HttpClient 5 (restclient)                                         |
 |------------------------------------------------|--------------------------------------------------------------------------|
 | one `ConnectionProvider` for all endpoints     | one `PoolingHttpClientConnectionManager`, shared by every per-endpoint client (`setConnectionManagerShared(true)`) |
 | `maxConnections`                               | `maxConnTotal` **and** `maxConnPerRoute` — every endpoint is one route, and Apache's per-route default of 5 would otherwise cap each backend silently |
@@ -302,10 +302,10 @@ name it finds no declaration for — but it is built on the registry default, no
 on the first call). `MeshResilienceStartupGuard` (`SmartInitializingSingleton`, `veredium-core`) checks for every
 mesh alias that all three layers DECLARE it (read off the bound `resilience4j.*` property beans, not the
 registry) and that the customizer's effect is observable on the instance the registry serves, and fails the
-context naming the key to add. The twin's reference configuration once declared a single TimeLimiter instance
-while mesh derives four; it declares all four now, and each module's `MeshResilienceShippedConfigTest` boots the
-three auto-configurations against its own file.
+context naming the key to add. Each module's reference configuration declares an instance for every alias mesh
+derives, and each module's `MeshResilienceShippedConfigTest` boots the three auto-configurations against its own
+file.
 
 The consequence for consumers of `BaseAdapter`: the budget an adapter publishes is final as soon as the registry
-bean exists; reading it on access is still the right shape (the registry owns it), but no longer an
-init-order requirement.
+bean exists; reading it on access is still the right shape (the registry owns it), but not an init-order
+requirement.

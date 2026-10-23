@@ -20,8 +20,9 @@
         CI job summary and the published /coverage/ page read this report
         (target/site/jacoco-aggregate/).
 
-        It lists the three modules as dependencies so the reactor builds it last and report-aggregate
-        knows which modules to include. It carries no code, and it is kept out of every published
+        It lists the three library modules as dependencies so the reactor builds it after them and
+        report-aggregate knows which modules to include; it runs last of all because the parent declares
+        it last. It carries no code, and it is kept out of every published
         artefact: no deploy (GitHub Packages, and cyclonedx's skipNotDeployed drops it from the aggregate
         SBOM), excluded from the Central bundle in the release profile of the parent, and no Dokka run.
     -->

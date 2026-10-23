@@ -11,7 +11,7 @@ Everything a client module's tests need that does not depend on the client stack
 | Helper | What for |
 |---|---|
 | `AnsweringBackend`, `DrippingBackend`, `SilentBackend`, `UnansweredConnectBackend` | Raw-socket HTTP peers on the loopback address. They show what WireMock cannot: connections rather than requests, a body still arriving, a peer that cuts the body off or never answers, a connect the kernel leaves hanging. |
-| `CapturingAppender` | Thread-safe Logback capture with a bounded wait for the expected lines. It snapshots each event's MDC as it is appended. |
+| `CapturingAppender`, `capturing` | Thread-safe Logback capture with a bounded wait for the expected lines. It snapshots each event's MDC as it is appended. `capturing` attaches it for one block, opens the logger's level for it if asked, and afterwards detaches and stops it and restores the level. |
 | `eventually`, `leapingClock`, `causeChain`, `causeNames` | Bounded waits instead of sleeps, a clock that jumps past any deadline, and cause-chain assertions for engine exceptions whose types are shaded or optional. |
 | `WireMockArrivals` | One request listener per WireMock server, cleared before every test. WireMock's `resetAll()` does not remove a listener, so one added per test piles up. |
 | `ConfigurationFiles` | Binding of the reference configuration (`application.yml`) and the test fixture (`application-test.yml`) the way Boot reads them, without a context. |
@@ -47,14 +47,14 @@ This module is option 3.
 
 - **`veredium-core`'s own tests cannot use it.** This module depends on the core, because `CustomizedRegistries`
   needs the mesh customizers. A test dependency back from the core would be a cycle. The core's tests therefore
-  keep their own `CustomizedRegistries` and `TestVerdicts`; their KDoc says why.
+  keep their own `CustomizedRegistries`; its KDoc says why.
 - **It is part of the Dokka module list in CI.** The CI's KDoc check and the Docs workflow run `dokka:dokka` over
   an explicit `-pl` list. That list must contain this module: the client modules compile their tests during
   `package`, and on a fresh runner the module is in neither the reactor nor the local repository. An undeclared
   Dokka plugin fails a command-line run instead of skipping it, so the POM declares the plugin with `skip`.
 - **The helpers have tests of their own.** `src/test/kotlin` pins what the suites rely on them for: a bounded wait
-  that gives up, a cause-chain walk that stops at a self-cause, a capture that keeps only what it accepts, an
-  arrival listener that forgets the previous test. The tests also give the module the test source root ktlint
+  that gives up, a cause-chain walk that stops at a self-cause, a capture that keeps only what it accepts and
+  leaves no appender or level behind, an arrival listener that forgets the previous test's actions. The tests also give the module the test source root ktlint
   expects, so `mvn verify` stays free of warnings.
 
 ## Using it

@@ -13,9 +13,8 @@ no separate targets tree, and the path template is NOT re-declared anywhere else
 The tree is **the same for both client stacks and every HTTP engine**: `veredium-restclient` (Apache HttpClient
 5 by default) and `veredium-webclient` (Reactor Netty by default) bind it from here, so one deployment's
 `app.mesh` block reads identically whichever stack the host runs on, and a host that switches stacks or
-engines (`app.restclient.engine` / `app.webclient.engine`) changes nothing under `app.mesh`. It is a
-self-contained port of the standalone PoC (`helm-mesh-timeouts/kotlin`, package `eu.mesh.timeouts.poc`, which
-stays the reference for the derivation and its rationale).
+engines (`app.restclient.engine` / `app.webclient.engine`) changes nothing under `app.mesh`. The module is
+self-contained: the derivation and its rationale are stated here and in the KDoc of `ResolvedTimeouts`.
 
 ## What it computes
 
@@ -168,5 +167,5 @@ installed on and one line per endpoint stating what mesh decided for its time li
 See the `app.mesh` and `resilience4j.*` blocks of either stack's reference configuration
 (`veredium-restclient/src/test/resources/application.yml`, `veredium-webclient/src/test/resources/application.yml`;
 a library ships none): one `endpoints[]` entry per backend, and every derived alias declared under all three
-`resilience4j.<layer>.instances` — the guard refuses to start otherwise. The PoC in `helm-mesh-timeouts` renders
-the same config from a single Helm source (`meshEndpoints`) for both the sidecar and the app side.
+`resilience4j.<layer>.instances` — the guard refuses to start otherwise. Render the sidecar's config and
+`app.mesh` from one source, so both sides describe the same endpoints.

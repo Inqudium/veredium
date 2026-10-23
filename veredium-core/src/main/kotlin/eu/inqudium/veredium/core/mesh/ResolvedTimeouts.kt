@@ -1,8 +1,5 @@
 package eu.inqudium.veredium.core.mesh
 
-import org.slf4j.LoggerFactory
-import org.springframework.boot.context.event.ApplicationReadyEvent
-import org.springframework.context.event.EventListener
 import java.time.Duration
 
 /**
@@ -10,16 +7,18 @@ import java.time.Duration
  * guard lives here: a config that cannot form a valid ladder fails fast at construction rather than silently
  * producing an inert slow-call threshold or an inverted timeout.
  *
- * Ported from the PoC (`eu.mesh.timeouts.poc`) and extended with the client target fields ([host], [baseUrl],
- * [headers]). [MeshResilienceConfiguration] feeds the two timeout rungs into R4j ([timeLimiterTimeout],
- * [slowCallDuration]); the client factory of each stack reads the rest.
+ * Besides the ladder it carries the client target fields ([host], [baseUrl], [headers]). The two timeout rungs
+ * reach Resilience4j through [eu.inqudium.veredium.core.resilience.MeshResilienceRegistrar], whose customizers
+ * ([eu.inqudium.veredium.core.resilience.timeLimiterCustomizer] for [timeLimiterTimeout],
+ * [eu.inqudium.veredium.core.resilience.circuitBreakerCustomizer] for [slowCallDuration]) install them; the
+ * client factory of each stack reads the rest.
  *
  * ## Worked example - anchor 1s..5s at `maxRetries = 0` (all values in ms, default margins/transport)
  *
  * At `maxRetries = 0` the effective healthy-retry count is `min(0, healthyRetries) = 0`, so the healthy ceiling
  * is a single attempt (`p99 = individual - 200`) and `slowCall = min(p99, 0.8 * global)`. Note that across this
  * whole column `slowCall < individual` (the "inversion") - which is exactly why an enabled CircuitBreaker pins
- * its slow-call rate to 100% here (see `circuitBreakerCustomizer` in the `resilience` package).
+ * its slow-call rate to 100% here (see [eu.inqudium.veredium.core.resilience.circuitBreakerCustomizer]).
  *
  * |    Sidecar |  Sidecar |     Application | Application | Application |
  * |-----------:|---------:|----------------:|------------:|------------:|
@@ -32,6 +31,18 @@ import java.time.Duration
  *
  * global = individual + 200; responseTimeout = global + 200; timeLimiter = responseTimeout + 400 (computed
  * transport margin 100+200+100); slowCall = min(individual - 200, 0.8 * global).
+ *
+ * @property triplet The canonical endpoint id (`/endpoint/<host>/<METHOD>/<path...>`), the key of
+ *   [MeshProperties.resolveAll] and the prefix of every guard message.
+ * @property alias The Resilience4j instance name and metric label: the configured alias, or the one derived from
+ *   the [triplet].
+ * @property individualRequestTimeoutMs The MEASURED anchor `p99(single attempt) + margin` - the one rung that is
+ *   configured rather than derived.
+ * @property maxRetries The sidecar's retry count; with the anchor it derives [sidecarGlobalMs].
+ * @property margins The merged margins: the shared [MeshProperties.Defaults.margins] with this endpoint's partial
+ *   override on top.
+ * @property transport The app->sidecar transport caps; their computed [MeshProperties.Transport.timeLimiterMargin]
+ *   lifts [timeLimiterTimeout] above [responseTimeout].
  */
 data class ResolvedTimeouts(
     val triplet: String,
@@ -40,7 +51,7 @@ data class ResolvedTimeouts(
     val host: String,
     /** Path template from the triplet (with `{vars}`); the adapter builds its request URI from it. */
     val pathTemplate: String,
-    /** Client base URL (the sidecar): the per-endpoint override, or the shared `Transport.sidecarBaseUrl`. */
+    /** Client base URL (the sidecar): the per-endpoint override, or the shared [MeshProperties.Transport.sidecarBaseUrl]. */
     val baseUrl: String,
     /** Extra static headers beyond Host (usually empty). */
     val headers: Map<String, String>,
@@ -48,13 +59,16 @@ data class ResolvedTimeouts(
     val maxRetries: Int,
     val margins: MeshProperties.Margins,
     val transport: MeshProperties.Transport,
-    /** Whether mesh derives + overrides this endpoint's TimeLimiter (resolved tri-state; see MeshProperties). */
+    /** Whether mesh derives + overrides this endpoint's TimeLimiter (the resolved tri-state of [MeshProperties.BackendToggleOverride]). */
     val timeLimiterEnabled: Boolean,
-    /** Whether mesh derives + overrides this endpoint's CircuitBreaker (resolved tri-state; see MeshProperties). */
+    /** Whether mesh derives + overrides this endpoint's CircuitBreaker (the resolved tri-state of [MeshProperties.BackendToggleOverride]). */
     val circuitBreakerEnabled: Boolean,
 ) {
-    // global is DERIVED from the measured per-endpoint anchor (see the pattern doc, 1.1.1), not an input:
-    // the worst-case sequential run of (1 + maxRetries) attempts plus the folded global margin.
+    /**
+     * The sidecar's `global` budget, DERIVED from the measured per-endpoint anchor rather than configured: the
+     * worst-case sequential run of `1 + maxRetries` attempts plus the folded global margin,
+     * `global = (1 + maxRetries) * individual + globalMarginMs`.
+     */
     val sidecarGlobalMs: Long = (1 + maxRetries) * individualRequestTimeoutMs + margins.globalMarginMs
 
     /**
@@ -64,12 +78,18 @@ data class ResolvedTimeouts(
      */
     val responseTimeout: Duration = Duration.ofMillis(sidecarGlobalMs + margins.responseTimeoutMarginMs)
 
-    // p99 of a single healthy attempt is not a separate input: the anchor is p99 + margin, so p99 is recovered
-    // from it (and thus tracks the anchor automatically).
+    /**
+     * The p99 latency of a single healthy attempt. Not a separate input: the anchor is `p99 + margin`, so p99 is
+     * recovered from it (and thus tracks the anchor automatically).
+     */
     val p99SingleMs: Long = individualRequestTimeoutMs - margins.p99MarginMs
 
-    // slowCall = min(healthy ceiling, global * cap) - the doc's 1.1.2 derivation. The healthy ceiling is the
-    // latency of a healthy call incl. a couple of routine retries; the cap bounds it safely below global.
+    /**
+     * The circuit breaker's slow-call threshold, `slowCall = min(healthy ceiling, global * slowCallCapFraction)`.
+     * The healthy ceiling is the latency of a healthy call incl. a couple of routine retries,
+     * `p99 * (1 + eff) + eff * slowCallBackoffMs` with `eff = min(maxRetries, healthyRetries)`; the cap bounds it
+     * safely below global.
+     */
     val slowCallDuration: Duration =
         run {
             // healthyRetries can never exceed the actual retry budget: capping it at maxRetries means with 0
@@ -83,13 +103,16 @@ data class ResolvedTimeouts(
 
     /**
      * The "inversion": the derived slow-call sits BELOW the sidecar's per-attempt timeout. An enabled circuit
-     * breaker then pins its slow-call rate to 100 % (see `circuitBreakerCustomizer`) - the derived duration is only
+     * breaker then pins its slow-call rate to 100 % (see [eu.inqudium.veredium.core.resilience.circuitBreakerCustomizer]) - the derived duration is only
      * safe against a healthy-but-slow endpoint when the rate demands total degradation before opening.
      */
     val slowCallInverted: Boolean = slowCallDuration < Duration.ofMillis(individualRequestTimeoutMs)
 
-    // The TimeLimiter margin is a COMPUTED property of transport (connect + pendingAcquire + headroom), so it
-    // ALWAYS exceeds the worst-case pre-response phases by construction - no runtime guard needed (see below).
+    /**
+     * The TimeLimiter budget, `timeLimiter = responseTimeout + transport.timeLimiterMargin`. The margin is a
+     * COMPUTED property of [transport] (connect + pendingAcquire + headroom), so it ALWAYS exceeds the worst-case
+     * pre-response phases by construction - no runtime guard needed.
+     */
     val timeLimiterTimeout: Duration = responseTimeout.plusMillis(transport.timeLimiterMargin)
 
     init {
@@ -128,46 +151,11 @@ data class ResolvedTimeouts(
             "[$triplet] margins.slow-call-cap-fraction must be in (0,1) (else the slowCall cap is <= 0 or >= global, " +
                 "making detection inert), but was ${margins.slowCallCapFraction} ($MARGIN_SOURCES)"
         }
-        // NOTE: the ladder invariant "timeLimiter margin > connect + pendingAcquire" (see the pattern doc, section
-        // 1.2) needs no runtime check here: transport.timeLimiterMargin IS connect + pendingAcquire + a positive
-        // headroom, so it can never race the responseTimeout regardless of how the transport caps are configured.
+        // Invariant: timeLimiter margin > connect + pendingAcquire, which needs no runtime check here:
+        // transport.timeLimiterMargin IS connect + pendingAcquire + a positive headroom, so it can never race the
+        // responseTimeout regardless of how the transport caps are configured.
     }
 }
 
 /** Where a margin of [ResolvedTimeouts] comes from - named in every margin guard's message. */
-private const val MARGIN_SOURCES = "app.mesh.defaults.margins, overridden per endpoint by app.mesh.endpoints[].margins"
-
-/**
- * Logs the fully derived per-endpoint mesh timeout ladder once, on application startup.
- *
- * The ladder is otherwise implicit: only the MEASURED anchor (`individual-request-timeout-ms`) is maintained
- * in config; every other rung - global / responseTimeout / slowCall / timeLimiter - is DERIVED by
- * [MeshProperties.resolveAll]. This startup line is the app-side inspectability guarantee, so an operator can
- * read the effective budgets straight from the log instead of recomputing them. Ported from the PoC
- * (`eu.mesh.timeouts.poc`); [ladderLines] is pure (no logging) so it can be asserted directly.
- *
- * A bean of [MeshResilienceConfiguration], not a scanned component: the mesh wiring is imported by each client stack's
- * configuration, so a host that scans only its stack's package still gets this line.
- */
-class MeshLadderLogger(
-    private val props: MeshProperties,
-) {
-    private val log = LoggerFactory.getLogger(MeshLadderLogger::class.java)
-
-    /** Writes [ladderLines] at INFO once the application is ready - after every binding the ladder reads. */
-    @EventListener(ApplicationReadyEvent::class)
-    fun logResolvedLadder() = ladderLines().forEach(log::info)
-
-    /** One line per endpoint (sorted by alias) - the fully derived ladder, for the startup log and tests. */
-    fun ladderLines(): List<String> =
-        props
-            .resolveAll()
-            .values
-            .sortedBy { it.alias }
-            .map { t ->
-                "mesh ladder [${t.alias}] ${t.triplet}: " +
-                    "individual=${t.individualRequestTimeoutMs}ms global=${t.sidecarGlobalMs}ms " +
-                    "responseTimeout=${t.responseTimeout.toMillis()}ms " +
-                    "slowCall=${t.slowCallDuration.toMillis()}ms timeLimiter=${t.timeLimiterTimeout.toMillis()}ms"
-            }
-}
+private const val MARGIN_SOURCES: String = "app.mesh.defaults.margins, overridden per endpoint by app.mesh.endpoints[].margins"
