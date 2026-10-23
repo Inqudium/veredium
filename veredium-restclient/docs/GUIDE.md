@@ -20,7 +20,7 @@ of this module is the reference configuration the contract tests pin - a library
 
 - Java 21 or newer at runtime (the build itself needs JDK 24+, see the
   [README](../../README.md)).
-- Spring Boot 4.1, Resilience4j 2.4 (`resilience4j-spring-boot4`), legatium 1.2.
+- Spring Boot 4.1, Resilience4j 2.4 (`resilience4j-spring-boot4`), legatium 1.3.
 
 ## Dependency
 
@@ -56,8 +56,8 @@ app:
 
 `jetty-client` and `reactor-netty-http` are *optional* dependencies of this module: a consumer gets neither
 transitively - no Jetty and no reactive artifact on its classpath - until it selects the engine and adds the
-dependency (version from the Spring Boot BOM). `apache` is exactly the wiring the module had before the property
-existed; a host that does not set it changes nothing.
+dependency (version from the Spring Boot BOM). `apache` is the default: a host that does not set the property runs
+every backend on Apache HttpClient 5.
 
 ### Isolation: this module's clients, and no other client of the host
 
@@ -163,8 +163,9 @@ Reactor Netty) or is aborted (Jetty) instead of drained. Spring's Apache and JDK
 rest of the body on close, to keep the connection: for a large or slow body that holds the worker, its permit and
 its connection, and past the TimeLimiter budget turns the client-side refusal into a timeout the breaker records.
 `RestClientEngineIntegrationTest` pins all four cases per engine, and the refused body per engine with a body that
-drips far longer than the call may take. The exchange event of an abandoned call is `failure` on every engine: what the worker sees is an I/O failure over the interrupt, which is not
-one of legatium's timeout types.
+drips far longer than the call may take. The exchange event of an abandoned call is WARN `cancelled` on every
+engine: legatium reads the worker's interrupt, and on Jetty the module restores the interrupt flag that Jetty's body
+stream clears ([HTTP engine behaviour](../../docs/engine-behaviour.md), "Abandoning an exchange").
 
 ### Shutdown
 

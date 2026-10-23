@@ -1,7 +1,6 @@
-# Timeouts, bulkheads and threads — how a blocking call through rest-client is bounded
+# Timeouts, bulkheads and threads — how a blocking call through veredium-restclient is bounded
 
-> **Ownership & baseline.** Maintained by **Dirk Haase**. Verified against the code at commit `cd5bceb4`
-> (2026-10-19). Where this text and the code disagree, the code wins.
+> **Ownership & baseline.** Maintained by **Dirk Haase**. Reviewed against the code on 2026-10-23. Where this text and the code disagree, the code wins.
 
 This guide explains what happens to a call made through `ResilientRestClient` from the moment an adapter
 invokes it to the moment the caller gets a value or an exception: which thread does what, which of the five
@@ -86,7 +85,7 @@ The ordering `individual < global < responseTimeout < timeLimiterTimeout` holds 
   `ResourceAccessException` — a **transport failure the breaker records** and legatium classifies as `timeout`.
   The two pre-response guards fail the same way for the breaker but not for the event: a connect timeout is a
   `SocketTimeoutException` too (`timeout`), a pool-lease timeout (`ConnectionRequestTimeoutException`) is classified as
-  `timeout` by name since legatium 1.2.1 (§7).
+  `timeout` by name (§7).
 - The **TimeLimiter** gives up last. Its margin of 400 ms over the response timeout is not a guess: it is
   exactly the two pre-response phases the response timeout does not cover — the pool lease (`pendingAcquire`,
   200 ms) and the connect (100 ms) — plus 100 ms of headroom. Under normal conditions it never fires; it is the
@@ -205,7 +204,7 @@ and the breaker's verdict (**ignored**, §7).
 **If an operator sets `cancel-running-future: false`** for an instance, the caller is still released at the
 budget, but the worker runs on until the transport's own timeout, holding its bulkhead permit and its pool
 connection for up to `responseTimeout` longer. That is a legitimate choice only for a call whose completion
-has side effects worth waiting for; for the lookups this module fronts, it is not, and the reference
+has side effects worth waiting for; for a lookup, it is not, and the reference
 configuration does not do it.
 
 ---
@@ -288,7 +287,7 @@ ones that are configured, named and metered (the bulkheads and the pool). A boun
 second, undeclared bulkhead that rejects with a different exception, counts in no meter, and would have to
 be kept in step with the four bulkheads by hand.
 
-**5. One hand-off, not two.** Resilience4j's own composition order (§1 of the class KDoc) nests the bulkhead
+**5. One hand-off, not two.** Resilience4j's own composition order (the class KDoc of `BlockingResilienceDecorator`) nests the bulkhead
 *inside* the TimeLimiter. The blocking TimeLimiter already needs a `Future`, hence already a hand-off; a
 `ThreadPoolBulkhead` would add a second one, and the TimeLimiter would then have to be driven through
 `decorateCompletionStage`, which needs a `ScheduledExecutorService` for the timeout — a third executor to own,
@@ -364,7 +363,7 @@ The caller blocks in `future.get`. Three ways out:
 The third row is the blocking counterpart of a subscriber cancelling, and `ResilientRestClient` logs it as such:
 a DEBUG `Cancelled request to backend …` line, not a WARN — a cancellation is the caller's business, arrives in
 floods under load, and must not drown the lines that say something about this module's health. The operator
-signal is the exchange event the worker still writes (`failure`, §3).
+signal is the exchange event the worker still writes (WARN `cancelled`, §3).
 
 An `Error` thrown on the worker is rethrown as itself and recorded by nothing: the breaker counts
 `Exception`s only.
@@ -413,7 +412,7 @@ What each bound produces, for the caller, the breaker, the exchange event and th
 |---|---|---|---|---|
 | breaker open | `CallNotPermittedException`, no worker started | — (not a call) | none | `resilience4j.circuitbreaker.not.permitted.calls` |
 | bulkhead full | `BulkheadFullException` | **ignored** | none | `resilience4j.bulkhead.available.concurrent.calls == 0` |
-| pool exhausted for 200 ms | `ResourceAccessException` over `ConnectionRequestTimeoutException` | failure | `timeout` (WARN) — matched by class name since legatium 1.2.1 (before: `failure` at ERROR, the type being a bare `InterruptedIOException`) | `restclient.pool.pending > 0` |
+| pool exhausted for 200 ms | `ResourceAccessException` over `ConnectionRequestTimeoutException` | failure | `timeout` (WARN) — matched by class name, the type being a bare `InterruptedIOException` | `restclient.pool.pending > 0` |
 | connect > 100 ms | `ResourceAccessException` over `ConnectTimeoutException` | failure | `timeout` (WARN) | `http.client.requests{exception=ResourceAccessException}` |
 | no response head within `responseTimeout` | `ResourceAccessException` over `SocketTimeoutException` | failure | `timeout` (WARN) | as above |
 | TimeLimiter budget expired | `TimeoutException` | failure | `cancelled` (WARN), written by the cancelled worker | `resilience4j.timelimiter.calls{kind=timeout}` |

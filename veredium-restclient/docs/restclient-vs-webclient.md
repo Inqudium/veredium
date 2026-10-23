@@ -1,7 +1,6 @@
-# rest-client — the blocking twin of web-client's `adapter/web`
+# veredium-restclient — the blocking twin of veredium-webclient
 
-> **Ownership & baseline.** Maintained by **Dirk Haase**. Verified against the code of 2026-10-19 (the module
-> cut of ADR-0001). Where this text and the code disagree, the code wins.
+> **Ownership & baseline.** Maintained by **Dirk Haase**. Reviewed against the code on 2026-10-23. Where this text and the code disagree, the code wins.
 
 `veredium-restclient` is `veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient` re-implemented on Spring's
 blocking `RestClient` over Apache HttpClient 5 by default (the JDK client, Jetty and Reactor Netty are
@@ -18,15 +17,15 @@ so the differences are decisions on record rather than surprises in production.
 
 ## 1. What maps one-to-one
 
-| web-client (`adapter/web`)            | rest-client (`adapter/rest`)           | Notes |
+| veredium-webclient                    | veredium-restclient                    | Notes |
 |---------------------------------------|----------------------------------------|-------|
 | `ResilientWebClient`                  | `ResilientRestClient`                  | Same per-call pipeline; `get`/`post` return `T` or throw, `getAsync`/`postAsync` return a `CompletableFuture<T>` (§2). |
 | `ResilientWebClientFactory`           | `ResilientRestClientFactory`           | Same optional collaborators, same required `RestClient.Builder` bean from Boot, same startup lines. |
 | `ReactiveResilienceDecorator`         | `BlockingResilienceDecorator` (`veredium-core`) | Same order `CircuitBreaker(TimeLimiter(Bulkhead(call)))`, see §2. The blocking one is a component of the core, usable without this client; this module declares its bean in `RestClientConfiguration`. |
-| `WebClientVerdicts` / `WebClientConfiguration` | `RestClientVerdicts` / `RestClientConfiguration` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the config bean that imports the core's `MeshResilienceConfiguration` (§8). |
+| `WebClientVerdicts` / `WebClientConfiguration` | `RestClientVerdicts` / `RestClientConfiguration` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the configuration that imports the core's `MeshResilienceConfiguration` next to the stack's `MeshResilienceRegistrar` subclass (§8). |
 | `WebClientProperties` (`app.webclient`) | `RestClientProperties` (`app.restclient`) | Same keys except `pool.pending-acquire-max-count` (§3). |
 | `WebClientObservationReport` | `RestClientObservationReport` | Each a five-line subclass of the core's `HttpObservationReport` with the stack's name and toggle key; the two startup lines and their four verdicts are written once. |
-| `ResponseValidation`, `ResponseValidationProperties` (`validation.*` of either properties tree) | the same classes (`veredium-core`) | The validator derived from the host's factory with its messages pinned to English, the per-alias toggle, the provider verdict - the webclient used to carry this inline in its factory. |
+| `ResponseValidation`, `ResponseValidationProperties` (`validation.*` of either properties tree) | the same classes (`veredium-core`) | The validator derived from the host's factory with its messages pinned to English, the per-alias toggle, the provider verdict. |
 | `eu.inqudium.veredium.core.mesh`, `eu.inqudium.veredium.core.resilience` | the same classes | **Shared, not copied.** The ladder (`MeshProperties`, `ResolvedTimeouts`, `responseTimeout` and `response-timeout-margin-ms` on both stacks), the two policies, the customizers and the guard live once, in `veredium-core`. |
 | the per-call lines, the size sample, `validate` (inline in `ResilientWebClient`) | the same (inline in `ResilientRestClient`) | **Shared, not copied** since the cut: `ClientCallLog` (`veredium-core`), held once per client; each stack passes its buffer-limit wording, its properties prefix and its `Content-Length` reader. `ResponseBodyMetrics` carries the UTF-8 size, the unit and the `adapter` tag; the meter NAMES stay per stack. |
 | `BaseAdapter`                         | `BaseAdapter` (`eu.inqudium.veredium.core`) | **Shared, not copied.** The two budgets an adapter publishes, one contract for both stacks. |
@@ -93,8 +92,8 @@ of `post` instead - and `cancel` on the future abandons the exchange exactly as 
 does (worker interrupted, permit released, the `Cancelled request` line at DEBUG). Only `cancel` does:
 `orTimeout`/`completeOnTimeout` complete that one future and leave the exchange running, permit and connection
 included, until it ends or the TimeLimiter budget expires - a caller wanting a shorter deadline cancels the
-future itself. The origin module's asynchronous API was dropped at the port for want of a consumer
-(architecture review 2026-10-19, finding 3); this one exists because the mechanism exists anyway and the client is the natural place to expose it.
+future itself. The asynchronous form exists because the mechanism exists anyway, in the core decorator, and the
+client is the natural place to expose it.
 
 ---
 
@@ -180,7 +179,7 @@ legatium-restclient-logging's interceptor rides on Boot's `RestClient.Builder` b
 exchange on the worker thread, under the caller's MDC. Since legatium 1.3.0 the vocabulary is the reactive
 twin's on every engine, pinned per engine by `LegatiumExchangeLoggingIntegrationTest`:
 
-| Situation                                | web-client event              | rest-client event                                          |
+| Situation                                | veredium-webclient event      | veredium-restclient event                                  |
 |------------------------------------------|-------------------------------|------------------------------------------------------------|
 | 2xx / benign 4xx / 5xx                   | `success` / `rejected` / `failure` | same                                                  |
 | transport response timeout               | `timeout` (WARN)              | `timeout` (WARN)                                           |
@@ -221,20 +220,19 @@ logging:
     eu.inqudium.legatium.restclient.logging: WARN
 ```
 
-Everything under `app.mesh`, `resilience4j.*` and `adapter-logging.*` reads exactly as in
-`web-client/docs/webclient-config-guide.md`; only the `app.webclient` block becomes `app.restclient`, minus
+Everything under `app.mesh`, `resilience4j.*` and `adapter-logging.*` reads exactly as in the reactive client's
+[configuration guide](../../veredium-webclient/docs/webclient-config-guide.md); only the `app.webclient` block becomes `app.restclient`, minus
 `pool.pending-acquire-max-count`.
 
 ---
 
 ## 7. Test suite
 
-The suite mirrors the twin's class for class where the blocking stack allows it. Classes specific to this
-module:
+The suite mirrors the twin's class for class where the blocking stack allows it. The hand-off itself - virtual
+worker, MDC and observation propagation, exception unwrapping, bulkhead permit on the worker, TimeLimiter release
+and worker interrupt, caller interruption, short-circuit without a worker - is pinned with the decorator, in
+`veredium-core`'s `BlockingResilienceDecoratorTest`. Classes specific to this module:
 
-- `BlockingResilienceDecoratorTest` — the hand-off: virtual worker, MDC and observation propagation, exception
-  unwrapping, bulkhead permit on the worker, TimeLimiter release + worker interrupt, caller interruption,
-  short-circuit without a worker.
 - `BoundedBodyReaderTest` — both readings of the limit, the inclusive boundary, and that an oversized body is not
   drained into memory - each also through short and zero-length reads and across the reader's buffer growth;
   `BoundedBodyReaderFuzzTest` (Jazzer, `src/test/java`) explores the same invariants with arbitrary bodies, limits,
@@ -271,17 +269,16 @@ itself, never with the chart that is deployed. The derived numbers of the shared
 
 ## 8. Resilience wiring: customizers, not amendments - shared, not copied
 
-The twin used to install its breaker verdicts and the mesh-derived rungs with a home-grown amendment framework:
-three contributors filled a plan, an applier folded it per instance in `afterSingletonsInstantiated`, removed
-and recreated each Resilience4j instance, verified the result by identity and reported an ERROR event when an
-alias was unknown. It had rejected Resilience4j's own extension point because nothing there booted the
-auto-configuration, so a customizer's effect could not be observed in its tests.
+Both stacks install their breaker verdicts and the mesh-derived rungs through Resilience4j's own extension point,
+from one implementation in `veredium-core` ([ADR-0001](../../docs/adr/ADR-0001-one-stack-neutral-core-module.md)).
+The rejected alternative is a framework of the module's own that removes and recreates each Resilience4j instance
+after the context has started and verifies the result by identity: a second lifecycle for every instance, and
+binders that would have bound the replaced one.
 
-This module used that extension point from the start, and since the module cut of ADR-0001 both stacks do, from
-one implementation in `veredium-core`: `MeshResilienceCustomizers.kt` registers one `CircuitBreakerConfigCustomizer`
-per mesh alias and one `TimeLimiterConfigCustomizer` per alias whose time-limiter derivation is on (a Spring 7
-`BeanRegistrar`, imported by the core's `MeshResilienceConfiguration`, because the number of beans follows the endpoint
-list). Resilience4j's Boot configuration consults them as the last step of building each `instances.<alias>`
+The core's abstract `MeshResilienceRegistrar` (`MeshResilienceCustomizers.kt`, a Spring 7 `BeanRegistrar`, because
+the number of beans follows the endpoint list) registers one `CircuitBreakerConfigCustomizer` per mesh alias and one
+`TimeLimiterConfigCustomizer` per alias whose time-limiter derivation is on. Each stack subclasses it with its
+verdicts and imports the subclass next to the core's `MeshResilienceConfiguration`. Resilience4j's Boot configuration consults them as the last step of building each `instances.<alias>`
 entry — after the named base config and the instance's own YAML, before the instance exists — so the binders
 bind to the final instance and nothing is rebuilt later. The verdicts are folded onto what YAML produced (ignore
 OR-ed, record AND-ed), so an operator's own lists survive.
@@ -295,7 +292,7 @@ scans this module's package gets the core wiring too.
 The RULES — a benign 4xx except 408/429 is a success, a client-side failure is ignored, the cause chain is
 walked to a bounded depth — are written once and cannot drift between the stacks any more.
 
-What the twin's applier reported as an ERROR is a failed start on both stacks. An alias missing from
+An alias the wiring cannot serve as configured fails the start on both stacks. An alias missing from
 `resilience4j.<layer>.instances` does not go unserved — Resilience4j creates an instance for every customizer
 name it finds no declaration for — but it is built on the registry default, not on the named base config
 (`mesh-backend`), so the operator's policy is silently lost (and a bulkhead, which has no customizer, is created

@@ -1,9 +1,9 @@
-# rest-client — decisions this module relies on
+# veredium-restclient — decisions this module relies on
 
-> **Ownership & baseline.** Maintained by **Dirk Haase**. Verified against the code at commit `cd5bceb4`
-> (2026-10-19). Where this text and the code disagree, the code wins.
+> **Ownership & baseline.** Maintained by **Dirk Haase**. Reviewed against the code on 2026-10-23. Where this text and the code disagree, the code wins.
 
-`rest-client` has no `docs/adr/` of its own. Its own decisions are recorded where they are argued — the POM
+The project's architecture decisions are the ADRs in [`docs/adr/`](../../docs/adr/README.md). This module's own
+decisions are recorded where they are argued — the POM
 comment (a self-contained blocking twin, no reactive dependency), `restclient-vs-webclient.md` (what maps to
 the twin and what deliberately differs, including §8 on the customizer wiring shared through `veredium-core`),
 `timeouts-bulkheads-threads.md`
