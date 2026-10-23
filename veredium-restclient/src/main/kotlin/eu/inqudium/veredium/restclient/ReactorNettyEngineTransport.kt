@@ -27,6 +27,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeoutException
 
 /**
@@ -66,6 +68,11 @@ import java.util.concurrent.TimeoutException
  * Spring's stream, which wakes the reader and cancels the inbound, and fails the read with an
  * `InterruptedIOException`. Closing a response whose body was not read to its end closes the stream first, so
  * the connection is released instead of drained.
+ *
+ * The wait for the head is handed off the same way ([handOff]), for a reason of its own: Spring's `block()` has no
+ * time bound, and the response timeout is a timer on the event loops. A [shutdown] past its deadline disposes the
+ * loops, and an exchange whose end they no longer signal would hold its worker until the TimeLimiter budget. Run
+ * on [offload], that wait is interrupted by the shutdown's `shutdownNow` and fails at once.
  */
 internal class ReactorNettyEngineTransport(
     settings: Settings,
@@ -113,7 +120,7 @@ internal class ReactorNettyEngineTransport(
             }
         return ClientHttpRequestFactory { uri, method ->
             object : ForwardingClientHttpRequest(requests.createRequest(uri, method)) {
-                override fun execute(): ClientHttpResponse = HandOffResponse(delegate.execute(), offload)
+                override fun execute(): ClientHttpResponse = HandOffResponse(handOff(offload, "Request") { delegate.execute() }, offload)
             }
         }
     }
@@ -140,7 +147,7 @@ internal class ReactorNettyEngineTransport(
         }
 
     override val cancellation: String =
-        "an interrupted worker cancels the exchange; body reads are handed off so the interrupt also ends a read"
+        "an interrupted worker cancels the exchange; the head wait and the body reads are handed off, so the interrupt also ends a read and a shutdown ends what the event loops no longer do"
 
     override val isClosed: Boolean get() = provider.isDisposed && loops.isDisposed
 
@@ -303,23 +310,10 @@ internal class ReactorNettyEngineTransport(
             len: Int,
         ): Int {
             if (len == 0) return 0
-            val pending = offload.submit(Callable { source.read(b, off, len) })
-            return try {
-                pending.get().also { if (it < 0) atEnd = true }
-            } catch (e: InterruptedException) {
-                // Closing wakes the reader through Spring's own resume, never through an interrupt: the reader
-                // parks in the same interrupt-blind loop, which an interrupt would turn into a spin.
-                source.close()
-                Thread.currentThread().interrupt()
-                throw InterruptedIOException("Body read interrupted").apply { initCause(e) }
-            } catch (e: ExecutionException) {
-                when (val cause = e.cause) {
-                    is IOException -> throw cause
-                    is RuntimeException -> throw cause
-                    is Error -> throw cause
-                    else -> throw IOException(cause)
-                }
-            }
+            // Closing wakes the reader through Spring's own resume, never through an interrupt: the reader parks in
+            // the same interrupt-blind loop, which an interrupt would turn into a spin.
+            return handOff(offload, "Body read", onInterrupt = { _ -> source.close() }) { source.read(b, off, len) }
+                .also { if (it < 0) atEnd = true }
         }
 
         fun closeUnlessAtEnd() {
@@ -332,6 +326,47 @@ internal class ReactorNettyEngineTransport(
     companion object {
         /** The pool's name: its `name` tag, the event-loop and offload threads' prefix, the shutdown line's pool. */
         const val POOL_NAME: String = "restclient-reactor-netty"
+
+        /**
+         * Runs [blocking] on a short-lived virtual thread of [offload] while the calling worker waits for it
+         * INTERRUPTIBLY, and fails as [blocking] failed - the shared shape of the two waits Spring's Reactor request
+         * makes, for the head ([requestFactory]) and for each body read ([HandOffInputStream]).
+         *
+         * Two things end the wait besides [blocking] itself. An interrupt of the WORKER (the TimeLimiter, a caller
+         * interrupt) runs [onInterrupt] on the pending task - interrupting it for the head, whose `block()` honours
+         * an interrupt; closing the stream for a body read, whose park loop does not - and fails with an
+         * [InterruptedIOException], leaving the flag set. And [shutdown]'s `shutdownNow` of [offload] interrupts the
+         * task itself, so a wait no signal of the event loops ends any more - the loops are gone - fails at once
+         * instead of holding its caller until the TimeLimiter budget. A wait started after that shutdown fails with
+         * an [IOException] naming it.
+         */
+        internal fun <T> handOff(
+            offload: ExecutorService,
+            what: String,
+            onInterrupt: (Future<T>) -> Unit = { it.cancel(true) },
+            blocking: () -> T,
+        ): T {
+            val pending =
+                try {
+                    offload.submit(Callable { blocking() })
+                } catch (e: RejectedExecutionException) {
+                    throw IOException("$what refused: the HTTP engine '${RestClientEngine.REACTOR_NETTY.key}' is shut down", e)
+                }
+            return try {
+                pending.get()
+            } catch (e: InterruptedException) {
+                onInterrupt(pending)
+                Thread.currentThread().interrupt()
+                throw InterruptedIOException("$what interrupted").apply { initCause(e) }
+            } catch (e: ExecutionException) {
+                when (val cause = e.cause) {
+                    is IOException -> throw cause
+                    is RuntimeException -> throw cause
+                    is Error -> throw cause
+                    else -> throw IOException(cause)
+                }
+            }
+        }
 
         /** How long [shutdown] waits for each disposal after the drain, which has already waited for the exchanges. */
         val DISPOSE_WAIT: Duration = Duration.ofSeconds(5)
