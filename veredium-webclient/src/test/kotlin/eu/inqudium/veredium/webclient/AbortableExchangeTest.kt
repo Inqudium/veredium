@@ -55,7 +55,7 @@ class AbortableExchangeTest {
         // Success criteria: the future is not cancelled.
         // Why it matters: an exchange that completes normally must not be cut by its own bookkeeping.
         //
-        // Given/When
+        // Given / When
         val started = CompletableFuture<Unit>()
         AbortableExchange().attach(started)
 

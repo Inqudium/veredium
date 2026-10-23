@@ -1,6 +1,6 @@
 # The test fixture of veredium-core: the two blocks the shared wiring reads - app.mesh (the ladder) and
 # resilience4j.* (the registries the customizers and the startup guard attach to) - in the shape a host ships
-# them. Test-owned: MeshApplicationYmlBindingTest pins the endpoint set and MeshResilienceContextTest boots
+# them. Test-owned: MeshFixtureBindingTest pins the endpoint set and MeshResilienceContextTest boots
 # Resilience4j's auto-configuration on it. The client modules carry the same blocks in their own fixtures,
 # next to their stack-specific configuration.
 app:
@@ -29,7 +29,7 @@ resilience4j:
   # on every endpoint whose time-limiter toggle is on (the default) WHILE that instance is built. An alias an
   # endpoint uses but this block does not declare still gets an instance (Resilience4j creates one for the
   # customizer) - on the registry default, not on mesh-backend, silently; MeshResilienceStartupGuard therefore
-  # fails the start and names the missing key. MeshResilienceShippedConfigTest boots the auto-configuration
+  # fails the start and names the missing key. MeshResilienceContextTest boots the auto-configuration
   # against this file.
   timelimiter:
     configs:

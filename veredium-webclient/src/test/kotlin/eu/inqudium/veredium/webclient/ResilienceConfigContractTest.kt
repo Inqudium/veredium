@@ -1,6 +1,9 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
+import eu.inqudium.veredium.testsupport.ConfigurationFiles.FIXTURE
+import eu.inqudium.veredium.testsupport.ConfigurationFiles.REFERENCE
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.springboot.bulkhead.autoconfigure.BulkheadAutoConfiguration
 import org.assertj.core.api.Assertions.assertThat
@@ -10,16 +13,13 @@ import org.junit.jupiter.params.provider.ValueSource
 import org.springframework.boot.autoconfigure.AutoConfigurations
 import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.boot.context.properties.source.MapConfigurationPropertySource
-import org.springframework.boot.env.YamlPropertySourceLoader
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
-import org.springframework.core.env.EnumerablePropertySource
 import org.springframework.core.env.MapPropertySource
-import org.springframework.core.io.ClassPathResource
 
 /**
  * The contract between the `app.mesh` block and the `resilience4j.*` block of this module's two configuration
- * files - the reference configuration (`src/test/resources/application.yml`) and the test fixture
- * (`application-test.yml`) - checked statically, from the files alone.
+ * files - the reference configuration ([REFERENCE]) and the test fixture ([FIXTURE]) - checked statically, from
+ * the files alone.
  *
  * 1. What is tested: that every mesh alias (derived from its triplet exactly as at runtime, by binding
  *    `app.mesh` into [MeshProperties]) is declared under `resilience4j.circuitbreaker.instances`,
@@ -47,7 +47,7 @@ import org.springframework.core.io.ClassPathResource
  * Determinism: classpath files and a Spring context that configures and calls nothing.
  */
 class ResilienceConfigContractTest {
-    @ParameterizedTest
+    @ParameterizedTest(name = "{0}")
     @ValueSource(strings = [REFERENCE, FIXTURE])
     fun `should declare every mesh alias under all three Resilience4j instance trees`(file: String) {
         // What is tested: the declaration half of the contract for one file - each derived alias appears as an
@@ -70,7 +70,7 @@ class ResilienceConfigContractTest {
         assertThat(undeclared).`as`("aliases %s does not declare", file).isEmpty()
     }
 
-    @ParameterizedTest
+    @ParameterizedTest(name = "{0}")
     @ValueSource(strings = [REFERENCE, FIXTURE])
     fun `should keep the mesh bulkheads within the shared connection pool`(file: String) {
         // What is tested: the sizing half for one file - sum(max-concurrent-calls) over the mesh aliases, as
@@ -116,12 +116,7 @@ class ResilienceConfigContractTest {
     // ---------------------------------------------------------------------------
 
     /** The flattened keys of [file], the way Boot's `YamlPropertySourceLoader` produces them. */
-    private fun load(file: String): Map<String, Any> =
-        YamlPropertySourceLoader()
-            .load(file, ClassPathResource(file))
-            .filterIsInstance<EnumerablePropertySource<*>>()
-            .flatMap { source -> source.propertyNames.map { it to source.getProperty(it)!! } }
-            .toMap()
+    private fun load(file: String): Map<String, Any> = ConfigurationFiles.flatten(file)
 
     /** `app.mesh` bound into [MeshProperties] - the bound object, whose code defaults fill what the file omits. */
     private fun mesh(properties: Map<String, Any>): MeshProperties =
@@ -173,12 +168,6 @@ class ResilienceConfigContractTest {
     }
 
     private companion object {
-        /** The reference configuration: the documented example a host copies from. */
-        const val REFERENCE = "application.yml"
-
-        /** The test-owned fixture the binding and contract tests of the logging blocks read. */
-        const val FIXTURE = "application-test.yml"
-
         /** The three primitives [ReactiveResilienceDecorator] applies to every call. */
         val LAYERS = listOf("circuitbreaker", "timelimiter", "bulkhead")
     }

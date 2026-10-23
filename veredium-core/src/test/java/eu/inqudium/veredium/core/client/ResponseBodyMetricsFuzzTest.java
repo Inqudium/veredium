@@ -56,7 +56,7 @@ class ResponseBodyMetricsFuzzTest {
             if (i > 0) {
                 units.append(' ');
             }
-            units.append(String.format("%04x", (int) text.charAt(i)));
+            units.append("%04x".formatted((int) text.charAt(i)));
         }
         return units.append(']').toString();
     }

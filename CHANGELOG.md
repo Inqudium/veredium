@@ -223,6 +223,17 @@ Findings of `docs/assessment/CODE_STYLE-2026-10-23T10-45-28.md`:
   `WebClientConfiguration.kt`. A host that `@Import`s either by name updates the import.
 - `veredium-webclient`: `ResilientWebClientFactory` takes an optional `nanoTime` clock for its shutdown deadline,
   as the blocking twin does.
+- **Build:** a new build-only module, `veredium-test-support`, holds the test helpers both client modules
+  share - the raw-socket backends, the thread-safe log capture, `eventually`, the WireMock arrival listener, the
+  configuration-file binding, the test payloads and the customized registries - in place of the copies that had
+  drifted apart in each module. Like `veredium-coverage` it is never published.
+- **CI:** the comment checks (no `[Symbol]` in `//`, no guide section numbers, no report citations) cover test code
+  too; two new steps fail a pull request on an unused import and on a test rationale block that breaks its
+  documented shape (`generate-test-catalog.py --check`).
+- **Tests:** the suites follow their documented conventions throughout - `should …` names, the three-label
+  rationale block with its separator, `@Nested` groups with sentence names instead of banner comments, comments that
+  state the constraint instead of history - and no longer describe removed code (the exchange diary, a shipped
+  `application.yml`, the origin project's tickets). The orphaned `traceparent/conformance.txt` fixture is gone.
 
 Earlier:
 

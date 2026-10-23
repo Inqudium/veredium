@@ -35,9 +35,9 @@ class ReactorNettyHandOffTest {
         // Success criteria: the worker's wait fails within 2 s with an IOException whose cause is the task's
         //   InterruptedException - not an InterruptedIOException, since the worker itself was not interrupted.
         // Why it matters: Spring's wait for the head is a block() without a time bound, and the response timeout
-        //   is a timer on the event loops. Once a shutdown past its deadline has disposed the loops, an exchange
-        //   whose end they no longer signal would hold its caller until the TimeLimiter budget; the shutdown of
-        //   the offload executor is what ends it now.
+        //   is a timer on the event loops. Once a shutdown past its deadline has disposed the loops, nothing
+        //   signals the exchange's end, and it would hold its caller until the TimeLimiter budget; the shutdown
+        //   of the offload executor is what ends it.
         //
         // Given: a worker waiting on a task that never ends by itself
         val started = CountDownLatch(1)
@@ -69,9 +69,9 @@ class ReactorNettyHandOffTest {
         //   TimeLimiter's abort, a caller interrupt.
         // Success criteria: the worker fails with an InterruptedIOException and keeps its interrupt flag; the
         //   task, which honours an interrupt as Reactor's block() does, is interrupted too and ends.
-        // Why it matters: the interrupt reached Spring's block() directly before the head was handed off, which
-        //   cancels the subscription and with it the exchange. Handed off, the worker must pass it on, or the
-        //   exchange would keep its connection until the response timeout.
+        // Why it matters: an interrupt that reaches Spring's block() directly cancels the subscription and with
+        //   it the exchange. With the head handed off, the interrupt reaches the worker instead, which must pass
+        //   it on, or the exchange would keep its connection until the response timeout.
         //
         // Given
         val started = CountDownLatch(1)

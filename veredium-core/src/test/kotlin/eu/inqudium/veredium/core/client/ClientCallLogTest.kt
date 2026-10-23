@@ -37,8 +37,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * against the stand-in verdicts of [TestVerdicts] and a Logback [ListAppender] on a logger of this test's own,
  * so no HTTP stack is needed and every line can be read back with its level, cause and key-value pairs.
  *
- * Both client suites run this class end to end, but JaCoCo measures per module, so without this test the core
- * reported it at 0 % - and the level policy, the one rule here an alert depends on, was pinned only indirectly.
+ * Both client suites run this class end to end, but JaCoCo measures per module, so this test is what covers it in
+ * the core - and what pins the level policy, the one rule here an alert depends on, directly rather than through
+ * a client stack.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ClientCallLogTest {
@@ -80,9 +81,9 @@ class ClientCallLogTest {
             // Success criteria: exactly one line, at DEBUG, with NO cause attached, naming the backend and the
             //   error itself in its text, and carrying the attempt's numbers.
             // Why it matters: the severity follows the breaker's own classification. A 404 that the adapter
-            //   contract declares as a normal outcome at WARN with a stack trace is what made routine "not found"
-            //   answers indistinguishable from outages - and the reactive stack once lost exactly the "no cause"
-            //   half of this when it folded the two branches into one helper.
+            //   contract declares as a normal outcome, logged at WARN with a stack trace, makes routine "not found"
+            //   answers indistinguishable from outages - and the "no cause" half is the one a helper folding the two
+            //   branches into one loses first, so it is asserted on its own.
             //
             // Given
             val log = callLog()

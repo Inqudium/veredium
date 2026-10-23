@@ -79,73 +79,6 @@ class ResilientRestClientFactoryBuilderWiringTest {
         }
     }
 
-    /**
-     * The factory's collaborators, registered the way a host's context would hold them - minus everything the
-     * test does not exercise. Boot's auto-configuration is NOT part of this: each case adds what it needs.
-     */
-    private fun factoryContext(
-        observationEnabled: Boolean,
-        meterRegistry: SimpleMeterRegistry,
-    ): ApplicationContextRunner {
-        val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
-        // Generous on purpose: the wiring is the subject, the call must never time out.
-        val timeLimiters = TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build())
-        val bulkheads = BulkheadRegistry.ofDefaults()
-        return ApplicationContextRunner()
-            .withBean(
-                RestClientProperties::class.java,
-                Supplier {
-                    RestClientProperties(
-                        observability = RestClientProperties.Observability(httpObservationEnabled = observationEnabled),
-                    )
-                },
-            ).withBean(
-                MeshProperties::class.java,
-                Supplier {
-                    MeshProperties(
-                        defaults =
-                            MeshProperties.Defaults(
-                                individualRequestTimeoutMs = 1000,
-                                transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl()),
-                            ),
-                        endpoints = listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/$BACKEND", alias = BACKEND)),
-                    )
-                },
-            ).withBean(CircuitBreakerRegistry::class.java, Supplier { circuitBreakers })
-            .withBean(TimeLimiterRegistry::class.java, Supplier { timeLimiters })
-            .withBean(BulkheadRegistry::class.java, Supplier { bulkheads })
-            // Built here rather than through RestClientConfiguration, which would also import the core's mesh
-            // wiring - whose guard needs Resilience4j's auto-configuration this hand-assembled context leaves out.
-            .withBean(
-                BlockingResilienceDecorator::class.java,
-                Supplier { BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, workerNamePrefix = RestClientConfiguration.WORKER_NAME_PREFIX) },
-            ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
-            // A recording registry: every observation lands as a meter in the SimpleMeterRegistry, which is what
-            // the host's actuator ObservationAutoConfiguration does with its MeterRegistry.
-            .withBean(
-                ObservationRegistry::class.java,
-                Supplier {
-                    ObservationRegistry.create().apply {
-                        observationConfig().observationHandler(DefaultMeterObservationHandler(meterRegistry))
-                    }
-                },
-            ).withBean(ResilientRestClientFactory::class.java)
-    }
-
-    /** Boot's RestClient auto-configuration, which provides the builder bean and the observation customizer. */
-    private fun ApplicationContextRunner.withBootsRestClientAutoConfiguration(): ApplicationContextRunner =
-        withConfiguration(
-            AutoConfigurations.of(
-                RestClientAutoConfiguration::class.java,
-                RestClientObservationAutoConfiguration::class.java,
-            ),
-        )
-
-    /** One GET against the probe endpoint through a client of the context's factory. */
-    private fun probeThrough(factory: ResilientRestClientFactory) {
-        factory.create(BACKEND).get(Map::class.java) { it.uri(PROBE_PATH) }
-    }
-
     @Nested
     inner class `Host customizers` {
         @Test
@@ -249,5 +182,76 @@ class ResilientRestClientFactoryBuilderWiringTest {
                         .hasMessageContainingAll("RestClient\$Builder", "'resilientRestClientFactory'")
                 }
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
+    /**
+     * The factory's collaborators, registered the way a host's context would hold them - minus everything the
+     * test does not exercise. Boot's auto-configuration is NOT part of this: each case adds what it needs.
+     */
+    private fun factoryContext(
+        observationEnabled: Boolean,
+        meterRegistry: SimpleMeterRegistry,
+    ): ApplicationContextRunner {
+        val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+        // Generous on purpose: the wiring is the subject, the call must never time out.
+        val timeLimiters = TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build())
+        val bulkheads = BulkheadRegistry.ofDefaults()
+        return ApplicationContextRunner()
+            .withBean(
+                RestClientProperties::class.java,
+                Supplier {
+                    RestClientProperties(
+                        observability = RestClientProperties.Observability(httpObservationEnabled = observationEnabled),
+                    )
+                },
+            ).withBean(
+                MeshProperties::class.java,
+                Supplier {
+                    MeshProperties(
+                        defaults =
+                            MeshProperties.Defaults(
+                                individualRequestTimeoutMs = 1000,
+                                transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl()),
+                            ),
+                        endpoints = listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/$BACKEND", alias = BACKEND)),
+                    )
+                },
+            ).withBean(CircuitBreakerRegistry::class.java, Supplier { circuitBreakers })
+            .withBean(TimeLimiterRegistry::class.java, Supplier { timeLimiters })
+            .withBean(BulkheadRegistry::class.java, Supplier { bulkheads })
+            // Built here rather than through RestClientConfiguration, which would also import the core's mesh
+            // wiring - whose guard needs Resilience4j's auto-configuration this hand-assembled context leaves out.
+            .withBean(
+                BlockingResilienceDecorator::class.java,
+                Supplier { BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, workerNamePrefix = RestClientConfiguration.WORKER_NAME_PREFIX) },
+            ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
+            // A recording registry: every observation lands as a meter in the SimpleMeterRegistry, which is what
+            // the host's actuator ObservationAutoConfiguration does with its MeterRegistry.
+            .withBean(
+                ObservationRegistry::class.java,
+                Supplier {
+                    ObservationRegistry.create().apply {
+                        observationConfig().observationHandler(DefaultMeterObservationHandler(meterRegistry))
+                    }
+                },
+            ).withBean(ResilientRestClientFactory::class.java)
+    }
+
+    /** Boot's RestClient auto-configuration, which provides the builder bean and the observation customizer. */
+    private fun ApplicationContextRunner.withBootsRestClientAutoConfiguration(): ApplicationContextRunner =
+        withConfiguration(
+            AutoConfigurations.of(
+                RestClientAutoConfiguration::class.java,
+                RestClientObservationAutoConfiguration::class.java,
+            ),
+        )
+
+    /** One GET against the probe endpoint through a client of the context's factory. */
+    private fun probeThrough(factory: ResilientRestClientFactory) {
+        factory.create(BACKEND).get(Map::class.java) { it.uri(PROBE_PATH) }
     }
 }

@@ -74,6 +74,8 @@
 
     <modules>
         <module>veredium-core</module>
+        <!-- Build-only: the test helpers the client modules share, never published (see its pom). -->
+        <module>veredium-test-support</module>
         <module>veredium-restclient</module>
         <module>veredium-webclient</module>
         <!-- Build-only: the cross-module coverage report, never published (see its pom). -->
@@ -660,9 +662,10 @@
                         <extensions>true</extensions>
                         <configuration>
                             <publishingServerId>central</publishingServerId>
-                            <!-- The build-only coverage module is no artefact of the library. -->
+                            <!-- The build-only modules are no artefacts of the library. -->
                             <excludeArtifacts>
                                 <artifact>veredium-coverage</artifact>
+                                <artifact>veredium-test-support</artifact>
                             </excludeArtifacts>
                             <!-- Uploads and validates the bundle but waits for a manual "Publish"
                                  click in the Central Portal; set to true for hands-off releases. -->

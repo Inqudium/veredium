@@ -9,12 +9,14 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.veredium.core.Veredium
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
+import eu.inqudium.veredium.testsupport.WireMockArrivals
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -34,9 +36,7 @@ import org.springframework.web.client.RestClient
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.function.Supplier
 
@@ -59,15 +59,8 @@ class RestClientEngineIsolationTest {
 
         private lateinit var wireMock: WireMockServer
 
-        /**
-         * What a request to a URL triggers once it reached WireMock, per test ([arrivalOf]) - behind ONE listener for
-         * the class, registered with the server: `resetAll()` does not remove a request listener, so one added per
-         * test would pile up and fire for a later test's request to the same URL. Cleared before every test.
-         */
-        private val arrivals = ConcurrentHashMap<String, () -> Unit>()
-
-        /** A latch that opens once a request to [url] reached WireMock in the current test. */
-        private fun arrivalOf(url: String): CountDownLatch = CountDownLatch(1).also { latch -> arrivals[url] = latch::countDown }
+        /** What a request to a URL triggers once it reached WireMock, per test - the class's one listener on the server. */
+        private val arrivals = WireMockArrivals()
 
         @JvmStatic
         @BeforeAll
@@ -75,7 +68,7 @@ class RestClientEngineIsolationTest {
             wireMock =
                 WireMockServer(wireMockConfig().dynamicPort())
                     .apply { start() }
-                    .also { server -> server.addMockServiceRequestListener { request, _ -> arrivals[request.url]?.invoke() } }
+                    .also { server -> server.addMockServiceRequestListener(arrivals) }
         }
 
         @JvmStatic
@@ -85,12 +78,19 @@ class RestClientEngineIsolationTest {
         }
     }
 
+    private val callers = Executors.newVirtualThreadPerTaskExecutor()
+
     @BeforeEach
     fun resetStubs() {
         wireMock.resetAll()
         arrivals.clear()
         wireMock.stubFor(get(urlEqualTo("/host")).willReturn(okJson("""{"message":"host"}""")))
         wireMock.stubFor(get(urlEqualTo("/module")).willReturn(okJson("""{"message":"module"}""")))
+    }
+
+    @AfterEach
+    fun tearDown() {
+        callers.shutdownNow()
     }
 
     @ParameterizedTest
@@ -227,9 +227,9 @@ class RestClientEngineIsolationTest {
         factory: ResilientRestClientFactory,
         transport: EngineTransport,
     ): Int? {
-        val arrived = arrivalOf("/held")
+        val arrived = arrivals.arrivalOf("/held")
         wireMock.stubFor(get(urlEqualTo("/held")).willReturn(okJson("""{"message":"held"}""").withFixedDelay(500)))
-        val call = CompletableFuture.supplyAsync { factory.create(BACKEND).get(Map::class.java) { it.uri("/held") } }
+        val call = callers.submit<Any> { factory.create(BACKEND).get(Map::class.java) { it.uri("/held") } }
         assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the held call must have reached the backend").isTrue()
         val inUse = transport.connectionsInUse()
         call.get(5, TimeUnit.SECONDS)

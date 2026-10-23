@@ -18,7 +18,8 @@ class VerediumTest {
         // Success criteria: the constant equals the lowercase project name.
         // Why it matters: the name is part of the operator-facing contract (logger names, artifact
         //   ids, the User-Agent token); a drift would rename what dashboards and log filters key on.
-        // Given/When/Then
+        //
+        // Given / When / Then
         assertThat(Veredium.NAME).isEqualTo("veredium")
     }
 
@@ -28,7 +29,8 @@ class VerediumTest {
         // Success criteria: `veredium/<version>`, name and version joined by a single slash.
         // Why it matters: the token is what a peer's access log shows for this client; the
         //   `product/version` shape is the one RFC 9110 defines, and operators grep for it.
-        // Given/When/Then
+        //
+        // Given / When / Then
         assertThat(Veredium.userAgent("1.2.3")).isEqualTo("veredium/1.2.3")
     }
 
@@ -41,7 +43,8 @@ class VerediumTest {
         // Success criteria: the bare name, without a trailing slash.
         // Why it matters: `veredium/` with nothing after the slash is not a valid product token;
         //   a peer that validates the header would reject the call for a cosmetic reason.
-        // Given/When/Then
+        //
+        // Given / When / Then
         assertThat(Veredium.userAgent(version)).isEqualTo("veredium")
     }
 
@@ -53,7 +56,8 @@ class VerediumTest {
         //   what every IDE run and this suite see.
         // Why it matters: the property must not throw outside a jar, where there is no manifest,
         //   and the public token must agree with the internal rule it delegates to.
-        // Given/When/Then
+        //
+        // Given / When / Then
         assertThat(Veredium.version).isNull()
         assertThat(Veredium.userAgent()).isEqualTo("veredium")
     }
@@ -63,7 +67,8 @@ class VerediumTest {
         // What is tested: the default of the clients' user-agent property - null means the library names itself.
         // Success criteria: the resolved token is exactly what userAgent() returns.
         // Why it matters: a host that says nothing must not end up with an empty header or the transport's own.
-        // Given/When/Then
+        //
+        // Given / When / Then
         assertThat(Veredium.resolveUserAgent(null, "app.x.user-agent")).isEqualTo(Veredium.userAgent())
     }
 
@@ -73,7 +78,8 @@ class VerediumTest {
         // Success criteria: the configured value is returned with surrounding whitespace removed, nothing added.
         // Why it matters: the token goes on the wire as the host wrote it - a library prefix nobody asked for
         //   would defeat the purpose of overriding it.
-        // Given/When/Then
+        //
+        // Given / When / Then
         assertThat(Veredium.resolveUserAgent("  my-service/2.3 ", "app.x.user-agent")).isEqualTo("my-service/2.3")
     }
 
@@ -84,7 +90,8 @@ class VerediumTest {
         // Success criteria: an IllegalArgumentException whose message names the property key.
         // Why it matters: a blank header or a CR/LF in it fails every call with a transport error that points
         //   nowhere near the configuration; the key in the message is what the reader has to edit.
-        // Given/When/Then
+        //
+        // Given / When / Then
         assertThatThrownBy { Veredium.resolveUserAgent(configured, "app.x.user-agent") }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContaining("app.x.user-agent")

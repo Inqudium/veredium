@@ -1,6 +1,11 @@
 package eu.inqudium.veredium.core.resilience
 
-import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.resilience.TestMesh.ACCOUNTS_ALIAS
+import eu.inqudium.veredium.core.resilience.TestMesh.ACCOUNTS_TRIPLET
+import eu.inqudium.veredium.core.resilience.TestMesh.PAYMENTS_ALIAS
+import eu.inqudium.veredium.core.resilience.TestMesh.PAYMENTS_TRIPLET
+import eu.inqudium.veredium.core.resilience.TestMesh.ignores
+import eu.inqudium.veredium.core.resilience.TestMesh.propsFor
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import org.assertj.core.api.Assertions.assertThat
@@ -28,11 +33,8 @@ import java.util.concurrent.TimeoutException
  * so tightening the policy stays a one-line change.
  */
 class HttpExchangeErrorPolicyTest {
-    private val alias = "api-example-com-GET-accounts"
-    private val triplet = "/endpoint/api.example.com/GET/accounts/{accountId}"
-
     @Nested
-    inner class Policy {
+    inner class `The policy` {
         @Test
         fun `should read nothing but a response exception of its stack as a client error`() {
             // What is tested: the one thing the stack supplies - the status reader - and what the rule does with a
@@ -68,7 +70,7 @@ class HttpExchangeErrorPolicyTest {
     }
 
     @Nested
-    inner class Customization {
+    inner class `The customized breaker` {
         @Test
         fun `should record a benign 4xx as a success so a business case cannot open the breaker`() {
             // What is tested: that the statuses the adapter contract documents as normal outcomes - a 404 for
@@ -78,7 +80,7 @@ class HttpExchangeErrorPolicyTest {
             // Why it matters: a healthy backend returns 4xx for bad requests all day. Counting those toward the
             //   failure rate lets a 404-heavy lookup open the circuit against a backend that is perfectly up -
             //   a self-inflicted outage caused by ordinary business traffic.
-
+            //
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
 
@@ -102,7 +104,7 @@ class HttpExchangeErrorPolicyTest {
             //   wrong is invisible: the breaker would sit blind through exactly the two conditions it exists to
             //   react to - a backend timing out under load and a backend shedding load. A 408/429 burst would
             //   never open the circuit, so retries keep hammering a backend that is already asking for relief.
-
+            //
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
 
@@ -147,10 +149,10 @@ class HttpExchangeErrorPolicyTest {
             // Why it matters: the customizer shapes a config it does not own. Clobbering the operator's list
             //   would silently re-arm the breaker against errors they deliberately excluded - visible to them
             //   only as unexplained open circuits.
-
+            //
             // Given: what YAML produced already ignores an exception of the operator's choosing
             val registry = CircuitBreakerRegistry.ofDefaults()
-            registry.circuitBreaker(alias, CircuitBreakerConfig.custom().ignoreExceptions(IllegalStateException::class.java).build())
+            registry.circuitBreaker(ACCOUNTS_ALIAS, CircuitBreakerConfig.custom().ignoreExceptions(IllegalStateException::class.java).build())
 
             // When
             CustomizedRegistries.circuitBreakers(registry, propsFor())
@@ -169,25 +171,17 @@ class HttpExchangeErrorPolicyTest {
             //   derived alias.
             // Why it matters: one customizer is registered per alias; a backend left without the rule would open
             //   its circuit on ordinary 404 traffic while its siblings stay closed.
-
+            //
             // Given: two endpoints, so there is one customizer per alias rather than a single one
             val registry = CircuitBreakerRegistry.ofDefaults()
-            val props =
-                MeshProperties(
-                    defaults = MeshProperties.Defaults(individualRequestTimeoutMs = 1000),
-                    endpoints =
-                        listOf(
-                            MeshProperties.EndpointConfig(triplet),
-                            MeshProperties.EndpointConfig("/endpoint/api.example.com/POST/payments"),
-                        ),
-                )
+            val props = propsFor(PAYMENTS_TRIPLET)
 
             // When
             CustomizedRegistries.circuitBreakers(registry, props)
 
             // Then: every derived alias carries the rule
             assertThat(countsAsFailure(registry, TestResponseException(404))).isFalse()
-            assertThat(countsAsFailure(registry, TestResponseException(404), alias = "api-example-com-POST-payments")).isFalse()
+            assertThat(countsAsFailure(registry, TestResponseException(404), alias = PAYMENTS_ALIAS)).isFalse()
         }
 
         @Test
@@ -198,11 +192,11 @@ class HttpExchangeErrorPolicyTest {
             // Why it matters: the toggle governs only whether mesh DERIVES the slow-call knobs; the breaker is in
             //   the call path unconditionally. Gating this verdict on it would leave the invariant unmet in
             //   exactly the default configuration - the one that ships.
-
+            //
             // Given: mesh defaults, i.e. the toggle off
             val registry = CircuitBreakerRegistry.ofDefaults()
             val props = propsFor()
-            assertThat(props.resolveAll().getValue(triplet).circuitBreakerEnabled).isFalse()
+            assertThat(props.resolveAll().getValue(ACCOUNTS_TRIPLET).circuitBreakerEnabled).isFalse()
 
             // When
             CustomizedRegistries.circuitBreakers(registry, props)
@@ -218,9 +212,9 @@ class HttpExchangeErrorPolicyTest {
             //   ignored, and a 5xx or a 429 is recorded.
             // Success criteria: four probes, each landing in its own row of the three-verdict table.
             // Why it matters: the two verdicts answer different questions ("did the backend answer?" versus
-            //   "does the call carry evidence at all?") and used to be two contributors; folding them into one
-            //   customizer must not fold the answers into one.
-
+            //   "does the call carry evidence at all?"); one customizer installs both, and it must not fold the
+            //   answers into one.
+            //
             // Given / When
             val registry = CircuitBreakerRegistry.ofDefaults()
             CustomizedRegistries.circuitBreakers(registry, propsFor())
@@ -239,39 +233,21 @@ class HttpExchangeErrorPolicyTest {
     // Helpers
     // ---------------------------------------------------------------------------
 
-    /** Whether the registered instance's config classifies [error] as ignorable (not a backend failure). */
-    private fun ignores(
-        registry: CircuitBreakerRegistry,
-        error: Throwable,
-        alias: String = this.alias,
-    ): Boolean =
-        registry
-            .circuitBreaker(alias)
-            .circuitBreakerConfig.ignoreExceptionPredicate
-            .test(error)
-
     /**
      * Whether the breaker would charge [error] to the backend.
      *
      * Reads the RECORD predicate, which is the whole point of this verdict: a benign 4xx must come back `false`
      * here - not recorded, therefore counted as a SUCCESS and entering the sliding window as one. Asserting
-     * through [ignores] instead would pass for a benign 4xx that was merely kept out of the window, which is
+     * through [TestMesh.ignores] instead would pass for a benign 4xx that was merely kept out of the window, which is
      * the behaviour this verdict was built to avoid.
      */
     private fun countsAsFailure(
         registry: CircuitBreakerRegistry,
         error: Throwable,
-        alias: String = this.alias,
+        alias: String = ACCOUNTS_ALIAS,
     ): Boolean =
         registry
             .circuitBreaker(alias)
             .circuitBreakerConfig.recordExceptionPredicate
             .test(error)
-
-    /** Props for the single accounts endpoint, mesh defaults otherwise. */
-    private fun propsFor(): MeshProperties =
-        MeshProperties(
-            defaults = MeshProperties.Defaults(individualRequestTimeoutMs = 1000),
-            endpoints = listOf(MeshProperties.EndpointConfig(triplet)),
-        )
 }

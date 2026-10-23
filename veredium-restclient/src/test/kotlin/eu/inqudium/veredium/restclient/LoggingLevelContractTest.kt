@@ -1,7 +1,8 @@
 package eu.inqudium.veredium.restclient
 
-import eu.inqudium.veredium.restclient.ConfigurationFiles.FIXTURE
-import eu.inqudium.veredium.restclient.ConfigurationFiles.REFERENCE
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
+import eu.inqudium.veredium.testsupport.ConfigurationFiles.FIXTURE
+import eu.inqudium.veredium.testsupport.ConfigurationFiles.REFERENCE
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -25,10 +26,10 @@ import org.junit.jupiter.params.provider.ValueSource
  * 3. Why it matters: the exchange logger's name is a literal in two places of the SAME file - the level key and
  *    the library property - and nothing but this test relates them. A mismatch leaves the level addressing
  *    nothing, silently: the stream then inherits the root level, and the operational knob "WARN = only
- *    failures, timeouts and slow calls" filters nothing. The reference file carried exactly that drift for a
- *    while (`adapter-http-exchange: INFO` next to `logger-name: adapter-http-exchange`), unseen because the test
- *    bound the fixture alone; it also carried the origin project's `com.ing: DEBUG`, a level for classes that
- *    do not exist here. And the `adapter-logging` values are what the runbook's queries assume - the Host header
+ *    failures, timeouts and slow calls" filters nothing. Such a drift in the reference file (a level key that
+ *    differs from `logger-name` by one segment) is invisible to a test bound to the fixture alone, and so is a
+ *    level for the origin project's package (`com.ing`), whose classes do not exist here - hence both files.
+ *    And the `adapter-logging` values are what the runbook's queries assume - the Host header
  *    readable, the token a fingerprint, the error body present - so a drift there is a runbook that stops
  *    answering, not a build that fails.
  */
@@ -142,7 +143,7 @@ class LoggingLevelContractTest {
             // Success criteria: both directions `on-failure`, `max-body-bytes` 16384.
             // Why it matters: logging every body of every call would put customer data on every line;
             //   `on-failure` keeps the error body the runbook needs and drops the rest, and 16384 - the library
-            //   default - is written out so the cap is reviewable. The REFERENCE file currently says `always`, a
+            //   default - is written out so the cap is reviewable. The body mode of the REFERENCE file is a
             //   rollout posture and a value an operator tunes, which is why it is not pinned there
             //   (LegatiumExchangeLoggingIntegrationTest reads the reference mode as it is).
             //

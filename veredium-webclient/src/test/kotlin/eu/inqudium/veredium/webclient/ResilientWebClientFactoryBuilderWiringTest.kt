@@ -43,12 +43,12 @@ import java.util.function.Supplier
  *    `http.client.requests` meter appears in a `SimpleMeterRegistry` behind the context's `ObservationRegistry`
  *    when the toggle is on and does NOT appear when it is off; and the builder-less context's startup failure
  *    names `WebClient.Builder`.
- * 3. Why it matters: before this wiring the factory built on `WebClient.builder()` and reimplemented the one
- *    piece of Boot's wiring it needed (the registry). Every other customizer - a host correlation header, a
- *    custom observation convention, Boot's codec settings - reached every WebClient of the host except these.
- *    And a Kotlin default on the parameter would have let Spring treat the bean as optional, so a host that
- *    excluded `WebClientAutoConfiguration` would have lost its CLIENT span without a log line. Both are
- *    invisible at runtime; only a context test pins them.
+ * 3. Why it matters: a factory built on `WebClient.builder()` would have to reimplement the one piece of Boot's
+ *    wiring it needs (the registry), and every other customizer - a host correlation header, a custom
+ *    observation convention, Boot's codec settings - would reach every WebClient of the host except these.
+ *    And a Kotlin default on the parameter would let Spring treat the bean as optional, so a host that
+ *    excluded `WebClientAutoConfiguration` would lose its CLIENT span without a log line. Both are invisible
+ *    at runtime; only a context test pins them.
  *
  * The contexts are driven with an [ApplicationContextRunner] - a real Spring context, no mocks - and the
  * backend is a local WireMock on a dynamic port, as in `ResilientWebClientIntegrationTest`. No inner
@@ -79,73 +79,6 @@ class ResilientWebClientFactoryBuilderWiringTest {
         }
     }
 
-    /**
-     * The factory's collaborators, registered the way a host's context would hold them - minus everything the
-     * test does not exercise. Boot's auto-configuration is NOT part of this: each case adds what it needs.
-     */
-    private fun factoryContext(
-        observationEnabled: Boolean,
-        meterRegistry: SimpleMeterRegistry,
-    ): ApplicationContextRunner =
-        ApplicationContextRunner()
-            .withBean(
-                WebClientProperties::class.java,
-                Supplier {
-                    WebClientProperties(
-                        observability = WebClientProperties.Observability(httpObservationEnabled = observationEnabled),
-                    )
-                },
-            ).withBean(
-                MeshProperties::class.java,
-                Supplier {
-                    MeshProperties(
-                        defaults = MeshProperties.Defaults(individualRequestTimeoutMs = 1000),
-                        endpoints =
-                            listOf(
-                                MeshProperties.EndpointConfig(
-                                    triplet = "/endpoint/localhost/GET/$BACKEND",
-                                    alias = BACKEND,
-                                    baseUrl = wireMock.baseUrl(),
-                                ),
-                            ),
-                    )
-                },
-            ).withBean(
-                ReactiveResilienceDecorator::class.java,
-                Supplier {
-                    ReactiveResilienceDecorator(
-                        CircuitBreakerRegistry.ofDefaults(),
-                        // Generous on purpose: the wiring is the subject, the call must never time out.
-                        TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build()),
-                        BulkheadRegistry.ofDefaults(),
-                    )
-                },
-            ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
-            // A recording registry: every observation lands as a meter in the SimpleMeterRegistry, which is what
-            // the host's actuator ObservationAutoConfiguration does with its MeterRegistry.
-            .withBean(
-                ObservationRegistry::class.java,
-                Supplier {
-                    ObservationRegistry.create().apply {
-                        observationConfig().observationHandler(DefaultMeterObservationHandler(meterRegistry))
-                    }
-                },
-            ).withBean(ResilientWebClientFactory::class.java)
-
-    /** Boot's WebClient auto-configuration, which provides the builder bean and the observation customizer. */
-    private fun ApplicationContextRunner.withBootsWebClientAutoConfiguration(): ApplicationContextRunner =
-        withConfiguration(
-            AutoConfigurations.of(
-                WebClientAutoConfiguration::class.java,
-                WebClientObservationAutoConfiguration::class.java,
-            ),
-        )
-
-    /** One GET against the probe endpoint through a client of the context's factory. */
-    private fun probeThrough(factory: ResilientWebClientFactory) {
-        factory.create(BACKEND).get(Map::class.java) { it.uri(PROBE_PATH) }.block()
-    }
-
     @Nested
     inner class `Host customizers` {
         @Test
@@ -153,9 +86,9 @@ class ResilientWebClientFactoryBuilderWiringTest {
             // What is tested: that a host's own WebClientCustomizer reaches the clients of this factory.
             // Success criteria: the marker header the customizer sets as a default header arrives at WireMock
             //   on a request made through a client of the context's factory.
-            // Why it matters: before the factory cloned Boot's builder, every customizer of the host - a
-            //   correlation header, a custom observation convention, Boot's codec settings - reached every
-            //   WebClient of the host except these, and nothing at runtime said so.
+            // Why it matters: a factory that did not clone Boot's builder would let every customizer of the host -
+            //   a correlation header, a custom observation convention, Boot's codec settings - reach every
+            //   WebClient of the host except these, and nothing at runtime would say so.
             //
             // Given: Boot's auto-configuration plus a host WebClientCustomizer bean that sets a marker header
             wireMock.resetRequests()
@@ -183,8 +116,8 @@ class ResilientWebClientFactoryBuilderWiringTest {
             //   builder survives into the factory's clients when the module toggle is on.
             // Success criteria: one request produces an `http.client.requests` timer with count 1 in the meter
             //   registry behind the context's ObservationRegistry.
-            // Why it matters: the factory no longer wires the registry itself; if Boot's did not arrive either,
-            //   the client span would vanish without a log line.
+            // Why it matters: the factory does not wire the registry itself; if Boot's did not arrive, the client
+            //   span would vanish without a log line.
             //
             // Given: the toggle ON, an ObservationRegistry bean, and Boot's ObservationWebClientCustomizer
             val meterRegistry = SimpleMeterRegistry()
@@ -251,5 +184,76 @@ class ResilientWebClientFactoryBuilderWiringTest {
                         .hasMessageContainingAll("WebClient\$Builder", "'resilientWebClientFactory'")
                 }
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
+    /**
+     * The factory's collaborators, registered the way a host's context would hold them - minus everything the
+     * test does not exercise. Boot's auto-configuration is NOT part of this: each case adds what it needs.
+     */
+    private fun factoryContext(
+        observationEnabled: Boolean,
+        meterRegistry: SimpleMeterRegistry,
+    ): ApplicationContextRunner =
+        ApplicationContextRunner()
+            .withBean(
+                WebClientProperties::class.java,
+                Supplier {
+                    WebClientProperties(
+                        observability = WebClientProperties.Observability(httpObservationEnabled = observationEnabled),
+                    )
+                },
+            ).withBean(
+                MeshProperties::class.java,
+                Supplier {
+                    MeshProperties(
+                        defaults = MeshProperties.Defaults(individualRequestTimeoutMs = 1000),
+                        endpoints =
+                            listOf(
+                                MeshProperties.EndpointConfig(
+                                    triplet = "/endpoint/localhost/GET/$BACKEND",
+                                    alias = BACKEND,
+                                    baseUrl = wireMock.baseUrl(),
+                                ),
+                            ),
+                    )
+                },
+            ).withBean(
+                ReactiveResilienceDecorator::class.java,
+                Supplier {
+                    ReactiveResilienceDecorator(
+                        CircuitBreakerRegistry.ofDefaults(),
+                        // Generous on purpose: the wiring is the subject, the call must never time out.
+                        TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build()),
+                        BulkheadRegistry.ofDefaults(),
+                    )
+                },
+            ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
+            // A recording registry: every observation lands as a meter in the SimpleMeterRegistry, which is what
+            // the host's actuator ObservationAutoConfiguration does with its MeterRegistry.
+            .withBean(
+                ObservationRegistry::class.java,
+                Supplier {
+                    ObservationRegistry.create().apply {
+                        observationConfig().observationHandler(DefaultMeterObservationHandler(meterRegistry))
+                    }
+                },
+            ).withBean(ResilientWebClientFactory::class.java)
+
+    /** Boot's WebClient auto-configuration, which provides the builder bean and the observation customizer. */
+    private fun ApplicationContextRunner.withBootsWebClientAutoConfiguration(): ApplicationContextRunner =
+        withConfiguration(
+            AutoConfigurations.of(
+                WebClientAutoConfiguration::class.java,
+                WebClientObservationAutoConfiguration::class.java,
+            ),
+        )
+
+    /** One GET against the probe endpoint through a client of the context's factory. */
+    private fun probeThrough(factory: ResilientWebClientFactory) {
+        factory.create(BACKEND).get(Map::class.java) { it.uri(PROBE_PATH) }.block()
     }
 }

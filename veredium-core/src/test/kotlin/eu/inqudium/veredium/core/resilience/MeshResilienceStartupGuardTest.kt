@@ -6,6 +6,11 @@ import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.resilience.TestMesh.ACCOUNTS_ALIAS
+import eu.inqudium.veredium.core.resilience.TestMesh.ACCOUNTS_TRIPLET
+import eu.inqudium.veredium.core.resilience.TestMesh.PAYMENTS_ALIAS
+import eu.inqudium.veredium.core.resilience.TestMesh.PAYMENTS_TRIPLET
+import eu.inqudium.veredium.core.resilience.TestMesh.propsFor
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.bulkhead.BulkheadRegistry
@@ -39,11 +44,6 @@ import java.time.Duration
  * omission ends the start and the message names the key - rather than about the knobs themselves.
  */
 class MeshResilienceStartupGuardTest {
-    private val alias = "api-example-com-GET-accounts"
-    private val triplet = "/endpoint/api.example.com/GET/accounts/{accountId}"
-    private val secondAlias = "api-example-com-POST-payments"
-    private val secondTriplet = "/endpoint/api.example.com/POST/payments"
-
     private val guardLogger = LoggerFactory.getLogger(MeshResilienceStartupGuard::class.java) as Logger
     private val appender =
         ListAppender<ILoggingEvent>().apply {
@@ -58,7 +58,7 @@ class MeshResilienceStartupGuardTest {
     }
 
     @Nested
-    inner class Passing {
+    inner class `A healthy wiring` {
         @Test
         fun `should pass when every alias is declared and the customizers reached their instances`() {
             // What is tested: the healthy case - all three layers declare the alias, the instances exist, and the
@@ -68,7 +68,7 @@ class MeshResilienceStartupGuardTest {
             // Why it matters: a guard that failed the healthy start would block every deployment; the log lines
             //   are the only evidence at runtime that the verdicts and the budget are in force, and for WHICH
             //   aliases.
-
+            //
             // Given: properties and registries the way the Boot configuration leaves them
             val props = propsFor()
             val guard = guardOver(props, wired(props))
@@ -77,7 +77,7 @@ class MeshResilienceStartupGuardTest {
             assertThatCode { guard.verify() }.doesNotThrowAnyException()
             val lines = appender.list.filter { it.level == Level.INFO }.map { it.formattedMessage }
             assertThat(lines).hasSize(3)
-            assertThat(lines).allSatisfy { line -> assertThat(line).contains(alias) }
+            assertThat(lines).allSatisfy { line -> assertThat(line).contains(ACCOUNTS_ALIAS) }
             assertThat(lines.single { it.contains("mesh backends") }).contains("timeLimiter=on (1800ms)", "circuitBreaker=off (untouched)")
         }
 
@@ -87,11 +87,11 @@ class MeshResilienceStartupGuardTest {
             //   NOT the client-side failure types - those belong to the sibling policy's line.
             // Success criteria: the line contains both aliases and none of the failure type names.
             // Why it matters: this line is the startup evidence an operator reads to confirm WHICH backends are
-            //   covered by WHICH rule. The reactive stack once filled the single placeholder with the sibling's
-            //   type list and silently dropped the alias; a placeholder/argument mismatch neither fails nor warns.
-
+            //   covered by WHICH rule. A placeholder filled with the sibling's type list silently drops the alias,
+            //   and a placeholder/argument mismatch neither fails nor warns.
+            //
             // Given: two endpoints
-            val props = propsFor(secondTriplet)
+            val props = propsFor(PAYMENTS_TRIPLET)
             val guard = guardOver(props, wired(props))
 
             // When
@@ -99,7 +99,7 @@ class MeshResilienceStartupGuardTest {
 
             // Then
             val line = appender.list.map { it.formattedMessage }.single { it.contains("benign 4xx") }
-            assertThat(line).contains(alias, secondAlias)
+            assertThat(line).contains(ACCOUNTS_ALIAS, PAYMENTS_ALIAS)
             assertThat(line).doesNotContain("BulkheadFullException", "TestBufferLimitException")
         }
 
@@ -111,19 +111,19 @@ class MeshResilienceStartupGuardTest {
             //   the registry, `verify()` throws nothing.
             // Why it matters: a guard that demanded the derived budget regardless of the toggle would make the
             //   opt-out unusable.
-
+            //
             // Given: time-limiter derivation off, a 7s instance
             val props =
                 MeshProperties(
                     defaults = MeshProperties.Defaults(individualRequestTimeoutMs = 1000),
                     endpoints =
                         listOf(
-                            MeshProperties.EndpointConfig(triplet, timeLimiter = MeshProperties.BackendToggleOverride(enabled = false)),
+                            MeshProperties.EndpointConfig(ACCOUNTS_TRIPLET, timeLimiter = MeshProperties.BackendToggleOverride(enabled = false)),
                         ),
                 )
             val wiring = wired(props)
-            wiring.timeLimiters.remove(alias)
-            wiring.timeLimiters.timeLimiter(alias, TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(7)).build())
+            wiring.timeLimiters.remove(ACCOUNTS_ALIAS)
+            wiring.timeLimiters.timeLimiter(ACCOUNTS_ALIAS, TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(7)).build())
 
             // When / Then
             assertThatCode { guardOver(props, wiring).verify() }.doesNotThrowAnyException()
@@ -131,7 +131,7 @@ class MeshResilienceStartupGuardTest {
     }
 
     @Nested
-    inner class Undeclared {
+    inner class `An undeclared instance` {
         @Test
         fun `should fail naming the key when the time limiter of an alias is not declared`() {
             // What is tested: the silent case the guard exists for - the alias has no
@@ -141,16 +141,16 @@ class MeshResilienceStartupGuardTest {
             //   as the only problem, so the registry's instance is not mistaken for a second one.
             // Why it matters: nothing else notices. The instance works, the derived budget is on it, and only
             //   the operator's base config (cancelRunningFuture, the 3s fallback) is silently gone.
-
+            //
             // Given: everything wired, then the declaration removed - the registry instance stays
             val props = propsFor()
             val wiring = wired(props)
-            wiring.timeLimiterProperties.instances.remove(alias)
+            wiring.timeLimiterProperties.instances.remove(ACCOUNTS_ALIAS)
 
             // When / Then
             assertThatThrownBy { guardOver(props, wiring).verify() }
                 .isInstanceOf(IllegalStateException::class.java)
-                .hasMessageContaining("resilience4j.timelimiter.instances.$alias is not declared")
+                .hasMessageContaining("resilience4j.timelimiter.instances.$ACCOUNTS_ALIAS is not declared")
                 .hasMessageContaining("1 problem(s)")
         }
 
@@ -166,12 +166,12 @@ class MeshResilienceStartupGuardTest {
             // Given: everything wired, then the bulkhead declaration and instance removed
             val props = propsFor()
             val wiring = wired(props)
-            wiring.bulkheadProperties.instances.remove(alias)
-            wiring.bulkheads.remove(alias)
+            wiring.bulkheadProperties.instances.remove(ACCOUNTS_ALIAS)
+            wiring.bulkheads.remove(ACCOUNTS_ALIAS)
 
             // When / Then
             assertThatThrownBy { guardOver(props, wiring).verify() }
-                .hasMessageContaining("resilience4j.bulkhead.instances.$alias is not declared")
+                .hasMessageContaining("resilience4j.bulkhead.instances.$ACCOUNTS_ALIAS is not declared")
                 .hasMessageContaining("1 problem(s)")
         }
 
@@ -182,27 +182,27 @@ class MeshResilienceStartupGuardTest {
             //   exception names all six missing declarations and the four missing instances.
             // Why it matters: an operator fixing a deployment should see the whole list once, not one key per
             //   restart.
-
+            //
             // Given: two endpoints, empty properties and registries
-            val props = propsFor(secondTriplet)
+            val props = propsFor(PAYMENTS_TRIPLET)
             val guard = guardOver(props, Wiring())
 
             // When / Then
             assertThatThrownBy { guard.verify() }
                 .hasMessageContaining("10 problem(s)")
-                .hasMessageContaining("resilience4j.circuitbreaker.instances.$alias")
-                .hasMessageContaining("resilience4j.timelimiter.instances.$alias")
-                .hasMessageContaining("resilience4j.bulkhead.instances.$alias")
-                .hasMessageContaining("resilience4j.circuitbreaker.instances.$secondAlias")
-                .hasMessageContaining("resilience4j.timelimiter.instances.$secondAlias")
-                .hasMessageContaining("resilience4j.bulkhead.instances.$secondAlias")
-                .hasMessageContaining("the circuitbreaker '$alias' has no instance in the registry")
-                .hasMessageContaining("the timelimiter '$secondAlias' has no instance in the registry")
+                .hasMessageContaining("resilience4j.circuitbreaker.instances.$ACCOUNTS_ALIAS")
+                .hasMessageContaining("resilience4j.timelimiter.instances.$ACCOUNTS_ALIAS")
+                .hasMessageContaining("resilience4j.bulkhead.instances.$ACCOUNTS_ALIAS")
+                .hasMessageContaining("resilience4j.circuitbreaker.instances.$PAYMENTS_ALIAS")
+                .hasMessageContaining("resilience4j.timelimiter.instances.$PAYMENTS_ALIAS")
+                .hasMessageContaining("resilience4j.bulkhead.instances.$PAYMENTS_ALIAS")
+                .hasMessageContaining("the circuitbreaker '$ACCOUNTS_ALIAS' has no instance in the registry")
+                .hasMessageContaining("the timelimiter '$PAYMENTS_ALIAS' has no instance in the registry")
         }
     }
 
     @Nested
-    inner class Unreached {
+    inner class `An instance the customizer did not reach` {
         @Test
         fun `should fail when the breaker exists but did not receive the verdicts`() {
             // What is tested: the second silent case - a registry on which no customizer ever ran, as a host or a
@@ -211,17 +211,17 @@ class MeshResilienceStartupGuardTest {
             // Success criteria: the check throws and names the breaker as not reached.
             // Why it matters: this is the case where the metrics look like nobody chose the values - because
             //   nobody did.
-
+            //
             // Given: a breaker under the alias, on the registry default
             val props = propsFor()
             val wiring = wired(props)
-            wiring.circuitBreakers.remove(alias)
-            wiring.circuitBreakers.circuitBreaker(alias)
+            wiring.circuitBreakers.remove(ACCOUNTS_ALIAS)
+            wiring.circuitBreakers.circuitBreaker(ACCOUNTS_ALIAS)
 
             // When / Then
             assertThatThrownBy { guardOver(props, wiring).verify() }
-                .hasMessageContaining("the circuitbreaker '$alias' does not ignore a client-side failure")
-                .hasMessageContaining("the circuitbreaker '$alias' records a benign 4xx")
+                .hasMessageContaining("the circuitbreaker '$ACCOUNTS_ALIAS' does not ignore a client-side failure")
+                .hasMessageContaining("the circuitbreaker '$ACCOUNTS_ALIAS' records a benign 4xx")
                 .hasMessageContaining("did not reach it")
         }
 
@@ -233,16 +233,16 @@ class MeshResilienceStartupGuardTest {
             //   1800ms.
             // Why it matters: a budget other than the derived one breaks the ladder's ordering silently - the
             //   caller is released too late (or too early) and nothing but this check compares the two.
-
+            //
             // Given: a 9s instance where the ladder says 1800ms, derivation on
             val props = propsFor()
             val wiring = wired(props)
-            wiring.timeLimiters.remove(alias)
-            wiring.timeLimiters.timeLimiter(alias, TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(9)).build())
+            wiring.timeLimiters.remove(ACCOUNTS_ALIAS)
+            wiring.timeLimiters.timeLimiter(ACCOUNTS_ALIAS, TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(9)).build())
 
             // When / Then
             assertThatThrownBy { guardOver(props, wiring).verify() }
-                .hasMessageContaining("the timelimiter '$alias' has timeoutDuration=9000ms instead of the derived 1800ms")
+                .hasMessageContaining("the timelimiter '$ACCOUNTS_ALIAS' has timeoutDuration=9000ms instead of the derived 1800ms")
         }
 
         @Test
@@ -257,11 +257,11 @@ class MeshResilienceStartupGuardTest {
             // Given: everything wired, then the bulkhead's registry instance removed
             val props = propsFor()
             val wiring = wired(props)
-            wiring.bulkheads.remove(alias)
+            wiring.bulkheads.remove(ACCOUNTS_ALIAS)
 
             // When / Then
             assertThatThrownBy { guardOver(props, wiring).verify() }
-                .hasMessageContaining("the bulkhead '$alias' has no instance in the registry")
+                .hasMessageContaining("the bulkhead '$ACCOUNTS_ALIAS' has no instance in the registry")
                 .hasMessageContaining("1 problem(s)")
         }
 
@@ -273,7 +273,7 @@ class MeshResilienceStartupGuardTest {
             //   60000ms default) fails with exactly one problem naming 60000ms instead of the derived 800ms.
             // Why it matters: verdicts in place prove the customizer ran, not that it applied the derived knobs;
             //   without this check an enabled derivation could be silently missing from the breaker.
-
+            //
             // Given: derivation enabled, but the breaker carries the verdicts and NOT the derived threshold
             val props = propsFor(circuitBreakerEnabled = true)
             val wiring = wired(propsFor()) // customized with the derivation OFF: verdicts present, knobs untouched
@@ -286,7 +286,7 @@ class MeshResilienceStartupGuardTest {
     }
 
     @Nested
-    inner class Overridden {
+    inner class `An overridden verdict` {
         @Test
         fun `should name the record rule, not an unreached registry, when the breaker ignores a client-side failure but records the 404`() {
             // What is tested: the second diagnosis of a breaker that records the benign 4xx - its client-side
@@ -294,29 +294,30 @@ class MeshResilienceStartupGuardTest {
             // Success criteria: exactly one problem, worded as an override that points at the instance's
             //   record-exceptions configuration; the "did not reach it" diagnosis of an unreached registry does
             //   NOT appear.
-            // Why it matters: the two cases have different fixes. When a record-exceptions list composed past the
-            //   customizer (as Resilience4j's build() once did with a class list naming a superclass of the 4xx),
-            //   the former message sent the operator looking for a hand-built registry bean that did not exist.
+            // Why it matters: the two cases have different fixes. Resilience4j's build() OR-s a record-exceptions
+            //   class list back in past the customizer's predicate, so a list naming a superclass of the 4xx
+            //   re-records it; an "unreached registry" message for that case would send the operator looking for
+            //   a hand-built registry bean that does not exist.
             //
             // Given: a breaker that ignores the client-side failure but records everything else, the 404 included
             val props = propsFor()
             val wiring = wired(props)
-            wiring.circuitBreakers.remove(alias)
-            wiring.circuitBreakers.circuitBreaker(alias, CircuitBreakerConfig.custom().ignoreExceptions(BulkheadFullException::class.java).build())
+            wiring.circuitBreakers.remove(ACCOUNTS_ALIAS)
+            wiring.circuitBreakers.circuitBreaker(ACCOUNTS_ALIAS, CircuitBreakerConfig.custom().ignoreExceptions(BulkheadFullException::class.java).build())
 
             // When / Then
             assertThatThrownBy { guardOver(props, wiring).verify() }
                 .isInstanceOf(IllegalStateException::class.java)
                 .hasMessageContaining("1 problem(s)")
-                .hasMessageContaining("the circuitbreaker '$alias' records a benign 4xx (404) as a backend failure although it ignores a client-side failure")
-                .hasMessageContaining("resilience4j.circuitbreaker.instances.$alias")
+                .hasMessageContaining("the circuitbreaker '$ACCOUNTS_ALIAS' records a benign 4xx (404) as a backend failure although it ignores a client-side failure")
+                .hasMessageContaining("resilience4j.circuitbreaker.instances.$ACCOUNTS_ALIAS")
                 .hasMessageContaining("record-exceptions")
                 .hasMessageNotContaining("did not reach it")
         }
     }
 
     @Nested
-    inner class PoolSizing {
+    inner class `The pool sizing` {
         @Test
         fun `should warn naming both numbers and every alias when the bulkheads admit more calls than the pool holds`() {
             // What is tested: the invariant sum(max-concurrent-calls) <= max-connections over the mesh aliases,
@@ -330,10 +331,10 @@ class MeshResilienceStartupGuardTest {
             //   the library checks the invariant the reference configuration asks a host to keep.
             //
             // Given: two endpoints, a pool of 30, bulkheads of 10 and 25
-            val props = propsFor(secondTriplet, maxConnections = 30)
+            val props = propsFor(PAYMENTS_TRIPLET, maxConnections = 30)
             val wiring = wired(props)
-            wiring.bulkheads.remove(alias)
-            wiring.bulkheads.bulkhead(alias, BulkheadConfig.custom().maxConcurrentCalls(10).build())
+            wiring.bulkheads.remove(ACCOUNTS_ALIAS)
+            wiring.bulkheads.bulkhead(ACCOUNTS_ALIAS, BulkheadConfig.custom().maxConcurrentCalls(10).build())
 
             // When
             assertThatCode { guardOver(props, wiring).verify() }.doesNotThrowAnyException()
@@ -343,7 +344,7 @@ class MeshResilienceStartupGuardTest {
             assertThat(warning).hasSize(1)
             assertThat(warning.single())
                 .contains("max-concurrent-calls)=35", "app.mesh.defaults.transport.max-connections=30")
-                .contains("$alias=10", "$secondAlias=25")
+                .contains("$ACCOUNTS_ALIAS=10", "$PAYMENTS_ALIAS=25")
         }
 
         @Test
@@ -355,7 +356,7 @@ class MeshResilienceStartupGuardTest {
             //   correctly sized deployment and teach operators to ignore it.
             //
             // Given
-            val props = propsFor(secondTriplet, maxConnections = 50)
+            val props = propsFor(PAYMENTS_TRIPLET, maxConnections = 50)
 
             // When
             guardOver(props, wired(props)).verify()
@@ -376,15 +377,15 @@ class MeshResilienceStartupGuardTest {
             //   warns about a limit that does not exist - both teach operators to ignore the line.
             //
             // Given
-            val props = propsFor(secondTriplet, maxConnections = 30)
+            val props = propsFor(PAYMENTS_TRIPLET, maxConnections = 30)
             val wiring = wired(props)
-            wiring.bulkheads.remove(alias)
-            wiring.bulkheads.bulkhead(alias, BulkheadConfig.custom().maxConcurrentCalls(10).build())
+            wiring.bulkheads.remove(ACCOUNTS_ALIAS)
+            wiring.bulkheads.bulkhead(ACCOUNTS_ALIAS, BulkheadConfig.custom().maxConcurrentCalls(10).build())
             val pools =
                 listOf(
-                    MeshConnectionPool("apache", 30, setOf(alias, secondAlias)),
-                    MeshConnectionPool("jetty", 30, setOf(secondAlias)),
-                    MeshConnectionPool("jdk", null, setOf(alias, secondAlias)),
+                    MeshConnectionPool("apache", 30, setOf(ACCOUNTS_ALIAS, PAYMENTS_ALIAS)),
+                    MeshConnectionPool("jetty", 30, setOf(PAYMENTS_ALIAS)),
+                    MeshConnectionPool("jdk", null, setOf(ACCOUNTS_ALIAS, PAYMENTS_ALIAS)),
                 )
 
             // When
@@ -394,7 +395,7 @@ class MeshResilienceStartupGuardTest {
             val warning = appender.list.filter { it.level == Level.WARN }.map { it.formattedMessage }
             assertThat(warning).hasSize(1)
             assertThat(warning.single())
-                .contains("connection pool 'apache'", "max-concurrent-calls)=35", "max-connections=30", "$alias=10", "$secondAlias=25")
+                .contains("connection pool 'apache'", "max-concurrent-calls)=35", "max-connections=30", "$ACCOUNTS_ALIAS=10", "$PAYMENTS_ALIAS=25")
         }
     }
 
@@ -446,24 +447,5 @@ class MeshResilienceStartupGuardTest {
             wiring.timeLimiters,
             wiring.bulkheads,
             connectionPools,
-        )
-
-    /**
-     * Props for the accounts endpoint and any [more] triplets; individual=1000 at maxRetries=0 derives
-     * timeLimiter=1800ms and slowCall=800ms. The pool holds [maxConnections] (default 100).
-     */
-    private fun propsFor(
-        vararg more: String,
-        circuitBreakerEnabled: Boolean = false,
-        maxConnections: Int = MeshProperties.Transport().maxConnections,
-    ): MeshProperties =
-        MeshProperties(
-            defaults =
-                MeshProperties.Defaults(
-                    individualRequestTimeoutMs = 1000,
-                    circuitBreaker = MeshProperties.BackendToggle(enabled = circuitBreakerEnabled),
-                    transport = MeshProperties.Transport(maxConnections = maxConnections),
-                ),
-            endpoints = (listOf(triplet) + more).map { MeshProperties.EndpointConfig(it) },
         )
 }

@@ -15,8 +15,8 @@ logging:
         veredium: DEBUG
     # The exchange stream: one event per outbound HTTP exchange, written by legatium-webclient-logging (see the
     # adapter-logging block below). INFO = every call; WARN = only failures, timeouts, cancellations, slow
-    # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Unlike the module's former exchange diary, raising this level FILTERS
-    # the stream instead of switching it off - severity and semantics are decoupled, dashboards key on
+    # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Raising this level FILTERS the
+    # stream instead of switching it off - severity and semantics are decoupled, dashboards key on
     # adapter_outcome. Both names are pinned by LoggingLevelContractTest (in the fixture application-test.yml).
     adapter-http-exchange: INFO
     # The library's own logger: the immediate WARN breadcrumb when a call throws, and errors of the logging
@@ -73,12 +73,12 @@ adapter-logging:
 
 app:
   webclient:
-    # Upper bound on a buffered response body. 256 KB is Spring's own ExchangeStrategies default and replaces
-    # the former 8 KB limit, which rejected a real access-profile list. The bound applies per concurrently
-    # buffered response, so increases must still be chosen deliberately. It no longer bounds what is LOGGED of
-    # a body - that is adapter-logging.max-body-bytes above, an independent number.
+    # Upper bound on a buffered response body. 256 KB is Spring's own ExchangeStrategies default; 8 KB rejects
+    # a real access-profile list. The bound applies per concurrently buffered response, so increases must still
+    # be chosen deliberately. It does not bound what is LOGGED of a body - that is adapter-logging.max-body-bytes
+    # above, an independent number.
     # Applied to the clone of Boot's builder after Boot's codec customizer ran, so it wins over
-    # spring.http.codecs.max-in-memory-size for these clients (webclient-config-guide.md section 1.1).
+    # spring.http.codecs.max-in-memory-size for these clients (webclient-config-guide.md, "max-in-memory-size").
     #
     # A response that exceeds it fails the call with a DataBufferLimitException, wrapped by Spring into a
     # WebClientResponseException reporting 200. That is a CLIENT-side refusal - the backend answered correctly -
@@ -92,7 +92,8 @@ app:
     # spring.http.clients.reactive.connector is neither read nor changed, so the host's other WebClients keep
     # theirs. A key that names no mesh alias, or an engine whose library is missing, fails the start naming the
     # key; jdk also needs the JVM started with -Djdk.httpclient.allowRestrictedHeaders=host (the Host header).
-    # What each engine applies of the mesh transport and pool settings: webclient-config-guide.md section 1.6.
+    # What each engine applies of the mesh transport and pool settings: webclient-config-guide.md, "engine.* — the
+    # HTTP engine".
     engine:
       default: reactor-netty
       endpoints: {}

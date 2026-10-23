@@ -20,6 +20,9 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry
  * operator's YAML said this" - or the registry default; the customizer runs; the result replaces whatever was
  * there. The replacement is the one thing the real path never does (it never has a prior instance), and it is
  * what lets a test register a marker config first and assert what survives the customizer.
+ *
+ * The client modules use the twin in `veredium-test-support`; this copy stays because that module depends on
+ * veredium-core, so a test dependency of the core on it would be a cycle.
  */
 object CustomizedRegistries {
     /** The circuit breaker of [endpoint], customized over [base] (default: the config registered under its alias). */

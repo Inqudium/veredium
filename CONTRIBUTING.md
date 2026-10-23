@@ -107,6 +107,16 @@ the UI with a written reason.
   comment only LOOKS checked, so the CI job rejects it - name the symbol in backticks there, or
   move the sentence into the enclosing declaration's KDoc.
 - Every behavior change needs a test in the module it touches.
+- Test helpers both client modules need (the raw-socket backends, the thread-safe log capture, the
+  bounded `eventually`, the WireMock arrival listener, the configuration-file binding, the test payloads,
+  the customized Resilience4j registries) live in `veredium-test-support`, a build-only module the client
+  modules take at test scope and nothing publishes. A helper that only one module needs stays in that
+  module. `veredium-core`'s own tests cannot use it (the module depends on the core).
+- CI also checks, on test code as on production code, that no `//` comment carries a `[Symbol]` link,
+  cites a guide section by number or cites an assessment report, that no Kotlin source has an unused
+  import (`.github/scripts/check-unused-imports.py`), and that every rationale block has the three labels
+  in order and a bare `//` line before its first stage line
+  (`python3 .github/scripts/generate-test-catalog.py --check`).
 - Test classes follow the existing `*Test.kt` naming (Surefire picks up `**/*Test.kt`).
 - Test rationale comments follow the existing three-line pattern at the top of the
   test body (`What is tested:` / `Success criteria:` / `Why it matters:`), followed

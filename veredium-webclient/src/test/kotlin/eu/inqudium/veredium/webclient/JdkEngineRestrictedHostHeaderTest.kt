@@ -38,7 +38,7 @@ class JdkEngineRestrictedHostHeaderTest {
         assertThat(EngineSelection.jdkAllowsHostHeader()).isFalse()
         val mixed = WebClientProperties.Engine(endpoints = mapOf("orders" to WebClientEngine.JDK))
 
-        // When/Then
+        // When / Then
         assertThatThrownBy { factory(mixed) }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContainingAll("app.webclient.engine selects 'jdk' for [orders]", "-Djdk.httpclient.allowRestrictedHeaders=host")

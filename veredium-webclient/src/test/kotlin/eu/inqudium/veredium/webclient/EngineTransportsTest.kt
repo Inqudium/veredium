@@ -81,7 +81,7 @@ class EngineTransportsTest {
             }
         transports.release(DEADLINE) { 0L }
 
-        // When/Then
+        // When / Then
         assertThatThrownBy { transports.connectorFor(WebClientEngine.JDK, endpoint) }
             .isInstanceOf(IllegalStateException::class.java)
             .hasMessageContaining("shut down")

@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.testsupport.CustomizedRegistries
 import io.github.resilience4j.bulkhead.Bulkhead
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
@@ -37,7 +38,7 @@ import java.util.concurrent.atomic.AtomicReference
  *   breaker's short-circuit, which fails the open-breaker test).
  * - Bulkhead OUTSIDE the breaker: an open breaker's rejection takes (and returns) a permit first, and a full
  *   bulkhead's rejection never reaches the breaker - the open-breaker and the full-bulkhead tests fail.
- * - Bulkhead OUTSIDE the TimeLimiter: a full bulkhead's rejection no longer passes the time limiter on its way
+ * - Bulkhead OUTSIDE the TimeLimiter: a full bulkhead's rejection does not pass the time limiter on its way
  *   out - the full-bulkhead test fails. That is the only observable difference this swap makes on the reactive
  *   stack (see the bulkhead-wait test for why the budget is not one of them).
  *
@@ -206,7 +207,7 @@ class ReactiveResilienceDecoratorTest {
     // ---------------------------------------------------------------------------
 
     /** A circuit-breaker registry whose instance for [alias] carries the mesh customizer with this stack's verdicts. */
-    private fun customizedCircuitBreakers(): CircuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults().also { CustomizedRegistries.circuitBreakers(it, mesh) }
+    private fun customizedCircuitBreakers(): CircuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults().also { CustomizedRegistries.circuitBreakers(it, mesh, WebClientVerdicts.breakerVerdicts) }
 
     private fun decorator(
         circuitBreakers: CircuitBreakerRegistry,

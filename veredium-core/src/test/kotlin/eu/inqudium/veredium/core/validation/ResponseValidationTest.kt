@@ -31,10 +31,10 @@ class ResponseValidationTest {
     }
 
     @Nested
-    inner class Properties {
+    inner class `The properties' toggle semantics` {
         @Test
         fun `should default to off with no per-endpoint overrides`() {
-            // What is tested: the shipped default of a fresh `ResponseValidationProperties()`.
+            // What is tested: the default of a fresh `ResponseValidationProperties()`.
             // Success criteria: validation is disabled, there are no per-endpoint entries, an arbitrary alias
             //   resolves to off, and `failOnViolation` defaults to true.
             // Why it matters: the DTO constraints come from published OpenAPI specs, which are stricter than
@@ -47,7 +47,7 @@ class ResponseValidationTest {
             assertThat(validation.endpoints).isEmpty()
             assertThat(validation.isEnabledFor("any-backend")).isFalse()
             // Enforcing is the default: once a backend opts in, a violation fails the call rather than passing
-            // silently. Report-only (false) is the deliberate rollout exception, not the shipped stance.
+            // silently. Report-only (false) is the deliberate rollout exception, not the default stance.
             assertThat(validation.failOnViolation).isTrue()
         }
 
@@ -77,7 +77,7 @@ class ResponseValidationTest {
     }
 
     @Nested
-    inner class Resolution {
+    inner class `The per-backend validator resolution` {
         @Test
         fun `should hand out the validator only for an alias that validates`() {
             // What is tested: the per-backend resolution a client factory makes ONCE - a validator for an alias
@@ -105,7 +105,7 @@ class ResponseValidationTest {
             // Success criteria: there is no validator for any alias although `isEnabledFor` still says true, the
             //   provider verdict starts with "MISSING", and the validated aliases read "none".
             // Why it matters: no Bean Validation provider on the classpath is the trap a startup line exists for -
-            // every backend is "on" in the properties and none validates, and nothing else would say so.
+            //   every backend is "on" in the properties and none validates, and nothing else would say so.
             //
             // Given: validation on for everyone, no provider
             val validation = ResponseValidation(ResponseValidationProperties(enabled = true), validatorFactory = null)

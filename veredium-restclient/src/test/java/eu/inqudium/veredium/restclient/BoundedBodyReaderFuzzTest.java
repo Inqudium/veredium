@@ -32,8 +32,11 @@ class BoundedBodyReaderFuzzTest {
     void readsExactlyTheBytesTheLimitAdmits(FuzzedDataProvider data) {
         // What is tested: BoundedBodyReader.readOrNull and readTruncated for arbitrary bodies, limits, declared
         //   lengths and read patterns.
-        // Success criteria: the four invariants of the class Javadoc hold for both reads of the same input; no
-        //   read throws.
+        // Success criteria: for both reads of the same input, no read throws, and (1) readOrNull returns null
+        //   exactly when the body is longer than the limit and otherwise the body byte for byte; (2)
+        //   readTruncated returns the prefix of length min(length, limit); (3) readOrNull takes at most
+        //   limit + 1 bytes from the stream and readTruncated at most limit; (4) the declared length never
+        //   changes a result - the expected values of (1) and (2) ignore it.
         // Why it matters: the limit is the only memory bound on a response the peer controls, and its meaning
         //   downstream - which exception, which breaker verdict - rests on the exact byte it is drawn at. A
         //   reader that loses or duplicates a piece across short reads, or miscounts at a buffer boundary,
@@ -53,22 +56,38 @@ class BoundedBodyReaderFuzzTest {
         // When
         ShortReadStream whole = new ShortReadStream(body, readSizes);
         byte[] fitting = BoundedBodyReader.INSTANCE.readOrNull(whole, limit, declaredLength);
-        ShortReadStream error = new ShortReadStream(body, readSizes);
-        byte[] truncated = BoundedBodyReader.INSTANCE.readTruncated(error, limit, declaredLength);
+        ShortReadStream prefix = new ShortReadStream(body, readSizes);
+        byte[] truncated = BoundedBodyReader.INSTANCE.readTruncated(prefix, limit, declaredLength);
 
         // Then
         if (body.length > limit) {
-            require(fitting == null, "readOrNull returned a body of " + length(fitting) + " bytes past the limit", body, limit);
+            require(
+                    fitting == null,
+                    "readOrNull returned a body of " + length(fitting) + " bytes past the limit",
+                    body,
+                    limit);
         } else {
-            require(Arrays.equals(fitting, body), "readOrNull did not return the body unchanged", body, limit);
+            require(
+                    Arrays.equals(fitting, body),
+                    "readOrNull did not return the body unchanged",
+                    body,
+                    limit);
         }
-        require(whole.taken <= limit + 1L, "readOrNull took " + whole.taken + " bytes from the stream", body, limit);
+        require(
+                whole.taken <= limit + 1L,
+                "readOrNull took " + whole.taken + " bytes from the stream",
+                body,
+                limit);
         require(
                 Arrays.equals(truncated, Arrays.copyOf(body, Math.min(body.length, limit))),
                 "readTruncated did not return the prefix of length min(length, limit)",
                 body,
                 limit);
-        require(error.taken <= limit, "readTruncated took " + error.taken + " bytes from the stream", body, limit);
+        require(
+                prefix.taken <= limit,
+                "readTruncated took " + prefix.taken + " bytes from the stream",
+                body,
+                limit);
     }
 
     private static byte[] repeat(byte[] unit, int times) {
@@ -85,7 +104,8 @@ class BoundedBodyReaderFuzzTest {
 
     private static void require(boolean holds, String violation, byte[] body, int limit) {
         if (!holds) {
-            throw new IllegalStateException(violation + " (body length " + body.length + ", limit " + limit + ")");
+            throw new IllegalStateException(
+                    violation + " (body length " + body.length + ", limit " + limit + ")");
         }
     }
 

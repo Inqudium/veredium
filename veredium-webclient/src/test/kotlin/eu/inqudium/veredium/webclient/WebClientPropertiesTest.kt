@@ -1,16 +1,12 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.Veredium
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatCode
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import org.springframework.boot.context.properties.bind.Bindable
-import org.springframework.boot.context.properties.bind.Binder
-import org.springframework.boot.context.properties.source.ConfigurationPropertySources
-import org.springframework.boot.env.YamlPropertySourceLoader
-import org.springframework.core.io.ClassPathResource
 import org.springframework.util.unit.DataSize
 import java.time.Duration
 
@@ -23,7 +19,7 @@ import java.time.Duration
  */
 class WebClientPropertiesTest {
     @Nested
-    inner class MaxInMemorySize {
+    inner class `The codec limit` {
         @Test
         fun `should reject a limit of zero, which would fail every call as a client-side refusal`() {
             // What is tested: the lower bound of the codec limit.
@@ -44,8 +40,7 @@ class WebClientPropertiesTest {
         @Test
         fun `should reject a limit past Int MAX_VALUE, which would wrap to a negative buffer`() {
             // What is tested: the UPPER bound, which exists for a reason that is invisible at this class -
-            //   ResilientWebClientFactory narrows the value to an Int for the codec and the diary's capture
-            //   bound.
+            //   ResilientWebClientFactory narrows the value to an Int for the codec's `maxInMemorySize`.
             // Success criteria: 3 GB is rejected here, rather than silently becoming a negative Int later.
             // Why it matters: without the guard, a value chosen to be generous would end up at the
             //   zero case above, by a route nobody would suspect from reading the configured number.
@@ -77,14 +72,13 @@ class WebClientPropertiesTest {
             // What is tested: the code default of the codec limit, as a value in its own right rather than
             //   as a by-product of the range check above.
             // Success criteria: the default is 256 KB - Spring's own ExchangeStrategies default - and
-            //   NOT the 8 KB this property shipped with until 2026-08-08.
-            // Why it matters: the old value was pinned by a bare equality assertion, which catches
-            //   an accidental change but says nothing about whether the number is right. It was not. On
-            //   2026-08-07 one access-profile response exceeded 8 KB; the backend answered 200 OK in
-            //   130-260 ms and the codec aborted mid-buffer on every one of the five retries a backfill row
-            //   is allowed, which rejected the row. The limit applies per concurrently buffered response and
-            //   the shared pool is bounded at 100 connections, so this default also bounds the worst case at
-            //   ~25 MB of response buffers - the reason it is not simply raised further.
+            //   NOT 8 KB.
+            // Why it matters: a bare equality assertion catches an accidental change but says nothing about
+            //   whether the number is right. 8 KB is less than a single access-profile response: the backend
+            //   answers 200 OK and the codec aborts mid-buffer on every retry, so the call can never succeed.
+            //   The limit applies per concurrently buffered response and the shared pool is bounded at 100
+            //   connections, so this default also bounds the worst case at ~25 MB of response buffers - the
+            //   reason it is not simply raised further.
             //
             // Given / When / Then
             assertThat(WebClientProperties().maxInMemorySize)
@@ -102,13 +96,10 @@ class WebClientPropertiesTest {
             //   that omits the key disagreeing about the same number.
             //
             // Given
-            val sources = YamlPropertySourceLoader().load("application.yml", ClassPathResource("application.yml"))
+            val file = ConfigurationFiles.REFERENCE
 
             // When
-            val bound =
-                Binder(ConfigurationPropertySources.from(sources))
-                    .bind("app.webclient", Bindable.of(WebClientProperties::class.java))
-                    .orElseThrow { AssertionError("app.webclient did not bind from the reference application.yml") }
+            val bound = ConfigurationFiles.bind(file, "app.webclient", WebClientProperties::class.java)
 
             // Then
             assertThat(bound.maxInMemorySize).isEqualTo(DataSize.ofKilobytes(256))
@@ -116,7 +107,7 @@ class WebClientPropertiesTest {
     }
 
     @Nested
-    inner class PoolSettings {
+    inner class `The pool settings` {
         @Test
         fun `should reject a pending-acquire count below minus one`() {
             // What is tested: the lower bound of `pool.pending-acquire-max-count`.
@@ -198,7 +189,7 @@ class WebClientPropertiesTest {
     }
 
     @Nested
-    inner class UserAgent {
+    inner class `The User-Agent` {
         @Test
         fun `should send the library's token by default`() {
             // What is tested: the User-Agent of a host that configures none.

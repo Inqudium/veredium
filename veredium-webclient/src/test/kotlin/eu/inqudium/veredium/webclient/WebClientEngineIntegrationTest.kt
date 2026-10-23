@@ -3,7 +3,6 @@ package eu.inqudium.veredium.webclient
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.AppenderBase
 import ch.qos.logback.core.read.ListAppender
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.aResponse
@@ -22,6 +21,17 @@ import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
 import eu.inqudium.veredium.core.Veredium
 import eu.inqudium.veredium.core.client.EmptyResponseBodyException
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.testsupport.AnsweringBackend
+import eu.inqudium.veredium.testsupport.CapturingAppender
+import eu.inqudium.veredium.testsupport.CustomizedRegistries
+import eu.inqudium.veredium.testsupport.DrippingBackend
+import eu.inqudium.veredium.testsupport.Greeting
+import eu.inqudium.veredium.testsupport.LookupRequest
+import eu.inqudium.veredium.testsupport.SilentBackend
+import eu.inqudium.veredium.testsupport.UnansweredConnectBackend
+import eu.inqudium.veredium.testsupport.WireMockArrivals
+import eu.inqudium.veredium.testsupport.causeNames
+import eu.inqudium.veredium.testsupport.eventually
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreaker
@@ -66,31 +76,24 @@ import reactor.core.publisher.Operators
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.io.ByteArrayOutputStream
-import java.io.IOException
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
-import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.LockSupport
 import java.util.function.Consumer
 import java.util.stream.Stream
 import java.util.zip.GZIPOutputStream
-import kotlin.concurrent.thread
 
 /**
  * The client contract on EVERY engine of `app.webclient.engine`, end to end against a real backend: what a
  * caller gets for a success, an error status, a slow backend, an oversized or empty body, and what a
  * TimeLimiter abort does to the exchange - plus the per-backend override, the lifecycle of the engine
- * resources and the startup lines.
+ * resources, their release against the shutdown deadline (a drain that lets in-flight and queued calls
+ * finish, an exchange that never ends, an interrupted shutdown thread), the pool limits each engine applies,
+ * the client's handling of errors Reactor drops, and the startup lines.
  *
  * Parameterized over [WebClientEngine] rather than written per engine, because the point of most cases is
  * that the answer does NOT depend on the engine: everything above the connector - codec limit, status mapping,
@@ -107,18 +110,6 @@ import kotlin.concurrent.thread
  */
 class WebClientEngineIntegrationTest {
     companion object {
-        private lateinit var wireMock: WireMockServer
-
-        /**
-         * What a request to a URL triggers once it reached WireMock, per test ([arrivalOf]) - behind ONE listener for
-         * the class, registered with the server: `resetAll()` does not remove a request listener, so one added per
-         * test would pile up and fire for a later test's request to the same URL. Cleared before every test.
-         */
-        private val arrivals = ConcurrentHashMap<String, () -> Unit>()
-
-        /** A latch that opens once a request to [url] reached WireMock in the current test. */
-        private fun arrivalOf(url: String): CountDownLatch = CountDownLatch(1).also { latch -> arrivals[url] = latch::countDown }
-
         /** The TimeLimiter budget of every case not ABOUT the budget - see `newFactory` there for why not 1 s. */
         private val GENEROUS_BUDGET: Duration = Duration.ofSeconds(30)
 
@@ -142,13 +133,21 @@ class WebClientEngineIntegrationTest {
          */
         private val MAY_REPORT_FAILURE_AFTER_ABORT = setOf(WebClientEngine.JDK)
 
+        /** Reactor's per-subscription onErrorDropped key, as a caller would put a hook of its own there. */
+        private const val ON_ERROR_DROPPED_KEY = "reactor.onErrorDropped.local"
+
+        private lateinit var wireMock: WireMockServer
+
+        /** The class's one request listener - registered when the server starts, cleared before every test. */
+        private val arrivals = WireMockArrivals()
+
         @JvmStatic
         @BeforeAll
         fun startWireMock() {
             wireMock =
                 WireMockServer(wireMockConfig().dynamicPort())
                     .apply { start() }
-                    .also { server -> server.addMockServiceRequestListener { request, _ -> arrivals[request.url]?.invoke() } }
+                    .also { server -> server.addMockServiceRequestListener(arrivals) }
         }
 
         @JvmStatic
@@ -156,9 +155,6 @@ class WebClientEngineIntegrationTest {
         fun stopWireMock() {
             wireMock.stop()
         }
-
-        /** Reactor's per-subscription onErrorDropped key, as a caller would put a hook of its own there. */
-        private const val ON_ERROR_DROPPED_KEY = "reactor.onErrorDropped.local"
 
         /**
          * The engines whose release, at the deadline, closes what is still running - Reactor Netty's pool lets an
@@ -406,7 +402,7 @@ class WebClientEngineIntegrationTest {
                 assertThat(elapsed).`as`("the refusal must not wait for the rest of the body").isLessThan(Duration.ofSeconds(2))
                 if (engine == WebClientEngine.JDK) {
                     assertThat(backend.connectionDropped.await(500, TimeUnit.MILLISECONDS))
-                        .`as`("the JDK client reads a cancelled body on (see the startup line); if this fails, it no longer does")
+                        .`as`("the JDK client reads a cancelled body on (see the startup line); a failure here means it now drops the connection")
                         .isFalse()
                 } else {
                     assertThat(backend.connectionDropped.await(2, TimeUnit.SECONDS))
@@ -450,7 +446,7 @@ class WebClientEngineIntegrationTest {
                 assertThat(elapsed).isLessThan(Duration.ofMillis(2_500))
                 if (engine == WebClientEngine.JDK) {
                     assertThat(backend.connectionDropped.await(500, TimeUnit.MILLISECONDS))
-                        .`as`("the JDK client reads a cancelled body on (see the startup line); if this fails, it no longer does")
+                        .`as`("the JDK client reads a cancelled body on (see the startup line); a failure here means it now drops the connection")
                         .isFalse()
                 } else {
                     assertThat(backend.connectionDropped.await(2, TimeUnit.SECONDS))
@@ -474,7 +470,7 @@ class WebClientEngineIntegrationTest {
             wireMock.stubFor(get(urlEqualTo("/big")).willReturn(okJson("""{"message":"${"X".repeat(4000)}"}""")))
             val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
             val factory = newFactory(engine, "big", maxInMemorySize = DataSize.ofBytes(200), circuitBreakers = circuitBreakers)
-            CustomizedRegistries.circuitBreakers(circuitBreakers, meshFor(listOf("big"), wireMock.baseUrl()))
+            CustomizedRegistries.circuitBreakers(circuitBreakers, meshFor(listOf("big"), wireMock.baseUrl()), WebClientVerdicts.breakerVerdicts)
             val client = factory.create("big")
 
             // When
@@ -531,9 +527,9 @@ class WebClientEngineIntegrationTest {
             // Given: a backend that never answers, a 300 ms budget, a one-permit bulkhead, Reactor's log and the
             // client's DEBUG lines captured
             val reactorLog = LoggerFactory.getLogger("reactor.core.publisher.Operators") as Logger
-            val dropped = ConcurrentAppender().apply { start() }
+            val dropped = CapturingAppender().apply { start() }
             val clientLog = LoggerFactory.getLogger(ResilientWebClient::class.java) as Logger
-            val clientLines = ConcurrentAppender().apply { start() }
+            val clientLines = CapturingAppender().apply { start() }
             val clientLevel = clientLog.level
             reactorLog.addAppender(dropped)
             clientLog.addAppender(clientLines)
@@ -544,59 +540,6 @@ class WebClientEngineIntegrationTest {
                 reactorLog.detachAppender(dropped)
                 clientLog.detachAppender(clientLines)
                 clientLog.level = clientLevel
-            }
-        }
-
-        private fun abortAndAssert(
-            engine: WebClientEngine,
-            dropped: ConcurrentAppender,
-            clientLines: ConcurrentAppender,
-        ) {
-            SilentBackend().use { backend ->
-                val bulkheads = BulkheadRegistry.of(BulkheadConfig.custom().maxConcurrentCalls(1).build())
-                // Two backends on the engine: `warm` (WireMock) makes the engine's first exchange - its start, the
-                // class loading, the codec setup - before the 300 ms budget of `stalled` is measured; on a loaded
-                // machine the first exchange alone can take longer than that, and the budget would expire before
-                // the request reached the backend.
-                val stalledMesh = meshFor(listOf("stalled"), backend.baseUrl)
-                val mesh = stalledMesh.copy(endpoints = stalledMesh.endpoints + meshFor(listOf("warm"), wireMock.baseUrl()).endpoints)
-                val factory =
-                    newFactory(
-                        WebClientProperties.Engine(default = engine),
-                        listOf("stalled", "warm"),
-                        timeLimiter = Duration.ofMillis(300),
-                        bulkheads = bulkheads,
-                        mesh = mesh,
-                    )
-                wireMock.stubFor(get(urlEqualTo("/warm")).willReturn(okJson("""{"message":"warm"}""")))
-                // Its outcome does not matter - under load it may itself exceed the shared 300 ms budget; the engine is
-                // initialised either way.
-                catchThrowable { runBlocking { factory.create("warm").get(Greeting::class.java) { it.uri("/warm") }.awaitSingle() } }
-                val client = factory.create("stalled")
-
-                // When
-                val started = System.nanoTime()
-                val failure = catchThrowable { runBlocking { client.get(Greeting::class.java) { it.uri("/stalled") }.awaitSingle() } }
-
-                // Then: the budget's verdict, the permit back, and the connection closed by the client
-                assertThat(failure).isExactlyInstanceOf(TimeoutException::class.java)
-                assertThat(bulkheads.bulkhead("stalled").metrics.availableConcurrentCalls).isEqualTo(1)
-                assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
-                assertThat(backend.connectionClosed.await(1, TimeUnit.SECONDS))
-                    .`as`("the client closed the connection after the abort")
-                    .isTrue()
-                assertThat(Duration.ofNanos(backend.closedAtNanos - started)).isLessThan(RESPONSE_TIMEOUT)
-                if (engine in REPORTS_FAILURE_AFTER_ABORT || engine in MAY_REPORT_FAILURE_AFTER_ABORT) {
-                    // Bounded wait for the late failure, so the ERROR check below does not pass before it came.
-                    val lateFailure =
-                        eventually {
-                            clientLines.events.any { it.level == Level.DEBUG && it.formattedMessage.startsWith("Exchange of backend 'stalled' ended after cancellation") }
-                        }
-                    if (engine in REPORTS_FAILURE_AFTER_ABORT) {
-                        assertThat(lateFailure).`as`("the engine's failure after the abort was written at DEBUG").isTrue()
-                    }
-                }
-                assertThat(dropped.events.filter { it.level == Level.ERROR }.map { it.formattedMessage }).isEmpty()
             }
         }
 
@@ -746,7 +689,7 @@ class WebClientEngineIntegrationTest {
             //   sub-pool, the reason max-connections there bounds each backend rather than the engine.
             //
             // Given: two backends on the engine against a backend that keeps its connections open
-            KeepAliveBackend().use { backend ->
+            AnsweringBackend(body = """{"message":"kept"}""").use { backend ->
                 val backends = listOf("first", "second")
                 val factory =
                     newFactory(WebClientProperties.Engine(default = engine), backends, mesh = meshFor(backends, backend.baseUrl))
@@ -767,7 +710,7 @@ class WebClientEngineIntegrationTest {
             // Success criteria: it fails with an IllegalStateException saying the factory was shut down, and no
             //   engine was created by it; a client built before shutdown is still returned from the cache.
             // Why it matters: engines are created lazily, by the first client; one created after shutdown()
-            //   released the others would own threads and sockets that nothing releases any more.
+            //   released the others would own threads and sockets that nothing releases.
             //
             // Given
             val factory =
@@ -859,7 +802,7 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = ConcurrentAppender().apply { start() }
+            val lines = CapturingAppender().apply { start() }
             logger.addAppender(lines)
             try {
                 val recorded = mutableListOf<Duration>()
@@ -939,9 +882,9 @@ class WebClientEngineIntegrationTest {
             //
             // Given: a call held by a backend that never answers, the factory's log captured
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = ConcurrentAppender().apply { start() }
+            val lines = CapturingAppender().apply { start() }
             val engineLog = LoggerFactory.getLogger("org.apache.hc.client5.http.impl.async") as Logger
-            val engineLines = ConcurrentAppender().apply { start() }
+            val engineLines = CapturingAppender().apply { start() }
             logger.addAppender(lines)
             engineLog.addAppender(engineLines)
             try {
@@ -999,9 +942,9 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/finishing")).willReturn(okJson("""{"message":"finished"}""").withFixedDelay(500)))
-            val arrived = arrivalOf("/finishing")
+            val arrived = arrivals.arrivalOf("/finishing")
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = ConcurrentAppender().apply { start() }
+            val lines = CapturingAppender().apply { start() }
             logger.addAppender(lines)
             try {
                 val factory = newFactory(engine, "draining")
@@ -1039,9 +982,9 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/queued")).willReturn(okJson("""{"message":"served"}""").withFixedDelay(500)))
-            val arrived = arrivalOf("/queued")
+            val arrived = arrivals.arrivalOf("/queued")
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = ConcurrentAppender().apply { start() }
+            val lines = CapturingAppender().apply { start() }
             logger.addAppender(lines)
             try {
                 val factory =
@@ -1093,7 +1036,7 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
-            val lines = ConcurrentAppender().apply { start() }
+            val lines = CapturingAppender().apply { start() }
             logger.addAppender(lines)
             try {
                 SilentBackend().use { backend ->
@@ -1410,7 +1353,7 @@ class WebClientEngineIntegrationTest {
             val global = CopyOnWriteArrayList<Throwable>()
             val local = CopyOnWriteArrayList<Throwable>()
             val clientLog = LoggerFactory.getLogger(ResilientWebClient::class.java) as Logger
-            val clientLines = ConcurrentAppender().apply { start() }
+            val clientLines = CapturingAppender().apply { start() }
             val clientLevel = clientLog.level
             clientLog.addAppender(clientLines)
             clientLog.level = Level.DEBUG
@@ -1551,21 +1494,59 @@ class WebClientEngineIntegrationTest {
             },
     )
 
-    /** The simple class names along [failure]'s cause chain - for an engine's exception whose type is shaded. */
-    private fun causeNames(failure: Throwable?): List<String> = generateSequence(failure) { it.cause.takeIf { cause -> cause !== it } }.map { it.javaClass.simpleName }.toList()
+    /** The body of the TimeLimiter-abort case, run while Reactor's log and the client's DEBUG lines are captured. */
+    private fun abortAndAssert(
+        engine: WebClientEngine,
+        dropped: CapturingAppender,
+        clientLines: CapturingAppender,
+    ) {
+        SilentBackend().use { backend ->
+            val bulkheads = BulkheadRegistry.of(BulkheadConfig.custom().maxConcurrentCalls(1).build())
+            // Two backends on the engine: `warm` (WireMock) makes the engine's first exchange - its start, the
+            // class loading, the codec setup - before the 300 ms budget of `stalled` is measured; on a loaded
+            // machine the first exchange alone can take longer than that, and the budget would expire before
+            // the request reached the backend.
+            val stalledMesh = meshFor(listOf("stalled"), backend.baseUrl)
+            val mesh = stalledMesh.copy(endpoints = stalledMesh.endpoints + meshFor(listOf("warm"), wireMock.baseUrl()).endpoints)
+            val factory =
+                newFactory(
+                    WebClientProperties.Engine(default = engine),
+                    listOf("stalled", "warm"),
+                    timeLimiter = Duration.ofMillis(300),
+                    bulkheads = bulkheads,
+                    mesh = mesh,
+                )
+            wireMock.stubFor(get(urlEqualTo("/warm")).willReturn(okJson("""{"message":"warm"}""")))
+            // Its outcome does not matter - under load it may itself exceed the shared 300 ms budget; the engine is
+            // initialised either way.
+            runCatching { runBlocking { factory.create("warm").get(Greeting::class.java) { it.uri("/warm") }.awaitSingle() } }
+            val client = factory.create("stalled")
 
-    /** Polls [condition] every 10 ms until it holds or [within] passed - a bounded wait, never a sleep. */
-    private fun eventually(
-        within: Duration = Duration.ofSeconds(5),
-        condition: () -> Boolean,
-    ): Boolean =
-        Flux
-            .interval(Duration.ZERO, Duration.ofMillis(10))
-            .map { condition() }
-            .filter { it }
-            .take(1)
-            .timeout(within, Mono.just(false))
-            .blockLast() ?: false
+            // When
+            val started = System.nanoTime()
+            val failure = catchThrowable { runBlocking { client.get(Greeting::class.java) { it.uri("/stalled") }.awaitSingle() } }
+
+            // Then: the budget's verdict, the permit back, and the connection closed by the client
+            assertThat(failure).isExactlyInstanceOf(TimeoutException::class.java)
+            assertThat(bulkheads.bulkhead("stalled").metrics.availableConcurrentCalls).isEqualTo(1)
+            assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
+            assertThat(backend.connectionClosed.await(1, TimeUnit.SECONDS))
+                .`as`("the client closed the connection after the abort")
+                .isTrue()
+            assertThat(Duration.ofNanos(backend.closedAtNanos - started)).isLessThan(RESPONSE_TIMEOUT)
+            if (engine in REPORTS_FAILURE_AFTER_ABORT || engine in MAY_REPORT_FAILURE_AFTER_ABORT) {
+                // Bounded wait for the late failure, so the ERROR check below does not pass before it came.
+                val lateFailure =
+                    eventually {
+                        clientLines.events.any { it.level == Level.DEBUG && it.formattedMessage.startsWith("Exchange of backend 'stalled' ended after cancellation") }
+                    }
+                if (engine in REPORTS_FAILURE_AFTER_ABORT) {
+                    assertThat(lateFailure).`as`("the engine's failure after the abort was written at DEBUG").isTrue()
+                }
+            }
+            assertThat(dropped.events.filter { it.level == Level.ERROR }.map { it.formattedMessage }).isEmpty()
+        }
+    }
 
     private fun gzip(text: String): ByteArray = ByteArrayOutputStream().also { bytes -> GZIPOutputStream(bytes).use { it.write(text.toByteArray()) } }.toByteArray()
 
@@ -1576,293 +1557,5 @@ class WebClientEngineIntegrationTest {
         override fun supportsContext(context: Observation.Context): Boolean = true
 
         override fun onStop(context: Observation.Context) = latch.countDown()
-    }
-
-    /** Captures events appended from any thread; Logback's `ListAppender` is not safe for that. */
-    private class ConcurrentAppender : AppenderBase<ILoggingEvent>() {
-        val events = CopyOnWriteArrayList<ILoggingEvent>()
-
-        override fun append(eventObject: ILoggingEvent) {
-            events += eventObject
-        }
-    }
-
-    /**
-     * A backend that answers every request with a 200 declaring a 1 MiB body, sends the head and the first 4 KiB at
-     * once and then one byte every 200 ms - a body that is still arriving long after any test is over, unless the
-     * client drops the connection, which [connectionDropped] reports. WireMock's dribble cannot stand in: it hands
-     * the body to its output buffer, and the head reaches the wire only once that buffer is full. The twin of the
-     * blocking module's backend of the same name.
-     */
-    private class DrippingBackend : AutoCloseable {
-        private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
-        val baseUrl: String = "http://${server.inetAddress.hostAddress}:${server.localPort}"
-        val connectionDropped = CountDownLatch(1)
-
-        /** The connections accepted so far - closed with the backend, so an exchange the client kept ends with the test. */
-        private val accepted = CopyOnWriteArrayList<Socket>()
-
-        init {
-            thread(isDaemon = true, name = "dripping-backend-acceptor") {
-                try {
-                    while (true) {
-                        val socket = server.accept()
-                        accepted += socket
-                        thread(isDaemon = true, name = "dripping-backend-connection") { drip(socket) }
-                    }
-                } catch (_: IOException) {
-                    // The server socket was closed - the test is over.
-                }
-            }
-        }
-
-        private fun drip(socket: Socket) =
-            socket.use { connection ->
-                try {
-                    val request = connection.getInputStream().bufferedReader(Charsets.ISO_8859_1)
-                    while (request.readLine().orEmpty().isNotEmpty()) {
-                        // The request head, up to its empty line; the GET carries no body.
-                    }
-                    val out = connection.getOutputStream()
-                    out.write(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${1024 * 1024}\r\n\r\n"
-                            .toByteArray(Charsets.ISO_8859_1),
-                    )
-                    out.write(ByteArray(4096) { 'z'.code.toByte() })
-                    out.flush()
-                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
-                    while (System.nanoTime() < deadline) {
-                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(200))
-                        out.write('z'.code)
-                        out.flush()
-                    }
-                } catch (_: IOException) {
-                    // The client went away - what the test waits for - or the backend was closed.
-                    connectionDropped.countDown()
-                }
-            }
-
-        override fun close() {
-            server.close()
-            accepted.forEach { it.close() }
-        }
-    }
-
-    /**
-     * A backend that answers every request with a small 200, keeping the connection alive, and counts the
-     * connections it accepted - what a pool's idle and lifetime bounds are seen by: a call after the bound runs on
-     * a connection of its own. WireMock cannot say this: it reports requests, not connections.
-     */
-    private class AnsweringBackend : AutoCloseable {
-        private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
-        val baseUrl: String = "http://${server.inetAddress.hostAddress}:${server.localPort}"
-
-        /** The connections the backend accepted so far. */
-        val connections = AtomicInteger()
-
-        private val accepted = CopyOnWriteArrayList<Socket>()
-
-        init {
-            thread(isDaemon = true, name = "answering-backend-acceptor") {
-                try {
-                    while (true) {
-                        val socket = server.accept()
-                        connections.incrementAndGet()
-                        accepted += socket
-                        thread(isDaemon = true, name = "answering-backend-connection") { answer(socket) }
-                    }
-                } catch (_: IOException) {
-                    // The server socket was closed - the test is over.
-                }
-            }
-        }
-
-        private fun answer(socket: Socket) =
-            socket.use { connection ->
-                val body = """{"message":"hi"}""".toByteArray()
-                val head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\n\r\n"
-                try {
-                    val request = connection.getInputStream().bufferedReader(Charsets.ISO_8859_1)
-                    while (true) {
-                        // One request head per call, up to its empty line; the GETs carry no body.
-                        val first = request.readLine() ?: return@use
-                        if (first.isEmpty()) continue
-                        while (request.readLine().orEmpty().isNotEmpty()) {
-                            // The rest of the head.
-                        }
-                        connection.getOutputStream().apply {
-                            write(head.toByteArray(Charsets.ISO_8859_1))
-                            write(body)
-                            flush()
-                        }
-                    }
-                } catch (_: IOException) {
-                    // The client closed the connection.
-                }
-            }
-
-        override fun close() {
-            server.close()
-            accepted.forEach { it.close() }
-        }
-    }
-
-    /**
-     * A backend that accepts a connection, reads the request and never answers - so the only thing that can end
-     * the exchange is the client. It records when the client closed the connection, which is what an abort
-     * looks like on the wire for HTTP/1.1: the connection of an exchange in flight cannot be reused.
-     *
-     * WireMock cannot say this: it reports requests, not the moment a client hangs up on a delayed answer.
-     */
-    private class SilentBackend : AutoCloseable {
-        private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
-        val baseUrl: String = "http://${server.inetAddress.hostAddress}:${server.localPort}"
-        val requestArrived = CountDownLatch(1)
-        val connectionClosed = CountDownLatch(1)
-
-        /** The connections the backend accepted so far. */
-        val connections = AtomicInteger()
-
-        @Volatile
-        var closedAtNanos: Long = 0L
-
-        init {
-            thread(isDaemon = true, name = "silent-backend-acceptor") {
-                try {
-                    while (true) {
-                        val socket = server.accept()
-                        connections.incrementAndGet()
-                        thread(isDaemon = true, name = "silent-backend-connection") { hold(socket) }
-                    }
-                } catch (_: IOException) {
-                    // The server socket was closed - the test is over.
-                }
-            }
-        }
-
-        private fun hold(socket: Socket) =
-            socket.use { connection ->
-                val buffer = ByteArray(8192)
-                try {
-                    while (connection.getInputStream().read(buffer) >= 0) requestArrived.countDown()
-                } catch (_: IOException) {
-                    // A reset is a close as well.
-                }
-                closedAtNanos = System.nanoTime()
-                connectionClosed.countDown()
-            }
-
-        override fun close() = server.close()
-    }
-
-    /**
-     * A minimal HTTP/1.1 backend that answers every request with a small JSON body and keeps the connection open
-     * for the next one - so the number of connections it accepted says whether two calls shared one.
-     *
-     * WireMock cannot say this: it reports requests, not the connections they arrived over.
-     */
-    private class KeepAliveBackend : AutoCloseable {
-        private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
-        val baseUrl: String = "http://${server.inetAddress.hostAddress}:${server.localPort}"
-        val connections = AtomicInteger()
-        val requests = AtomicInteger()
-
-        init {
-            thread(isDaemon = true, name = "keep-alive-backend-acceptor") {
-                try {
-                    while (true) {
-                        val socket = server.accept()
-                        connections.incrementAndGet()
-                        thread(isDaemon = true, name = "keep-alive-backend-connection") { serve(socket) }
-                    }
-                } catch (_: IOException) {
-                    // The server socket was closed - the test is over.
-                }
-            }
-        }
-
-        private fun serve(socket: Socket) =
-            socket.use { connection ->
-                val input = connection.getInputStream().buffered()
-                val output = connection.getOutputStream()
-                val body = """{"message":"kept"}""".toByteArray()
-                try {
-                    // One request per round: its head ends with an empty line; the GETs here carry no body.
-                    while (readHead(input)) {
-                        requests.incrementAndGet()
-                        output.write(
-                            (
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\n" +
-                                    "Connection: keep-alive\r\n\r\n"
-                            ).toByteArray(),
-                        )
-                        output.write(body)
-                        output.flush()
-                    }
-                } catch (_: IOException) {
-                    // The client closed the connection.
-                }
-            }
-
-        /** Reads one request head; `false` at the end of the stream. */
-        private fun readHead(input: java.io.InputStream): Boolean {
-            var matched = 0
-            val terminator = "\r\n\r\n"
-            while (matched < terminator.length) {
-                val next = input.read()
-                if (next < 0) return false
-                matched =
-                    if (next.toChar() == terminator[matched]) {
-                        matched + 1
-                    } else if (next.toChar() == '\r') {
-                        1
-                    } else {
-                        0
-                    }
-            }
-            return true
-        }
-
-        override fun close() = server.close()
-    }
-
-    /**
-     * A listening socket that accepts no connection, its accept backlog filled by probe connects - so the kernel
-     * leaves any further connect unanswered (Linux drops the SYN of a full accept queue), and only the client's
-     * connect timeout can end it. [saturated] says whether a probe connect actually went unanswered; on a
-     * platform that refuses instead, the case using it is skipped rather than asserting on a refusal.
-     */
-    private class UnansweredConnectBackend : AutoCloseable {
-        private val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress())
-        val baseUrl: String = "http://${server.inetAddress.hostAddress}:${server.localPort}"
-        private val probes = mutableListOf<Socket>()
-        val saturated: Boolean = fill()
-
-        private fun fill(): Boolean {
-            repeat(MAX_PROBES) {
-                val probe = Socket()
-                try {
-                    probe.connect(InetSocketAddress(server.inetAddress, server.localPort), PROBE_TIMEOUT_MS)
-                    probes += probe
-                } catch (_: SocketTimeoutException) {
-                    probe.close()
-                    return true
-                } catch (_: IOException) {
-                    probe.close()
-                    return false
-                }
-            }
-            return false
-        }
-
-        override fun close() {
-            probes.forEach { it.close() }
-            server.close()
-        }
-
-        private companion object {
-            const val MAX_PROBES = 16
-            const val PROBE_TIMEOUT_MS = 300
-        }
     }
 }

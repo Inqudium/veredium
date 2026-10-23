@@ -18,6 +18,12 @@ build fails if this script did not run first, which is the intended
 guard.
 
 Usage: python3 .github/scripts/generate-test-catalog.py [output_md]
+       python3 .github/scripts/generate-test-catalog.py --check
+
+--check reads the test sources of every module only - no Surefire reports needed - and fails on a
+rationale block that breaks the CONTRIBUTING.md shape: a missing label, the labels out of order, a
+fourth label, or no bare `//` line between the block and the first Given/When/Then stage line. The
+CI job runs it on every pull request; the page generation applies the same checks.
 """
 
 import html
@@ -27,7 +33,8 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 
-OUTPUT = Path(sys.argv[1] if len(sys.argv) > 1 else "docs/tests/test-evidence.md")
+CHECK_ONLY = sys.argv[1:] == ["--check"]
+OUTPUT = Path(sys.argv[1] if len(sys.argv) > 1 and not CHECK_ONLY else "docs/tests/test-evidence.md")
 
 # Kotlin test methods carry backticked sentence names (with modifiers such as
 # `internal` in front, for a parameterized test over an internal type); the
@@ -57,6 +64,9 @@ STAGE_LABEL = r"(?:Given|When|Then|And)"
 STAGE_LINE_RE = re.compile(
     rf"^{STAGE_LABEL}(?:\s*/\s*{STAGE_LABEL})*\s*(?:\([^)]*\))?\s*(?::.*)?$"
 )
+# A line of the block that opens like a label of its own (`Why the second shape:`) - the three labels are
+# the whole contract, a fourth one is not read and would vanish from the evidence page.
+LABEL_LINE_RE = re.compile(r"^[A-Z][A-Za-z' ]{2,40}:(\s|$)")
 
 
 def extract_rationales(module: Path) -> tuple[dict, dict]:
@@ -99,13 +109,17 @@ def extract_rationales(module: Path) -> tuple[dict, dict]:
             while not lines[start].rstrip().endswith("{") and start + 1 < len(lines):
                 start += 1
             comment = []
+            raw = []
+            reached_stage = False
             for follow in lines[start + 1:]:
                 stripped = follow.strip()
                 if stripped.startswith("//"):
                     body = stripped[2:].strip()
                     if STAGE_LINE_RE.match(body):
+                        reached_stage = True
                         break
                     comment.append(body)
+                    raw.append(stripped[2:])
                 elif stripped == "" and not comment:
                     continue
                 else:
@@ -121,14 +135,28 @@ def extract_rationales(module: Path) -> tuple[dict, dict]:
                 if answer:
                     parsed[label] = answer
             if parsed:
+                where = f"{kt}: `{m.group(1)}`"
                 if len(parsed) < len(QUESTIONS):
                     missing = [q.pattern for label, q in QUESTIONS if label not in parsed]
-                    incomplete.append(f"{kt}: `{m.group(1)}` lacks {', '.join(missing)}")
+                    incomplete.append(f"{where} lacks {', '.join(missing)}")
+                elif [label for _, _, label in spans] != [label for label, _ in QUESTIONS]:
+                    incomplete.append(f"{where} has its labels out of order")
+                extra = [
+                    line.strip()
+                    for line in raw
+                    if not line.startswith("   ")
+                    and LABEL_LINE_RE.match(line.strip())
+                    and not any(q.match(line.strip()) for _, q in QUESTIONS)
+                ]
+                if extra:
+                    incomplete.append(f"{where} has a label of its own: {extra[0]!r}")
+                if reached_stage and comment and comment[-1] != "":
+                    incomplete.append(f"{where} lacks the bare `//` line before its first stage line")
                 rationales[(clazz, m.group(1))] = parsed
     if incomplete:
         sys.exit(
-            "error: incomplete test rationale blocks (CONTRIBUTING.md requires"
-            " all three labels):\n  " + "\n  ".join(incomplete)
+            "error: test rationale blocks that break the CONTRIBUTING.md shape (the three labels, in"
+            " order, then a bare `//` line):\n  " + "\n  ".join(incomplete)
         )
     return rationales, superclasses
 
@@ -173,6 +201,11 @@ def md_escape(text: str) -> str:
 
 
 def main() -> None:
+    if CHECK_ONLY:
+        for module in sorted(p.parts[0] for p in Path(".").glob("*/src/test")):
+            extract_rationales(Path(module))
+        print("test rationale blocks: ok")
+        return
     modules = sorted(p.parts[0] for p in Path(".").glob("*/target/surefire-reports"))
     if not modules:
         sys.exit("error: no target/surefire-reports found in any module - run `mvn verify` first")

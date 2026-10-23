@@ -18,12 +18,12 @@ import java.util.stream.Stream
 /**
  * Tests the mesh DERIVATION LOGIC on hand-built inputs: the alias derived from a triplet (host-prefixed R4j
  * instance name / metric label, with the collision guard) and the full timeout ladder derived from the anchor
- * and retry budget. The CONTENT of the shipped `application.yml` that feeds this logic is pinned separately by
- * [MeshApplicationYmlBindingTest].
+ * and retry budget. The binding of a complete `app.mesh` block from the test fixture is pinned separately by
+ * [MeshFixtureBindingTest].
  */
 class MeshPropertiesDerivationTest {
     @Test
-    fun `derives a host-prefixed alias from the triplet, dropping path variables`() {
+    fun `should derive a host-prefixed alias from the triplet, dropping path variables`() {
         // What is tested: `effectiveAlias()` of an endpoint without an explicit alias - the derivation from
         //   the triplet `/endpoint/<host>/<METHOD>/<path>`.
         // Success criteria: the alias is the host with dots turned into hyphens, the UPPERCASE method and the
@@ -31,24 +31,24 @@ class MeshPropertiesDerivationTest {
         // Why it matters: the alias is the Resilience4j instance name and the metric label; a path variable in
         //   it would be a literal brace pattern in every metric, and a missing host prefix lets two backends
         //   with the same path collide.
-
+        //
         // Given: an endpoint with no explicit alias
-        val endpoint = MeshProperties.EndpointConfig("/endpoint/api.example.com/GET/accounts/{accountId}")
+        val endpoint = MeshProperties.EndpointConfig(TRIPLET)
 
         // When / Then: host (dots -> hyphens) + UPPERCASE method + static path segments, {accountId} dropped
         assertThat(endpoint.effectiveAlias()).isEqualTo("api-example-com-GET-accounts")
     }
 
     @Test
-    fun `rejects a triplet that carries no path, rather than deriving a bare slash from it`() {
+    fun `should reject a triplet that carries no path, rather than deriving a bare slash from it`() {
         // What is tested: the boundary of the triplet guard - a triplet consisting of only endpoint, host and
         //   method, which is what a dropped path segment leaves behind.
         //   `/endpoint/api.example.com/GET/x` is asserted alongside it, so the test states where the line runs and
         //   cannot pass by rejecting everything.
         // Success criteria: the three-part form throws with a message naming the expected shape; the
         //   four-part form derives its path template normally.
-        // Why it matters: nothing downstream would have complained. `pathTemplate()` returned "/",
-        //   which is a valid-looking value everywhere it goes - as a metric prefix it matches EVERY URI of that
+        // Why it matters: nothing downstream complains about a pathless triplet. Its `pathTemplate()` would be
+        //   "/", which is a valid-looking value everywhere it goes - as a metric prefix it matches EVERY URI of that
         //   client, the alias falls back to "root", and the client calls the sidecar's root. The
         //   misconfiguration would first show up as a 404 in production, pointing nowhere near the config line
         //   that caused it. Failing at binding time is the whole point of the guard.
@@ -63,15 +63,15 @@ class MeshPropertiesDerivationTest {
     }
 
     @Test
-    fun `the same path and method on different hosts derive distinct, non-colliding aliases`() {
+    fun `should derive distinct, non-colliding aliases for the same path and method on different hosts`() {
         // What is tested: that the host prefix makes two otherwise-identical endpoints (same path + method,
-        // different host) resolve to DIFFERENT aliases, so binding them together does not trip the unique-alias
-        // guard in MeshProperties.init.
+        //   different host) resolve to DIFFERENT aliases, so binding them together does not trip the unique-alias
+        //   guard in MeshProperties.init.
         // Success criteria: the two aliases differ AND a MeshProperties over both constructs (its init
-        // runs the uniqueness check) and resolves two endpoints.
+        //   runs the uniqueness check) and resolves two endpoints.
         // Why it matters: without the host prefix both would derive "GET-v1-orders" - the config would be
-        // rejected, or (if the guard were absent) the two would silently share one R4j instance / metric series.
-
+        //   rejected, or (if the guard were absent) the two would silently share one R4j instance / metric series.
+        //
         // Given: two endpoints identical but for the host, neither with an explicit alias
         val onApi = MeshProperties.EndpointConfig("/endpoint/api.example.com/GET/v1/orders")
         val onApis = MeshProperties.EndpointConfig("/endpoint/apis.example.com/GET/v1/orders")
@@ -89,7 +89,7 @@ class MeshPropertiesDerivationTest {
     }
 
     @Test
-    fun `rejects two endpoints carrying the same triplet even when their aliases differ`() {
+    fun `should reject two endpoints carrying the same triplet even when their aliases differ`() {
         // What is tested: that a duplicated triplet is rejected at binding time, not tolerated.
         // Success criteria: constructing MeshProperties throws, and the message names the offending
         //   triplet. The two entries deliberately carry DISTINCT explicit aliases, so the alias guard cannot be
@@ -98,7 +98,7 @@ class MeshPropertiesDerivationTest {
         //   key. Without this guard the second endpoint silently replaces the first, the dropped alias is missing
         //   from the factory's map, and the loss surfaces only at the first call to that backend as "No mesh
         //   endpoint configured" - the late, confusing failure the fail-fast exists to prevent.
-
+        //
         // Given: two endpoints with the SAME triplet but different explicit aliases
         val first = MeshProperties.EndpointConfig("/endpoint/api.example.com/GET/v1/orders", alias = "orders-primary")
         val second = MeshProperties.EndpointConfig("/endpoint/api.example.com/GET/v1/orders", alias = "orders-secondary")
@@ -111,20 +111,19 @@ class MeshPropertiesDerivationTest {
     }
 
     @Test
-    fun `rejects two endpoints whose aliases collide`() {
+    fun `should reject two endpoints whose aliases collide`() {
         // What is tested: the unique-alias guard in `MeshProperties.init` for two endpoints with DIFFERENT
         //   triplets that are pinned to the same explicit alias.
         // Success criteria: constructing MeshProperties throws IllegalArgumentException with "Mesh aliases
         //   collide" and the offending alias "shared" in the message.
         // Why it matters: an alias is an R4j instance name and a metric label; sharing one would silently merge
         //   two backends' resilience state and time series - the triplet guard cannot catch this case.
-
+        //
         // Given: the same triplet is not involved - two DIFFERENT endpoints pinned to one alias
         val first = MeshProperties.EndpointConfig("/endpoint/api.example.com/GET/v1/orders", alias = "shared")
         val second = MeshProperties.EndpointConfig("/endpoint/api.example.com/GET/v1/invoices", alias = "shared")
 
-        // When / Then: the alias guard rejects it and names the offender (an alias is an R4j instance name and
-        // a metric label; sharing one would silently merge two backends' resilience state and time series)
+        // When / Then: the alias guard rejects it and names the offending alias
         assertThatThrownBy { MeshProperties(MeshProperties.Defaults(), listOf(first, second)) }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContaining("Mesh aliases collide")
@@ -132,7 +131,7 @@ class MeshPropertiesDerivationTest {
     }
 
     @Test
-    fun `rejects a transport pool size the Apache builder would silently ignore`() {
+    fun `should reject a transport pool size the Apache builder would silently ignore`() {
         // What is tested: the bottom of the transport's range - max-connections 0 and below.
         //   1 is asserted alongside, so the test states where the line runs and cannot pass by rejecting everything.
         // Success criteria: 0 throws with a message naming the YAML key; 1 binds.
@@ -149,7 +148,7 @@ class MeshPropertiesDerivationTest {
     }
 
     @Test
-    fun `rejects a transport timeout that would leave a pre-response phase unbounded`() {
+    fun `should reject a transport timeout that would leave a pre-response phase unbounded`() {
         // What is tested: the bottom of the two transport timeouts - zero and negative values.
         // Success criteria: each throws with a message naming its YAML key; 1 ms binds for both.
         // Why it matters: both values feed the computed timeLimiterMargin as the WORST CASE of the connect and
@@ -170,25 +169,26 @@ class MeshPropertiesDerivationTest {
 
     @ParameterizedTest(name = "individual={0}ms, maxRetries={1}")
     @MethodSource("anchorAndRetryCombinations")
-    fun `the derived ladder is correct across individual 1s-10s and 0-3 retries`(
+    fun `should derive the correct ladder across individual 1s-10s and 0-3 retries`(
         individualMs: Long,
         maxRetries: Int,
     ) {
         // What is tested: the whole derivation (global, responseTimeout, timeLimiter, slowCall) for the anchor
-        // sweep individual 1s..10s x maxRetries 0..3, with all other values at their defaults.
+        //   sweep individual 1s..10s x maxRetries 0..3, with all other values at their defaults.
         // Success criteria: each rung equals the formula recomputed here with the DEFAULT margin
-        // CONSTANTS - so the test breaks if either the formula or a default changes.
+        //   CONSTANTS - so the test breaks if either the formula or a default changes.
         // Why it matters: the ladder is the core value of the module; a broad parameterized sweep guards the
-        // arithmetic (and the min-cap crossover in slowCall) far better than a couple of hand-picked cases.
+        //   arithmetic (and the min-cap crossover in slowCall) far better than a couple of hand-picked cases.
+        //
         // Given: one endpoint on the swept anchor and retry budget, every margin at its default
         val props =
             MeshProperties(
                 defaults = MeshProperties.Defaults(individualRequestTimeoutMs = individualMs, maxRetries = maxRetries),
-                endpoints = listOf(MeshProperties.EndpointConfig("/endpoint/api.example.com/GET/accounts/{accountId}")),
+                endpoints = listOf(MeshProperties.EndpointConfig(TRIPLET)),
             )
 
         // When: the single endpoint is resolved
-        val t = props.resolveAll().getValue("/endpoint/api.example.com/GET/accounts/{accountId}")
+        val t = props.resolveAll().getValue(TRIPLET)
 
         // The derived ladder for this case, rungs sorted ascending by value, carried on every assertion below so a
         // failure shows the whole ladder and the ordering invariant (individual < ... < timeLimiter) at a glance.
@@ -224,7 +224,7 @@ class MeshPropertiesDerivationTest {
 
     @ParameterizedTest(name = "individual={0}ms, maxRetries={1} -> global={2} responseTimeout={3} timeLimiter={4} slowCall={5}")
     @MethodSource("handComputedLaddersOnDistinctMargins")
-    fun `the derived ladder matches hand-computed values when every margin differs from every other`(
+    fun `should derive hand-computed ladders when every margin differs from every other`(
         individualMs: Long,
         maxRetries: Int,
         global: Long,
@@ -241,9 +241,10 @@ class MeshPropertiesDerivationTest {
         //   of the slow-call min (the cap at maxRetries 0/1 and at 2500/2; the healthy ceiling at maxRetries 3)
         //   and both sides of the healthy-retries cap (min(1, 2) = 1 and min(3, 2) = 2).
         // Why it matters: the default margins are all 200, so on them a rung computed from the WRONG margin
-        //   field gives the right number - the sweep above stays green if responseTimeout adds the p99 margin, or
+        //   field gives the right number - the sweep above passes even if responseTimeout adds the p99 margin, or
         //   the healthy ceiling multiplies the p99 margin instead of the backoff. Here each such swap moves at
-        //   least one rung, and a mirrored oracle would only have repeated the swap.
+        //   least one rung, and a mirrored oracle would only repeat the swap.
+        //
         // Given
         val props =
             MeshProperties(
@@ -268,7 +269,7 @@ class MeshPropertiesDerivationTest {
     }
 
     @Test
-    fun `merges a partial per-endpoint margins override field by field onto the shared defaults`() {
+    fun `should merge a partial per-endpoint margins override field by field onto the shared defaults`() {
         // What is tested: MarginsOverride / Margins.overriddenBy as resolveAll applies them - an endpoint that
         //   overrides TWO margin fields, next to one that overrides none.
         // Success criteria: the overriding endpoint carries its two values and the shared defaults' values for
@@ -313,7 +314,7 @@ class MeshPropertiesDerivationTest {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("ladderGuardViolations")
-    fun `rejects a ladder that cannot form, naming the key, the endpoint and the value`(
+    fun `should reject a ladder that cannot form, naming the key, the endpoint and the value`(
         description: String,
         endpoint: MeshProperties.EndpointConfig,
         expectedFragments: List<String>,
@@ -324,8 +325,9 @@ class MeshPropertiesDerivationTest {
         //   triplet and the offending value. The accepting side of each boundary is the next test.
         // Why it matters: these guards are the only place a broken ladder is caught before Resilience4j or the
         //   transport sees it; without them a negative global margin passes silently and a zero slow-call
-        //   surfaces as a keyless builder error. The messages are what an operator has to act on, and before
-        //   this test none of them was ever rendered.
+        //   surfaces as a keyless builder error. The messages are what an operator has to act on, so each one is
+        //   rendered and checked here.
+        //
         // Given
         val props = MeshProperties(MeshProperties.Defaults(individualRequestTimeoutMs = 1000), listOf(endpoint))
 
@@ -338,7 +340,7 @@ class MeshPropertiesDerivationTest {
     }
 
     @Test
-    fun `accepts every guarded value at the edge of its range`() {
+    fun `should accept every guarded value at the edge of its range`() {
         // What is tested: the accepting side of every boundary the previous test rejects - global margin 0,
         //   response-timeout margin 1, p99 margin individual - 1 and 0, healthy-retries 0, backoff 0, retries 0.
         // Success criteria: the endpoint resolves, and the extreme values derive the expected rungs (global =
@@ -374,7 +376,7 @@ class MeshPropertiesDerivationTest {
     }
 
     @Test
-    fun `rejects a transport timeout the reactive stack could not narrow to an Int`() {
+    fun `should reject a transport timeout the reactive stack could not narrow to an Int`() {
         // What is tested: the top of the two transport timeouts - Int.MAX_VALUE + 1 against Int.MAX_VALUE.
         // Success criteria: one past Int.MAX_VALUE throws for each key, naming it and the value; Int.MAX_VALUE
         //   itself binds.
@@ -399,6 +401,8 @@ class MeshPropertiesDerivationTest {
     }
 
     companion object {
+        private const val TRIPLET = "/endpoint/api.example.com/GET/accounts/{accountId}"
+
         /** Cross product: individual 1000..10000ms (1s steps) x maxRetries 0..3 -> 40 cases. */
         @JvmStatic
         fun anchorAndRetryCombinations(): Stream<Arguments> =
@@ -406,8 +410,6 @@ class MeshPropertiesDerivationTest {
                 .flatMap { seconds ->
                     (0..3).map { retries -> Arguments.of((seconds * 1000).toLong(), retries) }
                 }.stream()
-
-        private const val TRIPLET = "/endpoint/api.example.com/GET/accounts/{accountId}"
 
         /** Every margin distinct from every other and from its Kotlin default (all 200 / 1 / 0.8). */
         private val DISTINCT_MARGINS =
