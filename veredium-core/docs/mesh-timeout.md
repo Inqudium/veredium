@@ -1,7 +1,6 @@
 # Mesh-derived Resilience4j timeouts
 
-> **Ownership & baseline.** Maintained by **Dirk Haase**. Verified against the code of 2026-10-19 (the module
-> cut of ADR-0001). Where this text and the code disagree, the code wins.
+> **Ownership & baseline.** Maintained by **Dirk Haase**. Reviewed against the code on 2026-10-23. Where this text and the code disagree, the code wins.
 
 The `eu.inqudium.veredium.core.mesh` package is the **single per-endpoint tree**, one entry per **operation**
 (triplet). From one *measured* anchor per endpoint it drives that operation's **client target** (base URL, Host

@@ -1,9 +1,8 @@
-# rest-client metrics — blocking RestClient adapter layer
+# veredium-restclient metrics — the blocking client
 
-> **Ownership & baseline.** Maintained by **Dirk Haase**. Verified against the code at commit `cd5bceb4`
-> (2026-10-19). Where this text and the code disagree, the code wins.
+> **Ownership & baseline.** Maintained by **Dirk Haase**. Reviewed against the code on 2026-10-23. Where this text and the code disagree, the code wins.
 
-> **Dependency facts** (`rest-client/pom.xml`): `resilience4j-spring-boot4:2.4.0` pulls in
+> **Dependency facts** (`veredium-restclient/pom.xml`): `resilience4j-spring-boot4:2.4.0` pulls in
 > `resilience4j-micrometer:2.4.0` transitively, `micrometer-core` and `micrometer-observation` arrive through
 > `spring-boot-starter-actuator`, and `httpclient5-observation` (version from the Boot BOM, same as
 > `httpclient5`) supplies the pool binder. No `reactor-*` artifact reaches a consumer's classpath through this
@@ -57,9 +56,9 @@ sampled with `ResponseBodyMetrics.utf8Size` (`veredium-core`), so every sample i
 the direction that sizes a ceiling too small. `ResponseBodyMetricsTest` and its fuzz target pin the counter
 against the JDK encoder; `ResilientRestClientIntegrationTest` pins both paths.
 
-**The tag value is the mesh endpoint alias, not an adapter class.** `InvolvedPartyAdapter` owns two aliases
-(`apis-example-com-POST-v5-involved-parties-lookup`, `apis-example-com-GET-v6-involved-parties`), so a filter on
-`adapter` selects one *call*, not one adapter. It is the same value the exchange event and the client's own
+**The tag value is the mesh endpoint alias, not an adapter class.** An adapter that calls two operations owns
+two aliases (say `apis-example-com-POST-v5-involved-parties-lookup` and `apis-example-com-GET-v6-involved-parties`),
+so a filter on `adapter` selects one *call*, not one adapter. It is the same value the exchange event and the client's own
 log lines carry as `adapter_name`, so a meter and a log line correlate on sight.
 
 ---
@@ -242,8 +241,7 @@ The exchange event emits structured **log fields**, not meters: `adapter_outcome
 `adapter_name`, `adapter_response_status_code`, `adapter_url_template`, the header and body fields and the rest
 of the family are `addKeyValue` entries on the `adapter-http-exchange` log event. `ResilientRestClient`'s own
 transport lines carry `adapter_name` and `adapter_url_template` under the same names, so one dashboard field
-groups both loggers. The applier's `resilience_layer` / `resilience_instance` / `resilience_event` fields are
-log fields too.
+groups both loggers.
 
 Startup lines are the other non-metric source an operator reads next to these meters: the resolved mesh
 ladder per endpoint (`MeshLadderLogger`), the two observation verdicts (§3), the Bean Validation summary, and
@@ -251,9 +249,9 @@ the startup guard's two policy lines naming the aliases the verdicts were instal
 
 ---
 
-## 7. Differences to the reactive twin (`web-client/docs/metrics.md`)
+## 7. Differences to the reactive twin ([veredium-webclient metrics](../../veredium-webclient/docs/metrics.md))
 
-| web-client | rest-client | Why |
+| veredium-webclient | veredium-restclient | Why |
 |---|---|---|
 | `reactor.netty.http.client.*` per-request transport meters, URI-templated by `WebClientMetrics.uriTagger` | **none** | Apache records no per-request meter here; `http.client.requests` (§3) carries the template from the stamped attribute, so a second cardinality guard would guard nothing. |
 | `reactor.netty.connection.provider.*{name=webclient-reactor-netty}` (`total`, `active`, `idle`, `pending`, `max`, `max.pending`) | `restclient.pool.{leased,available,pending}{pool=restclient-apache}` | Apache's three live counts; no `max` gauge, no `max.pending` (unbounded in count). |
@@ -266,4 +264,4 @@ runs on the `reactor-netty` engine (§2.1) — then under `name=restclient-react
 the reactive twin's pool. Point pool panels at `restclient.pool.*` for the Apache engine and latency panels at
 `http.client.requests`.
 
-**Related:** [rest-client — the blocking twin of web-client's `adapter/web`](restclient-vs-webclient.md).
+**Related:** [veredium-restclient — the blocking twin of veredium-webclient](restclient-vs-webclient.md).

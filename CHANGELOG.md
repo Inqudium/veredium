@@ -201,6 +201,10 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
 
 ### Changed
 
+- Docs: the guides of `veredium-core` and `veredium-restclient` follow the code again - an abandoned blocking call
+  is logged as `cancelled` (legatium 1.3.0), each stack imports its own `MeshResilienceRegistrar` subclass, the
+  blocking decorator's test lives in the core - and no longer use the origin project's module names, adapters and
+  review citations; the core's API reference describes all seven packages.
 - `veredium-webclient`: a Reactor Netty pool that does not drain by the shutdown deadline is reported with the
   drain line every other engine writes - `HTTP engine 'reactor-netty' did not drain within … - closing it with the
   exchanges still in flight` - instead of `Connection pool 'webclient-reactor-netty' did not drain …`. A log query
