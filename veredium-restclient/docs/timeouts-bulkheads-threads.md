@@ -142,11 +142,9 @@ implementation, not of the current one. `BlockingResilienceDecoratorTest` pins t
 **The exchange event reports a `cancelled`.** legatium's interceptor runs on the worker. Since legatium 1.3.0 it
 reads the worker's interrupt flag, and the interrupt in the cause chain where the flag is already consumed, and
 writes WARN `adapter_outcome=cancelled` without a cause - the outcome the reactive twin writes for an abandoned
-subscription. That holds on all four engines for a call cancelled before its response head, and on Apache, JDK
-and Reactor Netty for one cancelled in the body as well. **One exception:** Jetty's body stream turns an
-interrupt during the body into a bare `InterruptedIOException` and consumes the flag, so legatium has no signal
-left and logs ERROR `failure`, with the head's status. `LegatiumExchangeLoggingIntegrationTest` pins each case per
-engine. The budget expiry itself is visible as `resilience4j.timelimiter.calls{kind=timeout}` and as the
+subscription. That holds on all four engines, for a call cancelled before its response head and for one
+cancelled in the body; on Jetty because its transport sets the interrupt flag again, which Jetty's body stream
+clears (`docs/engine-behaviour.md` §9). `LegatiumExchangeLoggingIntegrationTest` pins each case per engine. The budget expiry itself is visible as `resilience4j.timelimiter.calls{kind=timeout}` and as the
 `TimeoutException` on `ResilientRestClient`'s own WARN line.
 
 ### 3.1 Step by step: the transport's response timeout fires (the normal case)
@@ -187,7 +185,7 @@ Same anchor; the backend answers `200` at 300 ms and then drips the body.
 | 0 … 300 | as in §3.1 | as in §3.1; the head arrives at ≈300 ms: legatium's wrapper snapshots status 200 and the headers, the observation context gets the response. |
 | 300 … 1800 | blocked in `future.get` | in `ResilientRestClient.exchange`'s bounded body read, each `InputStream.read` returning a few bytes well inside its 1400 ms socket timeout. |
 | 1800 | `future.get` throws the JDK's `TimeoutException`. The TimeLimiter: `onError` → `timelimiter.calls{kind=timeout}`; `cancelRunningFuture` is `true` → **`future.cancel(true)`**, which interrupts the worker; rethrows its own `TimeoutException` (`TimeLimiter 'x' recorded a timeout exception.`). The breaker records it as a **failure**. `ResilientRestClient`: WARN `Error during request … duration so far: 1800ms` with stack trace; DEBUG `Completed … outcome=error`; rethrows. **The caller is released now**, with a `TimeoutException`, whatever the worker does next. | the interrupt lands while the worker is parked in a socket read: the JDK closes the socket and the read throws `SocketException: Closed by interrupt` — out of `BoundedBodyReader`, out of the exchange function. |
-| ≈1801 | returned | `DefaultRestClient` wraps the `IOException` into `ResourceAccessException`, records it on the observation and, in its `finally`, **closes the response**. legatium's wrapper had already recorded the read failure through its `onFailure` hook and the worker's interrupt, so the event it emits on close is `WARN adapter_outcome=cancelled`, **with** `adapter_response_status_code=200` and `adapter_duration_ms≈1800` — a 200 that failed its caller is never logged as a success (had the cancel come before the head, the event would carry no status; on Jetty this body case is `ERROR failure`, §3). Apache's `streamClosed` sees the dead socket and discards the connection. The decorator's `finally`: permit released, scope closed, MDC restored. The future is already cancelled, so the worker's `ResourceAccessException` goes nowhere; the worker ends. |
+| ≈1801 | returned | `DefaultRestClient` wraps the `IOException` into `ResourceAccessException`, records it on the observation and, in its `finally`, **closes the response**. legatium's wrapper had already recorded the read failure through its `onFailure` hook and the worker's interrupt, so the event it emits on close is `WARN adapter_outcome=cancelled`, **with** `adapter_response_status_code=200` and `adapter_duration_ms≈1800` — a 200 that failed its caller is never logged as a success (had the cancel come before the head, the event would carry no status). Apache's `streamClosed` sees the dead socket and discards the connection. The decorator's `finally`: permit released, scope closed, MDC restored. The future is already cancelled, so the worker's `ResourceAccessException` goes nowhere; the worker ends. |
 
 Two facts about this timeline are the ones to remember:
 
@@ -418,8 +416,8 @@ What each bound produces, for the caller, the breaker, the exchange event and th
 | pool exhausted for 200 ms | `ResourceAccessException` over `ConnectionRequestTimeoutException` | failure | `timeout` (WARN) — matched by class name since legatium 1.2.1 (before: `failure` at ERROR, the type being a bare `InterruptedIOException`) | `restclient.pool.pending > 0` |
 | connect > 100 ms | `ResourceAccessException` over `ConnectTimeoutException` | failure | `timeout` (WARN) | `http.client.requests{exception=ResourceAccessException}` |
 | no response head within `responseTimeout` | `ResourceAccessException` over `SocketTimeoutException` | failure | `timeout` (WARN) | as above |
-| TimeLimiter budget expired | `TimeoutException` | failure | `cancelled` (WARN), written by the cancelled worker — on Jetty `failure` (ERROR) when the body was being read | `resilience4j.timelimiter.calls{kind=timeout}` |
-| caller interrupted | `InterruptedException` | **ignored** | `cancelled` (WARN), by the cancelled worker — the same Jetty exception | — |
+| TimeLimiter budget expired | `TimeoutException` | failure | `cancelled` (WARN), written by the cancelled worker | `resilience4j.timelimiter.calls{kind=timeout}` |
+| caller interrupted | `InterruptedException` | **ignored** | `cancelled` (WARN), by the cancelled worker | — |
 | 5xx, 408, 429 | `HttpServerErrorException.*` / `HttpClientErrorException.*` | failure | `failure` / `rejected` (WARN) | `http.client.requests{status}` |
 | benign 4xx | `HttpClientErrorException.*` | **success** | `rejected` (INFO) | as above |
 | 2xx, body past the limit | `ResponseBodyLimitExceededException` | **ignored** | `success` (INFO) | the WARN limit line; no size sample |

@@ -459,16 +459,15 @@ class LegatiumExchangeLoggingIntegrationTest {
 
         @ParameterizedTest
         @EnumSource(RestClientEngine::class)
-        fun `should log a TimeLimiter timeout during the body as cancelled, except on Jetty`(engine: RestClientEngine) {
+        fun `should log a TimeLimiter timeout during the body as cancelled`(engine: RestClientEngine) {
             // What is tested: the budget expiring AFTER the head arrived, while the body is still dribbling in, on
             //   each engine. The interrupt ends the worker's body read, with the exception that engine raises.
             // Success criteria: the caller gets the TimeLimiter's TimeoutException; the event carries the 200 the
-            //   head brought and is WARN `cancelled` on every engine but Jetty, where it is ERROR `failure`.
+            //   head brought and is WARN `cancelled`.
             // Why it matters: a cancellation in the body is the common case behind a slow backend, and an
             //   operator reads it off the outcome. Jetty's body stream turns the interrupt into a bare
-            //   InterruptedIOException and consumes the interrupt flag on the way, so legatium has neither of its
-            //   two signals and keeps such an exception a `failure` - this pins that gap per engine instead of
-            //   letting the documentation claim more than the wire shows.
+            //   InterruptedIOException and clears the interrupt flag; without the Jetty transport setting it again,
+            //   legatium would have no signal left and log the cancellation as an ERROR `failure`.
             //
             // Given: a 400 ms budget against a body that takes 3 s to arrive
             val body = """{"message":"${"x".repeat(2_000)}"}"""
@@ -482,13 +481,8 @@ class LegatiumExchangeLoggingIntegrationTest {
                     assertThat(failure).isInstanceOf(TimeoutException::class.java)
                     val event = appender.awaitEvents().last()
                     assertThat(event.field("adapter_response_status_code")).isEqualTo(200)
-                    if (engine == RestClientEngine.JETTY) {
-                        assertThat(event.level).isEqualTo(Level.ERROR)
-                        assertThat(event.field("adapter_outcome")).isEqualTo("failure")
-                    } else {
-                        assertThat(event.level).isEqualTo(Level.WARN)
-                        assertThat(event.field("adapter_outcome")).isEqualTo("cancelled")
-                    }
+                    assertThat(event.level).isEqualTo(Level.WARN)
+                    assertThat(event.field("adapter_outcome")).isEqualTo("cancelled")
                 }
             }
         }

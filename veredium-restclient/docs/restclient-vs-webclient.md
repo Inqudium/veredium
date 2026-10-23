@@ -178,18 +178,17 @@ cardinality guard is the attribute and a second mapper would guard nothing.
 
 legatium-restclient-logging's interceptor rides on Boot's `RestClient.Builder` bean and writes one event per
 exchange on the worker thread, under the caller's MDC. Since legatium 1.3.0 the vocabulary is the reactive
-twin's, with one engine-specific gap, pinned per engine by `LegatiumExchangeLoggingIntegrationTest`:
+twin's on every engine, pinned per engine by `LegatiumExchangeLoggingIntegrationTest`:
 
 | Situation                                | web-client event              | rest-client event                                          |
 |------------------------------------------|-------------------------------|------------------------------------------------------------|
 | 2xx / benign 4xx / 5xx                   | `success` / `rejected` / `failure` | same                                                  |
 | transport response timeout               | `timeout` (WARN)              | `timeout` (WARN)                                           |
-| caller cancels / TimeLimiter expires     | `cancelled` (WARN)            | `cancelled` (WARN), written promptly by the cancelled worker — on Jetty **`failure` (ERROR)** when the body was being read |
+| caller cancels / TimeLimiter expires     | `cancelled` (WARN)            | `cancelled` (WARN), written promptly by the cancelled worker |
 | serialisation failure before the exchange | no event                      | no event                                                   |
 
-Since legatium 1.3.0 an alert keyed on `adapter_outcome == "cancelled"` fires for both modules; the one gap is a
-Jetty call cancelled during its body, which Jetty reports as a bare `InterruptedIOException` with the interrupt
-flag consumed. The resilience verdict itself
+Since legatium 1.3.0 an alert keyed on `adapter_outcome == "cancelled"` fires for both modules, on every engine.
+The resilience verdict itself
 (`TimeoutException`, `CallNotPermittedException`, `BulkheadFullException`) stays on `ResilientRestClient`'s own
 transport line, as in the twin.
 

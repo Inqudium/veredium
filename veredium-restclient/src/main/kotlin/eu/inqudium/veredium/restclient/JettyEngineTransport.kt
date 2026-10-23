@@ -12,7 +12,11 @@ import org.slf4j.Logger
 import org.springframework.http.HttpMethod
 import org.springframework.http.client.ClientHttpRequest
 import org.springframework.http.client.ClientHttpRequestFactory
+import org.springframework.http.client.ClientHttpResponse
 import org.springframework.http.client.JettyClientHttpRequestFactory
+import java.io.FilterInputStream
+import java.io.InputStream
+import java.io.InterruptedIOException
 import java.net.URI
 import java.time.Duration
 import java.util.concurrent.TimeUnit
@@ -48,6 +52,15 @@ import java.util.concurrent.TimeUnit
  * when the exchange fails, when a body read fails (an interrupt included), and when the response is closed before
  * its body was read to the end. The Jetty request is captured where Spring creates it,
  * `HttpClient.newRequest(URI)`, on the thread that runs the exchange ([RequestCapturingHttpClient]).
+ *
+ * ## The interrupt a body read consumes
+ *
+ * Jetty's body stream (`InputStreamResponseListener`) answers an interrupt during a read with a bare
+ * `InterruptedIOException`: no message, no cause, and the thread's interrupt flag cleared by the
+ * `InterruptedException` it caught. The exchange log then has no sign that the caller abandoned the call, and
+ * logs the cancellation as a failure. The response's body read therefore sets the flag again before it rethrows
+ * that exception ([InterruptRestoringRequest]), as the JDK's own interruptible reads leave it set - the other
+ * three engines need nothing of the kind.
  */
 internal class JettyEngineTransport(
     settings: Settings,
@@ -99,7 +112,7 @@ internal class JettyEngineTransport(
                     "veredium's Jetty engine cannot abort abandoned exchanges"
             }
         jettyRequest.idleTimeout(responseTimeout.toMillis(), TimeUnit.MILLISECONDS)
-        return AbortingRequest(request) { _, cause -> jettyRequest.abort(cause) }
+        return AbortingRequest(InterruptRestoringRequest(request)) { _, cause -> jettyRequest.abort(cause) }
     }
 
     override val applied: List<String> =
@@ -153,6 +166,48 @@ internal class JettyEngineTransport(
             Thread.ofVirtual().name("$POOL_NAME-stop").start { httpClient.stop() }
         } else {
             httpClient.stop()
+        }
+    }
+
+    /**
+     * Spring's Jetty request, whose response sets the thread's interrupt flag again when a body read ends in the
+     * interrupt Jetty consumed (class KDoc). Inside [AbortingRequest], so the abort sees the same exception, and
+     * inside the interceptors of the `RestClient`, so the exchange log sees the flag.
+     */
+    internal class InterruptRestoringRequest(
+        delegate: ClientHttpRequest,
+    ) : ForwardingClientHttpRequest(delegate) {
+        override fun execute(): ClientHttpResponse {
+            val response = delegate.execute()
+            return object : ClientHttpResponse by response {
+                private val restoringBody: InputStream by lazy {
+                    object : FilterInputStream(response.body) {
+                        override fun read(): Int = restoring { super.read() }
+
+                        override fun read(
+                            b: ByteArray,
+                            off: Int,
+                            len: Int,
+                        ): Int = restoring { super.read(b, off, len) }
+                    }
+                }
+
+                override fun getBody(): InputStream = restoringBody
+            }
+        }
+
+        private companion object {
+            fun restoring(read: () -> Int): Int =
+                try {
+                    read()
+                } catch (e: InterruptedIOException) {
+                    // Invariant: only the exact shape Jetty raises for an interrupted wait - its subclasses
+                    // (a socket timeout among them) and a wrapped failure say nothing about the thread.
+                    if (e.javaClass == InterruptedIOException::class.java && e.cause == null) {
+                        Thread.currentThread().interrupt()
+                    }
+                    throw e
+                }
         }
     }
 

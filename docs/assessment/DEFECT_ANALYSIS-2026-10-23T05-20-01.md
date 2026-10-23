@@ -223,13 +223,12 @@ Nachgetragen (2026-10-23, legatium 1.3.0, Branch `chore/legatium-1.3.0`):
   `LegatiumExchangeLoggingIntegrationTest` (TimeLimiter-Ablauf, unterbrochener Aufrufer) liefen nur auf Apache.
   Jetzt laufen sie parametrisiert auf allen vier Engines und verlangen `cancelled`. Gegenprobe: Mit legatium 1.2.1
   werden alle acht Fälle rot.
-- **Neu aufgefallen, offen:** Ein Abbruch **mitten im Body** bleibt auf **Jetty** ERROR `failure` mit Status 200.
-  Jettys Body-Stream macht aus dem Interrupt ein nacktes `InterruptedIOException` ohne Ursache und verbraucht das
-  Interrupt-Flag. legatium hat dann keines seiner beiden Signale und belässt diese Exception laut seinem Changelog
-  bewusst bei `failure`. Apache, JDK und Reactor Netty loggen denselben Fall als `cancelled`. Ein dritter
-  parametrisierter Fall pinnt das je Engine (dreimal grün); die Guides nennen die Lücke.
-  - Mögliche Abhilfe in veredium: Der Jetty-Transport setzt das Interrupt-Flag vor dem Weiterwerfen eines solchen
-    `InterruptedIOException` wieder. Die andere Möglichkeit ist ein Issue an legatium.
+- **Neu aufgefallen und behoben:** Ein Abbruch **mitten im Body** blieb auf **Jetty** ERROR `failure` mit Status 200.
+  Jettys Body-Stream (`InputStreamResponseListener`) macht aus dem Interrupt ein nacktes `InterruptedIOException`
+  und löscht das Interrupt-Flag. legatium hatte dann keines seiner beiden Signale. Der Jetty-Transport setzt das
+  Flag jetzt vor dem Weiterwerfen wieder (`InterruptRestoringRequest`), nur für genau diese Form der Exception. Ein
+  dritter parametrisierter Fall verlangt `cancelled` auf allen vier Engines (dreimal grün); ohne das Wiedersetzen
+  wird nur der Jetty-Fall rot.
 
 Aufgefallen, nicht Teil der Befunde: Auf `main` warnt der Kotlin-Compiler in `BlockingResilienceDecoratorTest`
 (5×) und `RestClientVerdictsTest` (3×) „Expression is unused“, in `WebClientEngineTransports` über Jettys

@@ -229,7 +229,7 @@ are documented in `legatium/docs/GUIDE.md` §7.4, not here. The ones worth knowi
 | Metric | Tags | Note for this module |
 |---|---|---|
 | `adapter.logging.exchanges.open` | `client=restclient` | Exchanges between wiring and their exactly-once completion. The `client` tag separates the two twins in one registry. A growing baseline means responses are never closed — not possible through `ResilientRestClient`, which closes every response, so a rise points at a host using the builder directly. |
-| `adapter.logging.events` | `outcome` | Exchange events actually emitted; the reconciliation base for the log index. A **cancelled** call counts as `cancelled` here, as on the reactive twin (since legatium 1.3.0; on Jetty a call cancelled during its body counts as `failure`, see timeouts-bulkheads-threads.md §3). |
+| `adapter.logging.events` | `outcome` | Exchange events actually emitted; the reconciliation base for the log index. A **cancelled** call counts as `cancelled` here, as on the reactive twin (since legatium 1.3.0). |
 | `adapter.logging.failopen` | `stage` | The logging gave up on an exchange. Independent of every meter above. |
 | `adapter.logging.correlation.id` | `source=trace\|header\|generated` | A rising `generated` share means the host stopped propagating `traceparent` — or, for this module, that §3's observation is off. |
 | `adapter.request.body.size`, `adapter.response.body.size`, `adapter.response.body.read` | `uri`, `host`, `name` | Opt-in (`measure-*-body-size`, `true` in the reference configuration). `name` is the same alias as §1's `adapter` tag. The response size here is what the library's tee saw, **not** the decoded size §1 records; the two disagree under compression by exactly the compression ratio. |
@@ -259,7 +259,7 @@ the startup guard's two policy lines naming the aliases the verdicts were instal
 | `reactor.netty.connection.provider.*{name=webclient-reactor-netty}` (`total`, `active`, `idle`, `pending`, `max`, `max.pending`) | `restclient.pool.{leased,available,pending}{pool=restclient-apache}` | Apache's three live counts; no `max` gauge, no `max.pending` (unbounded in count). |
 | `webclient.response.body.size{adapter}` | `restclient.response.body.size{adapter}` | Same meaning, same unit, this module's bounded reader instead of the codec. |
 | `resilience4j.timelimiter.calls{kind=timeout}` = the reactive operator cancelled the chain | same name; = the caller was released and the worker interrupted | The blocking TimeLimiter needs a thread hand-off; the worker's exchange then ends as `Closed by interrupt` (§3). |
-| exchange event `adapter_outcome=cancelled` | `adapter_outcome=cancelled` | The same outcome since legatium 1.3.0, except a Jetty call cancelled during its body (`failure`); `adapter.logging.events{outcome}` counts accordingly (§5). |
+| exchange event `adapter_outcome=cancelled` | `adapter_outcome=cancelled` | The same outcome since legatium 1.3.0; `adapter.logging.events{outcome}` counts accordingly (§5). |
 
 **If a dashboard or alert references `reactor_netty_*` for this module**, it is absent, not zero, unless a backend
 runs on the `reactor-netty` engine (§2.1) — then under `name=restclient-reactor-netty`, which keeps it apart from

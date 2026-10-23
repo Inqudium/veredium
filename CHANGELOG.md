@@ -66,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `veredium-restclient`, Jetty engine: a call abandoned while its body was being read left the worker's interrupt
+  flag cleared - Jetty's body stream answers the interrupt with a bare `InterruptedIOException` and swallows it -
+  so the exchange log had no sign of the cancellation and wrote ERROR `failure`. The transport now sets the flag
+  again before it rethrows that exception, and the call is logged as `cancelled`.
 - `veredium-restclient`: on the Reactor Netty engine, a call still waiting for its response head when a shutdown
   past its deadline disposed the event loops could hang until its TimeLimiter budget. Spring's wait for the head
   is a `block()` without a time bound, and the response timeout is a timer on those loops. Seen once on CI; not
@@ -199,10 +203,8 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
 - `veredium-restclient`, `veredium-webclient`: legatium 1.3.0 (from 1.2.1). **Behaviour change of the blocking
   stack's exchange log:** a call its caller abandoned - a TimeLimiter that cancels the worker, an interrupted
   caller, a cancelled `getAsync` future - is now logged as WARN `adapter_outcome=cancelled`, as on the reactive
-  stack, instead of ERROR `failure`. That holds on all four engines for a call cancelled before its response head,
-  and on Apache, JDK and Reactor Netty for one cancelled during the body. A Jetty call cancelled during its body
-  stays ERROR `failure`: Jetty reports it as a bare `InterruptedIOException` with the interrupt flag consumed. An
-  alert on `failure` for the blocking stack sees fewer events; one on `cancelled` now fires for it too.
+  stack, instead of ERROR `failure`, on every engine, before the response head and during the body. An alert on
+  `failure` for the blocking stack sees fewer events; one on `cancelled` now fires for it too.
 - `veredium-core`: a stack hands its `BreakerVerdicts` to the shared mesh wiring as an object instead of
   declaring it as a bean. The new abstract `MeshResilienceRegistrar(verdicts)` registers the per-alias
   customizers and the startup guard; each stack subclasses it (`RestClientMeshRegistrar`,
