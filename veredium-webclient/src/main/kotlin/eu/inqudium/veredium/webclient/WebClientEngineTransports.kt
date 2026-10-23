@@ -52,6 +52,7 @@ import reactor.netty.resources.LoopResources
 import java.net.URI
 import java.nio.channels.ClosedSelectorException
 import java.time.Duration
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
@@ -468,10 +469,30 @@ internal class JettyEndpointConnector(
         uri: URI,
         requestCallback: Function<in ClientHttpRequest, Mono<Void>>,
     ): Mono<ClientHttpResponse> =
-        delegate.connect(method, uri) { request ->
-            request.getNativeRequest<Request>().idleTimeout(responseTimeout.toMillis(), TimeUnit.MILLISECONDS)
-            requestCallback.apply(request)
+        Mono.defer {
+            val native = AtomicReference<Request?>()
+            delegate
+                .connect(method, uri) { request ->
+                    native.set(request.getNativeRequest<Request>().idleTimeout(responseTimeout.toMillis(), TimeUnit.MILLISECONDS))
+                    requestCallback.apply(request)
+                }.map<ClientHttpResponse> { response -> AbortJettyOnBodyCancel(response, native) }
         }
+}
+
+/**
+ * A Jetty response whose body, when cancelled before it completed, aborts the native request - what Spring's
+ * connector does not do: cancelling its content publisher only stops the delivery, and Jetty goes on receiving
+ * the rest of the body on the connection, for as long as the peer sends it. A codec refusing an over-limit body,
+ * or the TimeLimiter cancelling while the body arrives, would keep the connection - and its slot of
+ * `max-connections` - until the peer stops.
+ */
+private class AbortJettyOnBodyCancel(
+    response: ClientHttpResponse,
+    private val native: AtomicReference<Request?>,
+) : ClientHttpResponseDecorator(response) {
+    // Assumption: aborting a Jetty request whose response already completed is a no-op returning false
+    // (jetty-client 12.1), so a cancel arriving after the last chunk changes nothing.
+    override fun getBody(): Flux<DataBuffer> = super.getBody().doOnCancel { native.get()?.abort(CancellationException("response body cancelled")) }
 }
 
 /**

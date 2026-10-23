@@ -91,6 +91,13 @@ class RestClientEngineIntegrationTest {
         private val PROMPTLY: Duration = Duration.ofSeconds(2)
 
         /**
+         * How much earlier than configured a timeout may appear to fire on the test's clock - the granularity of an
+         * engine's timer, not a load effect: load only ever makes a timeout LATE. A lower bound with this slack is
+         * what tells one timeout from another, the anchor from the response timeout above it.
+         */
+        private val TIMER_SLACK: Duration = Duration.ofMillis(50)
+
+        /**
          * Asynchronous responses: a delayed answer waits on WireMock's scheduler instead of a container thread. The
          * abandoned-exchange cases leave delays of several seconds behind them that no client waits for any more -
          * on container threads they would pile up across the class and slow every later request down.
@@ -237,7 +244,9 @@ class RestClientEngineIntegrationTest {
 
             // Then
             assertThat(failure).isInstanceOf(ResourceAccessException::class.java)
-            assertThat(elapsed).isLessThan(Duration.ofMillis(2_500))
+            // A timeout never fires early, so the lower bound holds on a loaded machine: it is what tells the
+            // response timeout from the anchor (300 ms), which an engine wired with the wrong value would use.
+            assertThat(elapsed).isGreaterThanOrEqualTo(client.responseTimeout.minus(TIMER_SLACK)).isLessThan(Duration.ofMillis(2_500))
             val timeoutType =
                 when (engine) {
                     RestClientEngine.APACHE -> SocketTimeoutException::class.java
@@ -349,10 +358,12 @@ class RestClientEngineIntegrationTest {
             val (patientFailure, patientElapsed) = timed { patient.get(Greeting::class.java) { it.uri("/slow") } }
 
             // Then
+            // Each bounded from below by its own response timeout - a timeout never fires early - so a factory that
+            // handed an engine the anchor instead (300 ms / 1500 ms) turns this red.
             assertThat(quickFailure).isInstanceOf(ResourceAccessException::class.java)
-            assertThat(quickElapsed).isLessThan(Duration.ofMillis(1_500))
+            assertThat(quickElapsed).isGreaterThanOrEqualTo(quick.responseTimeout.minus(TIMER_SLACK)).isLessThan(Duration.ofMillis(1_500))
             assertThat(patientFailure).isInstanceOf(ResourceAccessException::class.java)
-            assertThat(patientElapsed).isGreaterThanOrEqualTo(Duration.ofMillis(1_500)).isLessThan(Duration.ofMillis(3_500))
+            assertThat(patientElapsed).isGreaterThanOrEqualTo(patient.responseTimeout.minus(TIMER_SLACK)).isLessThan(Duration.ofMillis(3_500))
         }
 
         @ParameterizedTest
@@ -606,7 +617,8 @@ class RestClientEngineIntegrationTest {
             // What is tested: `connect-timeout-ms` on each engine - against a listening socket whose accept queue
             //   is full, where the kernel drops further connection attempts instead of answering them.
             // Success criteria: with the default 100 ms connect timeout, a 30 s budget and an 8.4 s response
-            //   timeout, the call fails within 2 s.
+            //   timeout, the call fails within 2 s but not before the 100 ms, with the engine's own connect-timeout
+            //   exception in its cause chain - a refused connect would fail at once and prove nothing.
             // Why it matters: the TimeLimiter's margin over the response timeout is computed from this timeout;
             //   an engine on its own default (seconds to minutes) would hold the worker in the connect far past
             //   the margin, and the mesh ladder would be wrong for that engine.
@@ -625,7 +637,8 @@ class RestClientEngineIntegrationTest {
 
                 // Then
                 assertThat(failure).isNotNull().isNotInstanceOf(TimeoutException::class.java)
-                assertThat(elapsed).isLessThan(PROMPTLY)
+                assertThat(isConnectTimeout(failure)).`as`("a connect timeout, not another failure: %s", failure).isTrue()
+                assertThat(elapsed).isGreaterThanOrEqualTo(Duration.ofMillis(100).minus(TIMER_SLACK)).isLessThan(PROMPTLY)
             }
         }
     }
@@ -1259,7 +1272,12 @@ class RestClientEngineIntegrationTest {
         private val server: ServerSocket,
         private val fillers: List<Socket>,
     ) : AutoCloseable {
-        val authority: String = "localhost:${server.localPort}"
+        /**
+         * The loopback ADDRESS the socket listens on, never `localhost`: that name may resolve to `::1` first,
+         * where nothing listens, and an engine would get a refused connect at once instead of the dropped one -
+         * the case would be green without its connect timeout ever running.
+         */
+        val authority: String = "${server.inetAddress.hostAddress}:${server.localPort}"
 
         override fun close() {
             fillers.forEach { it.close() }
@@ -1318,6 +1336,16 @@ class RestClientEngineIntegrationTest {
         val now = AtomicLong()
         return { now.addAndGet(stepNanos) }
     }
+
+    /**
+     * Whether [failure]'s cause chain carries the connect timeout of one of the engines: `ConnectTimeoutException`
+     * (Apache, Reactor Netty), `HttpConnectTimeoutException` (JDK), or Jetty's `SocketTimeoutException` "Connect Timeout".
+     */
+    private fun isConnectTimeout(failure: Throwable?): Boolean =
+        generateSequence(failure) { it.cause.takeIf { cause -> cause !== it } }.any { cause ->
+            cause.javaClass.simpleName in setOf("ConnectTimeoutException", "HttpConnectTimeoutException") ||
+                (cause is SocketTimeoutException && cause.message == "Connect Timeout")
+        }
 
     /** Runs [call], returning what it threw (or `null`) and how long it took. */
     private fun timed(call: () -> Unit): Pair<Throwable?, Duration> {

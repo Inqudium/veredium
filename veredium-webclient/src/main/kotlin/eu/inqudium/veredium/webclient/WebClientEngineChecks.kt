@@ -172,7 +172,10 @@ internal object WebClientEngineChecks {
                     applied = listOf(connect, "the response timeout per endpoint (until the response headers arrive)"),
                     notApplied = listOf(maxConnections, pendingAcquire, queue, maxIdle, maxLife, evict, "gzip"),
                     meters = none,
-                    cancellation = "cancels the client's future, which aborts the exchange",
+                    cancellation =
+                        "cancels the client's future, which aborts the exchange while it waits for the head; a body " +
+                            "cancelled after the head arrived (a codec refusal, a TimeLimiter abort) is read to its end - " +
+                            "the JDK client has no per-exchange abort",
                 )
             }
 
