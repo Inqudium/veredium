@@ -182,7 +182,7 @@ stehen in `./CHANGELOG.md` unter „Fixed“.
 
 ### Befunde 2–19 (2026-10-23, Branch `fix/defect-analysis-2026-10-23`)
 
-18 von 19 Befunden sind behoben. Ein `mvn -o clean verify` über alle Module ist grün: 690 Tests (core 196,
+18 von 19 Befunden sind behoben, Befund 19 mit legatium 1.3.0 nachgetragen (unten). Ein `mvn -o clean verify` über alle Module ist grün: 690 Tests (core 196,
 restclient 249, webclient 245), 0 Fehler, ktlint sauber. Jeder neue oder verschärfte Test wurde mit der Mutation
 gegengeprüft, die der Befund als „bleibt grün“ nannte; jede wird jetzt rot. Die Änderungen stehen in
 `./CHANGELOG.md` unter „Fixed“.
@@ -216,12 +216,20 @@ Abweichend von der Fix-Strategie:
 - **17** — Die Fenster sind so breit, wie die Unterscheidung der beiden Timeouts zulässt; gemessen wird weiter ab
   dem Aufruf.
 
-Offen:
+Nachgetragen (2026-10-23, legatium 1.3.0, Branch `chore/legatium-1.3.0`):
 
-- **19** — legatium#88 ist geschlossen (`580578e` auf legatiums `main`): Ein abgebrochener Aufruf wird am
-  Interrupt-Flag des Workers erkannt, zusätzlich an einer `InterruptedException` in der Ursachenkette. Das deckt
-  auch die `InterruptedIOException` des Hand-offs ab. Ein Release mit dem Fix gibt es noch nicht (zuletzt 1.2.1
-  vom 2026-10-19). Zu tun bleibt das Anheben von `legatium.version`, sobald 1.2.2 erscheint.
+- **19** — behoben mit legatium 1.3.0. Ein abgebrochener blockierender Aufruf wird als WARN
+  `adapter_outcome=cancelled` geloggt statt als ERROR `failure`. Die beiden bisherigen Fälle in
+  `LegatiumExchangeLoggingIntegrationTest` (TimeLimiter-Ablauf, unterbrochener Aufrufer) liefen nur auf Apache.
+  Jetzt laufen sie parametrisiert auf allen vier Engines und verlangen `cancelled`. Gegenprobe: Mit legatium 1.2.1
+  werden alle acht Fälle rot.
+- **Neu aufgefallen, offen:** Ein Abbruch **mitten im Body** bleibt auf **Jetty** ERROR `failure` mit Status 200.
+  Jettys Body-Stream macht aus dem Interrupt ein nacktes `InterruptedIOException` ohne Ursache und verbraucht das
+  Interrupt-Flag. legatium hat dann keines seiner beiden Signale und belässt diese Exception laut seinem Changelog
+  bewusst bei `failure`. Apache, JDK und Reactor Netty loggen denselben Fall als `cancelled`. Ein dritter
+  parametrisierter Fall pinnt das je Engine (dreimal grün); die Guides nennen die Lücke.
+  - Mögliche Abhilfe in veredium: Der Jetty-Transport setzt das Interrupt-Flag vor dem Weiterwerfen eines solchen
+    `InterruptedIOException` wieder. Die andere Möglichkeit ist ein Issue an legatium.
 
 Aufgefallen, nicht Teil der Befunde: Auf `main` warnt der Kotlin-Compiler in `BlockingResilienceDecoratorTest`
 (5×) und `RestClientVerdictsTest` (3×) „Expression is unused“, in `WebClientEngineTransports` über Jettys
@@ -470,7 +478,7 @@ Keine.
   - Fix strategy: In `readTruncated` nach erreichtem Limit einen Probe-Read machen, wenn der deklarierte
     `Content-Length` dem Limit entspricht, oder den Grenzfall dokumentiert hinnehmen.
 
-- [ ] 19. [`./veredium-restclient/docs/timeouts-bulkheads-threads.md` — Klassifikationstabelle; aus dem Vorbericht (Nr. 16) übernommen, gegen legatium 1.2.1 nachgeprüft] {Low} {Confidence: high} {maintainability / logging}
+- [x] 19. [`./veredium-restclient/docs/timeouts-bulkheads-threads.md` — Klassifikationstabelle; aus dem Vorbericht (Nr. 16) übernommen, gegen legatium 1.2.1 nachgeprüft] {Low} {Confidence: high} {maintainability / logging}
   - Ein abgebrochener Exchange erscheint im Exchange-Strom weiter als ERROR `adapter_outcome=failure`.
   - Die neuen Abbruchtypen der Engines sind dort nicht klassifiziert: `InterruptedIOException` des Reactor-Hand-offs,
     `AsynchronousCloseException` aus `AbortingResponse` und die Cancellation von Apaches `cancel()`.
