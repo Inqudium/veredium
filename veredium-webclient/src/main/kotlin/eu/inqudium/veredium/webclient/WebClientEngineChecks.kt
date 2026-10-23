@@ -19,7 +19,8 @@ internal object WebClientEngineChecks {
     fun requireKnownAliases(
         engine: WebClientProperties.Engine,
         aliases: Collection<String>,
-    ) = EngineSelection.requireKnownAliases(KEY, engine.endpoints.keys, aliases)
+        foreign: Map<String, String> = emptyMap(),
+    ) = EngineSelection.requireKnownAliases(KEY, engine.endpoints.keys, aliases, foreign)
 
     /** Every engine in use must find its library; the message names what to add, per engine and backend. */
     fun requireLibraries(

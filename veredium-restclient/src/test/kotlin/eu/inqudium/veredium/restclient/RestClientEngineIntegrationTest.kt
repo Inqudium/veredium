@@ -1050,6 +1050,32 @@ class RestClientEngineIntegrationTest {
         }
 
         @Test
+        fun `should refuse the client and an engine override of an endpoint the reactive stack owns, naming that stack`() {
+            // What is tested: an endpoint whose `stack` is `webclient`, next to one of this stack's - asked for by
+            //   create(), and named by an engine override.
+            // Success criteria: create() fails with an IllegalArgumentException naming the owning stack; a factory with
+            //   an override for that alias does not construct, naming the key and the owning stack.
+            // Why it matters: with both client modules in one host, the other stack's endpoint is not this factory's to
+            //   serve (ADR-0003). Without the owner in the message, the alias would read as "no mesh endpoint" - though
+            //   the operator can see it in the YAML.
+            //
+            // Given: an endpoint of this stack and one the reactive stack owns
+            val own = mesh("trial")
+            val foreign = own.endpoints.single().copy(triplet = "/endpoint/${localAuthority()}/GET/foreign", alias = "foreign", stack = "webclient")
+            val mixed = MeshProperties(own.defaults, own.endpoints + foreign)
+            val factory = newFactory(RestClientProperties.Engine(), mesh = mixed)
+
+            // When / Then: no client for the foreign endpoint ...
+            assertThatThrownBy { factory.create("foreign") }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContainingAll("'foreign'", "owned by the webclient stack", "not by the restclient stack")
+            // ... and no engine override for it
+            assertThatThrownBy { newFactory(RestClientProperties.Engine(endpoints = mapOf("foreign" to RestClientEngine.JETTY)), mesh = mixed) }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContaining("app.restclient.engine.endpoints.foreign names a mesh endpoint the webclient stack owns")
+        }
+
+        @Test
         fun `should refuse an engine whose library is missing, naming the key and the dependency to add`() {
             // What is tested: the classpath check of a selected engine.
             // Success criteria: with Jetty reported absent, constructing a factory that selects it by default

@@ -122,7 +122,14 @@ fun timeLimiterCustomizer(endpoint: ResolvedTimeouts): TimeLimiterConfigCustomiz
  * exactly that enumeration - which beans to declare under which names - and nothing else; the customizer each
  * bean supplies is built from the [MeshProperties] BEAN, so every consumer (the client factory, the ladder
  * logger, the guard, these customizers) reasons about the one resolved set of [ResolvedTimeouts] the context
- * holds. The bean name carries the alias so two customizers can never collide on a Spring name either.
+ * holds. The bean name carries the stack and the alias, so two customizers can never collide on a Spring name.
+ *
+ * ## The stack's own endpoints
+ *
+ * The registrar declares beans for the endpoints its [stack] owns ([MeshProperties.endpointsOwnedBy]) and for no
+ * other: with both client stacks in one context, each customizes its own aliases with its own verdicts. A registrar
+ * cannot see what another registrar declares, so each also claims the endpoints that name no stack; with two stacks
+ * such an endpoint is claimed twice, and [MeshOwnershipCheck] fails the start, naming the `stack` key to set.
  *
  * ## How the customizers reach the instances
  *
@@ -151,6 +158,7 @@ fun timeLimiterCustomizer(endpoint: ResolvedTimeouts): TimeLimiterConfigCustomiz
  * a different named config.
  */
 abstract class MeshResilienceRegistrar(
+    private val stack: String,
     private val verdicts: BreakerVerdicts,
 ) : BeanRegistrar {
     override fun register(
@@ -162,27 +170,28 @@ abstract class MeshResilienceRegistrar(
                 .get(env)
                 .bind(MeshProperties.PREFIX, MeshProperties::class.java)
                 .orElseGet { MeshProperties() }
-        mesh.resolveAll().values.sortedBy { it.alias }.forEach { endpoint ->
-            registry.registerBean("$CIRCUIT_BREAKER_BEAN_PREFIX${endpoint.alias}", CircuitBreakerConfigCustomizer::class.java) { spec ->
+        mesh.endpointsOwnedBy(stack).values.sortedBy { it.alias }.forEach { endpoint ->
+            registry.registerBean(circuitBreakerBeanName(stack, endpoint.alias), CircuitBreakerConfigCustomizer::class.java) { spec ->
                 spec
                     .description("mesh circuit-breaker customizer for ${endpoint.triplet}")
                     .supplier { context -> circuitBreakerCustomizer(resolved(context, endpoint.triplet), verdicts) }
             }
             if (endpoint.timeLimiterEnabled) {
-                registry.registerBean("$TIME_LIMITER_BEAN_PREFIX${endpoint.alias}", TimeLimiterConfigCustomizer::class.java) { spec ->
+                registry.registerBean(timeLimiterBeanName(stack, endpoint.alias), TimeLimiterConfigCustomizer::class.java) { spec ->
                     spec
                         .description("mesh time-limiter customizer for ${endpoint.triplet}")
                         .supplier { context -> timeLimiterCustomizer(resolved(context, endpoint.triplet)) }
                 }
             }
         }
-        registry.registerBean(STARTUP_GUARD_BEAN_NAME, MeshResilienceStartupGuard::class.java) { spec ->
+        registry.registerBean(startupGuardBeanName(stack), MeshResilienceStartupGuard::class.java) { spec ->
             spec
-                .description("mesh resilience startup guard")
+                .description("mesh resilience startup guard of the $stack stack")
                 .supplier { context ->
                     val connectionPools = context.beanProvider(MeshConnectionPools::class.java)
                     MeshResilienceStartupGuard(
                         context.bean(MeshProperties::class.java),
+                        stack,
                         verdicts,
                         context.bean(CircuitBreakerConfigurationProperties::class.java),
                         context.bean(TimeLimiterConfigurationProperties::class.java),
@@ -205,13 +214,35 @@ abstract class MeshResilienceRegistrar(
             .getValue(triplet)
 
     companion object {
-        /** The Spring bean name of an alias's circuit-breaker customizer is this prefix plus the alias. */
+        /**
+         * The prefix of a circuit-breaker customizer's bean name, `meshCircuitBreakerCustomizer.<stack>.<alias>`. The
+         * stack in the name keeps two stacks' customizers apart, and it is how [MeshOwnershipCheck] reads which stack
+         * claims which alias.
+         */
         const val CIRCUIT_BREAKER_BEAN_PREFIX: String = "meshCircuitBreakerCustomizer."
 
-        /** The Spring bean name of an alias's time-limiter customizer is this prefix plus the alias. */
+        /** The prefix of a time-limiter customizer's bean name, `meshTimeLimiterCustomizer.<stack>.<alias>`. */
         const val TIME_LIMITER_BEAN_PREFIX: String = "meshTimeLimiterCustomizer."
 
-        /** The Spring bean name of the [MeshResilienceStartupGuard] the registrar declares. */
-        const val STARTUP_GUARD_BEAN_NAME: String = "meshResilienceStartupGuard"
+        /**
+         * The prefix of a stack's [MeshResilienceStartupGuard] bean name, `meshResilienceStartupGuard.<stack>` - how
+         * [MeshOwnershipCheck] reads which stacks are in the context.
+         */
+        const val STARTUP_GUARD_BEAN_PREFIX: String = "meshResilienceStartupGuard."
+
+        /** The bean name of [stack]'s circuit-breaker customizer for [alias]. */
+        fun circuitBreakerBeanName(
+            stack: String,
+            alias: String,
+        ): String = "$CIRCUIT_BREAKER_BEAN_PREFIX$stack.$alias"
+
+        /** The bean name of [stack]'s time-limiter customizer for [alias]. */
+        fun timeLimiterBeanName(
+            stack: String,
+            alias: String,
+        ): String = "$TIME_LIMITER_BEAN_PREFIX$stack.$alias"
+
+        /** The bean name of [stack]'s startup guard. */
+        fun startupGuardBeanName(stack: String): String = "$STARTUP_GUARD_BEAN_PREFIX$stack"
     }
 }

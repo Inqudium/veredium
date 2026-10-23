@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Both client modules in one host (ADR-0003):** `app.mesh.endpoints[].stack` (`restclient` / `webclient`) assigns an
+  endpoint to the stack that serves it. Needed only when a host depends on both modules - with one, every endpoint
+  belongs to it. Each stack's customizers, startup guard and factory cover its own endpoints only; a factory refuses
+  the other stack's endpoint, and an engine override for it, naming the owner. `MeshOwnershipCheck` fails the start,
+  before any registry or pool exists, for an endpoint both stacks or no stack would serve. `veredium-examples` has a
+  mixed example with both clients in one context.
+
 - **Build:** a new build-only module, `veredium-examples`, shows a host using both clients: one Spring Boot
   application per calling style - blocking and asynchronous on the RestClient, reactive on the WebClient - each
   with an adapter over two backends and the configuration it needs, and one that bounds a native Apache HttpClient 4
@@ -201,6 +208,9 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
 
 ### Changed
 
+- **Mesh bean names (breaking for lookups by name):** the customizer and guard beans carry the stack -
+  `meshCircuitBreakerCustomizer.<stack>.<alias>`, `meshTimeLimiterCustomizer.<stack>.<alias>`,
+  `meshResilienceStartupGuard.<stack>` - and `MeshResilienceRegistrar` takes the stack's name next to its verdicts.
 - **Wiring (breaking for a host that scanned the packages):** both client modules register a Spring Boot
   auto-configuration (`VerediumRestClientAutoConfiguration`, `VerediumWebClientAutoConfiguration`) instead of
   relying on a component scan of `eu.inqudium.veredium.restclient` / `.webclient`. The dependency alone wires the

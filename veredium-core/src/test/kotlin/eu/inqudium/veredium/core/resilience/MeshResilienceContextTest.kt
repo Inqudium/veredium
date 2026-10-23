@@ -71,11 +71,11 @@ class MeshResilienceContextTest {
 
             endpoints.forEach { endpoint ->
                 // ... one customizer bean per alias and layer, named so Resilience4j consulted it
-                assertThat(context).hasBean(MeshResilienceRegistrar.CIRCUIT_BREAKER_BEAN_PREFIX + endpoint.alias)
-                assertThat(context).hasBean(MeshResilienceRegistrar.TIME_LIMITER_BEAN_PREFIX + endpoint.alias)
-                assertThat(context.getBean(MeshResilienceRegistrar.CIRCUIT_BREAKER_BEAN_PREFIX + endpoint.alias))
+                assertThat(context).hasBean(MeshResilienceRegistrar.circuitBreakerBeanName(TestMeshRegistrar.STACK, endpoint.alias))
+                assertThat(context).hasBean(MeshResilienceRegistrar.timeLimiterBeanName(TestMeshRegistrar.STACK, endpoint.alias))
+                assertThat(context.getBean(MeshResilienceRegistrar.circuitBreakerBeanName(TestMeshRegistrar.STACK, endpoint.alias)))
                     .isInstanceOf(CircuitBreakerConfigCustomizer::class.java)
-                assertThat(context.getBean(MeshResilienceRegistrar.TIME_LIMITER_BEAN_PREFIX + endpoint.alias))
+                assertThat(context.getBean(MeshResilienceRegistrar.timeLimiterBeanName(TestMeshRegistrar.STACK, endpoint.alias)))
                     .isInstanceOf(TimeLimiterConfigCustomizer::class.java)
 
                 // ... each TimeLimiter carries the derived budget and keeps the YAML's cancelRunningFuture

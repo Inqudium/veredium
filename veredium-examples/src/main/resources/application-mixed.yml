@@ -1,0 +1,14 @@
+# The mixed example: both client modules active in one context. Each endpoint names the stack that serves it - the
+# one key that is required only when a host depends on both modules. The list replaces the endpoints of
+# application.yml as a whole, so it repeats them.
+app:
+  mesh:
+    endpoints:
+      - triplet: "/endpoint/customers.example.com/GET/v1/customers/{id}"
+        alias: customers
+        individual-request-timeout-ms: 300
+        stack: restclient
+      - triplet: "/endpoint/orders.example.com/POST/v1/orders/search"
+        alias: order-search
+        individual-request-timeout-ms: 500
+        stack: webclient

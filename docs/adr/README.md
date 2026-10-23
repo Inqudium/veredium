@@ -16,7 +16,7 @@ code disagree, the code wins and the ADR is corrected.
 |-----|-------|--------|
 | [ADR-0001](ADR-0001-one-stack-neutral-core-module.md) | One stack-neutral core module instead of twin copies | Accepted |
 | [ADR-0002](ADR-0002-blocking-resilience-decorator-as-a-core-component.md) | The blocking resilience decorator is a core component, usable without a client | Accepted |
-| [ADR-0003](ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md) | Each mesh endpoint is owned by one client stack, so both stacks can share a context | Proposed |
+| [ADR-0003](ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md) | Each mesh endpoint is owned by one client stack, so both stacks can share a context | Accepted |
 
 ### HTTP engines
 

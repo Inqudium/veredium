@@ -149,6 +149,29 @@ class WebClientEngineConfigTest {
                 .hasMessageContainingAll("app.webclient.engine.endpoints.orderz", "names no mesh endpoint", "[orders, payments]")
         }
 
+        @Test
+        fun `should refuse the client and an engine override of an endpoint the blocking stack owns, naming that stack`() {
+            // What is tested: an endpoint whose `stack` is `restclient`, next to one of this stack's - asked for by
+            //   create(), and named by an engine override.
+            // Success criteria: create() fails with an IllegalArgumentException naming the owning stack; a factory with
+            //   an override for that alias does not construct, naming the key and the owning stack.
+            // Why it matters: with both client modules in one host, the other stack's endpoint is not this factory's to
+            //   serve (ADR-0003). Without the owner in the message, the alias would read as "no mesh endpoint" - though
+            //   the operator can see it in the YAML.
+            //
+            // Given
+            val foreign = mapOf("billing" to "restclient")
+
+            // When / Then: no client for the foreign endpoint ...
+            assertThatThrownBy { factory(WebClientProperties.Engine(), foreign = foreign).create("billing") }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContainingAll("'billing'", "owned by the restclient stack", "not by the webclient stack")
+            // ... and no engine override for it
+            assertThatThrownBy { factory(WebClientProperties.Engine(endpoints = mapOf("billing" to WebClientEngine.JETTY)), foreign = foreign) }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContaining("app.webclient.engine.endpoints.billing names a mesh endpoint the restclient stack owns")
+        }
+
         @ParameterizedTest(name = "{0} without {1}")
         @CsvSource(
             "JETTY, org.eclipse.jetty.reactive, org.eclipse.jetty:jetty-reactive-httpclient",
@@ -299,6 +322,8 @@ class WebClientEngineConfigTest {
             aliases: List<String> = listOf("orders"),
             pool: WebClientProperties.Pool = WebClientProperties.Pool(),
             resourceLoader: DefaultResourceLoader? = null,
+            // Endpoints another stack owns, as alias -> stack, next to `aliases`.
+            foreign: Map<String, String> = emptyMap(),
         ): ResilientWebClientFactory =
             ResilientWebClientFactory(
                 WebClientProperties(engine = engine, pool = pool),
@@ -306,7 +331,10 @@ class WebClientEngineConfigTest {
                     endpoints =
                         aliases.map { alias ->
                             MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/$alias", alias = alias, baseUrl = "http://localhost:1")
-                        },
+                        } +
+                            foreign.map { (alias, stack) ->
+                                MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/$alias", alias = alias, baseUrl = "http://localhost:1", stack = stack)
+                            },
                 ),
                 ReactiveResilienceDecorator(CircuitBreakerRegistry.ofDefaults(), TimeLimiterRegistry.ofDefaults(), BulkheadRegistry.ofDefaults()),
                 JsonMapper.builder().build(),

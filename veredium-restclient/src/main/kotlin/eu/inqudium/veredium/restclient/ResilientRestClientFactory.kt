@@ -106,7 +106,7 @@ class ResilientRestClientFactory(
      * The endpoints, the drain window, the default headers, the size meter and the validation - derived the same way
      * as on the reactive stack ([MeshClientPlan]).
      */
-    private val plan = MeshClientPlan(meshProperties, "app.restclient", properties.validation, validatorFactory, logger)
+    private val plan = MeshClientPlan(meshProperties, RestClientMeshRegistrar.STACK, "app.restclient", properties.validation, validatorFactory, logger)
 
     /** Standalone HTTP observation toggle (see [RestClientProperties.Observability]) - this module's own property alone. */
     private val observationEnabled: Boolean = properties.observability.httpObservationEnabled
@@ -210,7 +210,7 @@ class ResilientRestClientFactory(
      */
     private fun checkedEngineSelection(): Map<String, RestClientEngine> {
         val engines = properties.engine
-        EngineSelection.requireKnownAliases(RestClientProperties.Engine.PREFIX, engines.endpoints.keys, meshByBackend.keys)
+        EngineSelection.requireKnownAliases(RestClientProperties.Engine.PREFIX, engines.endpoints.keys, meshByBackend.keys, plan.foreignEndpoints)
         val selected = meshByBackend.keys.associateWith(engines::engineFor)
         EngineSelection.requireLibraries(RestClientProperties.Engine.PREFIX, selected, engines.endpoints.keys, engineLibraryPresent)
         val hostAllowed = jdkAllowsHostHeader()

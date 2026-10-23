@@ -34,9 +34,15 @@ of this module is the reference configuration the contract tests pin - a library
 
 The dependency is all the wiring there is: the module registers a Spring Boot auto-configuration,
 `VerediumRestClientAutoConfiguration`, which brings the client factory, the mesh wiring of `veredium-core` and the startup
-lines. Its beans back off for a host's own bean of the same type. A host that has `veredium-webclient` on its classpath
-too excludes one of the two auto-configurations (for example
-`@SpringBootApplication(exclude = [VerediumWebClientAutoConfiguration::class])`): the two stacks cannot share a context yet
+lines. Its beans back off for a host's own bean of the same type.
+
+**Both client modules in one host.** A host that depends on `veredium-webclient` as well runs both stacks in one context. Each
+mesh endpoint then names the stack that serves it, `app.mesh.endpoints[].stack: restclient` for this module; an
+endpoint without the key fails the start with a message that names it. Each factory serves only its own stack's
+endpoints and refuses the other's, naming the owner. Each stack holds its own pools, so
+`app.mesh.defaults.transport.max-connections` applies per stack and the sidecar can see twice as many connections. A
+host with one client module never sets `stack`, and neither does one that excludes the other auto-configuration
+(`@SpringBootApplication(exclude = [VerediumWebClientAutoConfiguration::class])`)
 ([ADR-0003](../../docs/adr/ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md)).
 
 ## Engines

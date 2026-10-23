@@ -426,6 +426,7 @@ Example: `/endpoint/api.example.com/GET/v5/access-profiles/by-involved-party/{id
 | `max-retries` | `Int?` | `null` → `defaults` | Mirrors the sidecar's max-retries; folds into `global`. |
 | `base-url` | `String?` | `null` → `transport.sidecar-base-url` | Per-endpoint WebClient base URL (the sidecar). |
 | `headers` | `Map<String,String>` | `{}` | Extra static headers (the Host header is derived, not set here). |
+| `stack` | `String?` | `null` | The client stack that serves the endpoint, `webclient` or `restclient`. Needed only when the host depends on both client modules ([ADR-0003](../../docs/adr/ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md)). |
 | `time-limiter` | `{enabled: Boolean?}` | `null` → inherit | Whether mesh derives this endpoint's TimeLimiter (§2.6). |
 | `circuit-breaker` | `{enabled: Boolean?}` | `null` → inherit | Whether mesh derives this endpoint's CircuitBreaker (§2.6). |
 

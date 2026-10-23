@@ -34,8 +34,9 @@ import tools.jackson.databind.ObjectMapper
  *   [RestClientObservationReport].
  *
  * The decorator and the factory back off for a host's own bean of the same type. A host with the reactive client on
- * its classpath as well excludes one of the two auto-configurations: the two stacks cannot share a context yet
- * (ADR-0003, "each mesh endpoint is owned by one client stack").
+ * its classpath as well runs both stacks in one context; each mesh endpoint then names its stack in
+ * `app.mesh.endpoints[].stack`, and the core's ownership check fails the start for one that does not (ADR-0003, "each
+ * mesh endpoint is owned by one client stack").
  */
 @AutoConfiguration
 @EnableConfigurationProperties(RestClientProperties::class)
@@ -104,5 +105,13 @@ class VerediumRestClientAutoConfiguration {
     }
 }
 
-/** The shared mesh wiring of `veredium-core`, registered with this stack's verdicts. */
-class RestClientMeshRegistrar : MeshResilienceRegistrar(RestClientVerdicts.breakerVerdicts)
+/** The shared mesh wiring of `veredium-core`, registered under this stack's name with this stack's verdicts. */
+class RestClientMeshRegistrar : MeshResilienceRegistrar(STACK, RestClientVerdicts.breakerVerdicts) {
+    companion object {
+        /**
+         * This stack's name: the value of `app.mesh.endpoints[].stack` that assigns an endpoint to it, and the stack
+         * segment of its mesh bean names. Needed in the configuration only when a host depends on both client modules.
+         */
+        const val STACK: String = "restclient"
+    }
+}
