@@ -6,7 +6,6 @@ import io.github.resilience4j.bulkhead.Bulkhead
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
-import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
 
@@ -47,13 +46,13 @@ object TestVerdicts {
     fun bulkheadRejection(): BulkheadFullException = BulkheadFullException.createBulkheadFullException(Bulkhead.of("probe", BulkheadConfig.ofDefaults()))
 }
 
-/** What a stack's `*VerdictsConfig` is: the verdicts bean next to the import of the shared wiring. */
+/** What a stack's `*MeshRegistrar` is: the shared registrar with the stack's verdicts handed in. */
+class TestMeshRegistrar : MeshResilienceRegistrar(TestVerdicts.breakerVerdicts)
+
+/** What a stack's configuration does for the mesh: import the shared configuration next to its registrar. */
 @Configuration(proxyBeanMethods = false)
-@Import(MeshResilienceConfiguration::class)
-class TestVerdictsConfig {
-    @Bean
-    fun breakerVerdicts(): BreakerVerdicts = TestVerdicts.breakerVerdicts
-}
+@Import(MeshResilienceConfiguration::class, TestMeshRegistrar::class)
+class TestStackConfiguration
 
 /**
  * The mesh most tests of this package are built on: the accounts endpoint, optionally next to further

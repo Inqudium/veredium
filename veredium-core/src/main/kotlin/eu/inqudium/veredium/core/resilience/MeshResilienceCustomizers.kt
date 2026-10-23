@@ -1,9 +1,16 @@
 package eu.inqudium.veredium.core.resilience
 
+import eu.inqudium.veredium.core.mesh.MeshConnectionPools
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
+import io.github.resilience4j.bulkhead.BulkheadRegistry
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.common.circuitbreaker.configuration.CircuitBreakerConfigCustomizer
 import io.github.resilience4j.common.timelimiter.configuration.TimeLimiterConfigCustomizer
+import io.github.resilience4j.spring6.bulkhead.configure.BulkheadConfigurationProperties
+import io.github.resilience4j.spring6.circuitbreaker.configure.CircuitBreakerConfigurationProperties
+import io.github.resilience4j.spring6.timelimiter.configure.TimeLimiterConfigurationProperties
+import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import org.springframework.beans.factory.BeanRegistrar
 import org.springframework.beans.factory.BeanRegistry
 import org.springframework.boot.context.properties.bind.Binder
@@ -120,27 +127,34 @@ fun circuitBreakerCustomizer(
 /**
  * The customizer of [endpoint]'s time limiter: the ladder's [ResolvedTimeouts.timeLimiterTimeout] as the budget.
  * Registered only for an endpoint whose time-limiter derivation is enabled (see
- * [MeshResilienceCustomizerRegistrar]); a disabled endpoint keeps the budget its YAML or the library default
+ * [MeshResilienceRegistrar]); a disabled endpoint keeps the budget its YAML or the library default
  * gave it, untouched. Everything else on the instance - `cancelRunningFuture` above all, which the blocking
  * decorator relies on - is inherited from YAML, which is why this customizer sets exactly one knob.
  */
 fun timeLimiterCustomizer(endpoint: ResolvedTimeouts): TimeLimiterConfigCustomizer = TimeLimiterConfigCustomizer.of(endpoint.alias) { builder -> builder.timeoutDuration(endpoint.timeLimiterTimeout) }
 
 /**
- * Registers one circuit-breaker customizer per mesh alias, and one time-limiter customizer per alias whose
- * time-limiter derivation is enabled, as beans - which is what Resilience4j's Spring configuration collects.
+ * The shared mesh wiring a client stack registers with its own [verdicts]: one circuit-breaker customizer per
+ * mesh alias, one time-limiter customizer per alias whose time-limiter derivation is enabled, and the
+ * [MeshResilienceStartupGuard] - as beans, which is what Resilience4j's Spring configuration collects.
+ *
+ * Abstract, because the verdicts are a fact about the client STACK - which exception carries a response status,
+ * which failures the client raises itself - and the stack is known at compile time. Each stack subclasses it with
+ * its verdicts object (`RestClientMeshRegistrar`, `WebClientMeshRegistrar`) and imports the subclass next to
+ * `MeshResilienceConfiguration`. The verdicts therefore never pass through the context: a host can neither replace
+ * them with a bean of its own nor override them by accident, and the guard probes with the verdicts the customizers
+ * actually installed.
  *
  * A [BeanRegistrar] rather than `@Bean` methods because the number of beans is only known once `app.mesh` is
  * read: the aliases come from the endpoint list. The registrar binds `app.mesh` from the [Environment] for
  * exactly that enumeration - which beans to declare under which names - and nothing else; the customizer each
- * bean supplies is built from the [MeshProperties] BEAN and the stack's [BreakerVerdicts] bean, so every
- * consumer (the client factory, the ladder logger, the guard, these customizers) reasons about the one resolved
- * set of [ResolvedTimeouts] the context holds. The bean name carries the alias so two customizers can never
- * collide on a Spring name either.
- *
- * Imported by `MeshResilienceConfiguration`; it is not a component of its own.
+ * bean supplies is built from the [MeshProperties] BEAN, so every consumer (the client factory, the ladder
+ * logger, the guard, these customizers) reasons about the one resolved set of [ResolvedTimeouts] the context
+ * holds. The bean name carries the alias so two customizers can never collide on a Spring name either.
  */
-class MeshResilienceCustomizerRegistrar : BeanRegistrar {
+abstract class MeshResilienceRegistrar(
+    private val verdicts: BreakerVerdicts,
+) : BeanRegistrar {
     override fun register(
         registry: BeanRegistry,
         env: Environment,
@@ -154,7 +168,7 @@ class MeshResilienceCustomizerRegistrar : BeanRegistrar {
             registry.registerBean(CIRCUIT_BREAKER_BEAN_PREFIX + endpoint.alias, CircuitBreakerConfigCustomizer::class.java) { spec ->
                 spec
                     .description("mesh circuit-breaker customizer for " + endpoint.triplet)
-                    .supplier { context -> circuitBreakerCustomizer(resolved(context, endpoint.triplet), context.bean(BreakerVerdicts::class.java)) }
+                    .supplier { context -> circuitBreakerCustomizer(resolved(context, endpoint.triplet), verdicts) }
             }
             if (endpoint.timeLimiterEnabled) {
                 registry.registerBean(TIME_LIMITER_BEAN_PREFIX + endpoint.alias, TimeLimiterConfigCustomizer::class.java) { spec ->
@@ -163,6 +177,23 @@ class MeshResilienceCustomizerRegistrar : BeanRegistrar {
                         .supplier { context -> timeLimiterCustomizer(resolved(context, endpoint.triplet)) }
                 }
             }
+        }
+        registry.registerBean(STARTUP_GUARD_BEAN_NAME, MeshResilienceStartupGuard::class.java) { spec ->
+            spec
+                .description("mesh resilience startup guard")
+                .supplier { context ->
+                    val connectionPools = context.beanProvider(MeshConnectionPools::class.java)
+                    MeshResilienceStartupGuard(
+                        context.bean(MeshProperties::class.java),
+                        verdicts,
+                        context.bean(CircuitBreakerConfigurationProperties::class.java),
+                        context.bean(TimeLimiterConfigurationProperties::class.java),
+                        context.bean(BulkheadConfigurationProperties::class.java),
+                        context.bean(CircuitBreakerRegistry::class.java),
+                        context.bean(TimeLimiterRegistry::class.java),
+                        context.bean(BulkheadRegistry::class.java),
+                    ) { connectionPools.orderedStream().toList().flatMap { it.connectionPools() } }
+                }
         }
     }
 
@@ -178,5 +209,6 @@ class MeshResilienceCustomizerRegistrar : BeanRegistrar {
     companion object {
         const val CIRCUIT_BREAKER_BEAN_PREFIX = "meshCircuitBreakerCustomizer."
         const val TIME_LIMITER_BEAN_PREFIX = "meshTimeLimiterCustomizer."
+        const val STARTUP_GUARD_BEAN_NAME = "meshResilienceStartupGuard"
     }
 }

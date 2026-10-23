@@ -26,7 +26,7 @@ import java.util.function.Supplier
 
 /**
  * Boots Resilience4j's own Boot auto-configuration on the `resilience4j.*` and `app.mesh.*` blocks of the test
- * fixture, with the shared mesh wiring the way a client stack imports it (`TestVerdictsConfig`: the verdicts
+ * fixture, with the shared mesh wiring the way a client stack imports it (`TestStackConfiguration`: the verdicts
  * bean plus `MeshResilienceConfiguration` - the per-alias customizer beans, the startup guard, the ladder logger) - and
  * pins both directions of the guard.
  *
@@ -70,11 +70,11 @@ class MeshResilienceContextTest {
 
             endpoints.forEach { endpoint ->
                 // ... one customizer bean per alias and layer, named so Resilience4j consulted it
-                assertThat(context).hasBean(MeshResilienceCustomizerRegistrar.CIRCUIT_BREAKER_BEAN_PREFIX + endpoint.alias)
-                assertThat(context).hasBean(MeshResilienceCustomizerRegistrar.TIME_LIMITER_BEAN_PREFIX + endpoint.alias)
-                assertThat(context.getBean(MeshResilienceCustomizerRegistrar.CIRCUIT_BREAKER_BEAN_PREFIX + endpoint.alias))
+                assertThat(context).hasBean(MeshResilienceRegistrar.CIRCUIT_BREAKER_BEAN_PREFIX + endpoint.alias)
+                assertThat(context).hasBean(MeshResilienceRegistrar.TIME_LIMITER_BEAN_PREFIX + endpoint.alias)
+                assertThat(context.getBean(MeshResilienceRegistrar.CIRCUIT_BREAKER_BEAN_PREFIX + endpoint.alias))
                     .isInstanceOf(CircuitBreakerConfigCustomizer::class.java)
-                assertThat(context.getBean(MeshResilienceCustomizerRegistrar.TIME_LIMITER_BEAN_PREFIX + endpoint.alias))
+                assertThat(context.getBean(MeshResilienceRegistrar.TIME_LIMITER_BEAN_PREFIX + endpoint.alias))
                     .isInstanceOf(TimeLimiterConfigCustomizer::class.java)
 
                 // ... each TimeLimiter carries the derived budget and keeps the YAML's cancelRunningFuture
@@ -129,6 +129,37 @@ class MeshResilienceContextTest {
     }
 
     @Test
+    fun `should keep the stack's verdicts on every breaker when the host declares verdicts of its own`() {
+        // What is tested: the fixture context plus a BreakerVerdicts bean of the host whose rule reads no
+        //   exception of the stack as a benign client error or as a client-side failure.
+        // Success criteria: the context starts; every breaker still leaves the stack's 404 unrecorded and ignores
+        //   the bulkhead's rejection - the verdicts the stack's registrar handed in.
+        // Why it matters: the stack hands its verdicts to the shared wiring as an object, not through the
+        //   context. A bean that replaced them would make a documented 404 count as a backend failure and could
+        //   open the circuit, and the guard would not notice, because it would probe with the same wrong verdicts.
+        //
+        // Given: a host bean with verdicts that would record the benign 404 and the rejection
+        val foreign =
+            BreakerVerdicts(
+                httpExchangeError = HttpExchangeErrorPolicy { error -> (error as? TestBufferLimitException)?.let { 404 } },
+                clientSideFailure = ClientSideFailurePolicy(listOf(TestBufferLimitException::class.java), TestBufferLimitException::class.java),
+                benignClientErrorProbe = TestBufferLimitException(),
+            )
+
+        // When
+        fixtureContext().withBean(BreakerVerdicts::class.java, Supplier { foreign }).run { context ->
+            // Then
+            assertThat(context).hasNotFailed()
+            val registry = context.getBean(CircuitBreakerRegistry::class.java)
+            fixtureAliases().forEach { alias ->
+                val config = registry.circuitBreaker(alias).circuitBreakerConfig
+                assertThat(config.recordExceptionPredicate.test(TestResponseException(404))).`as`("benign 404 on %s", alias).isFalse()
+                assertThat(config.ignoreExceptionPredicate.test(TestVerdicts.bulkheadRejection())).`as`("rejection on %s", alias).isTrue()
+            }
+        }
+    }
+
+    @Test
     fun `should refuse to start when an endpoint's time limiter is not declared`() {
         // What is tested: the silent case the guard exists for, in the real wiring - the fixture minus one
         //   TimeLimiter instance, the drift an edited host configuration produces. Resilience4j still creates
@@ -177,7 +208,7 @@ class MeshResilienceContextTest {
                     AutoConfigurations.of(CircuitBreakerAutoConfiguration::class.java, BulkheadAutoConfiguration::class.java),
                 ).withBean(TimeLimiterRegistry::class.java, Supplier { handMade })
                 .withBean(TimeLimiterConfigurationProperties::class.java, Supplier { declared })
-                .withUserConfiguration(TestVerdictsConfig::class.java)
+                .withUserConfiguration(TestStackConfiguration::class.java)
 
         // When / Then
         runner.run { context ->
@@ -190,8 +221,8 @@ class MeshResilienceContextTest {
 
     /**
      * The context the way a host assembles its resilience side: Resilience4j's three auto-configurations
-     * reading the fixture's `resilience4j.*` keys, and a stack's verdicts configuration, which imports the mesh
-     * wiring - the `app.mesh.*` binding, the customizer registrar, the guard and the ladder logger. Nothing
+     * reading the fixture's `resilience4j.*` keys, and a stack's configuration, which imports the mesh wiring -
+     * the `app.mesh.*` binding and the ladder logger, and the stack's registrar with the customizers and the guard. Nothing
      * else - no client, no factory, no pool.
      */
     private fun fixtureContext(properties: Map<String, Any> = fixtureProperties()): ApplicationContextRunner =
@@ -204,7 +235,7 @@ class MeshResilienceContextTest {
                     CircuitBreakerAutoConfiguration::class.java,
                     BulkheadAutoConfiguration::class.java,
                 ),
-            ).withUserConfiguration(TestVerdictsConfig::class.java)
+            ).withUserConfiguration(TestStackConfiguration::class.java)
 
     /**
      * The [FIXTURE_PREFIXES] keys of the fixture, flattened the way Boot would load them. Read from the file
