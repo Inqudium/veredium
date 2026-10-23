@@ -23,7 +23,7 @@ so the differences are decisions on record rather than surprises in production.
 | `ResilientWebClient`                  | `ResilientRestClient`                  | Same per-call pipeline; `get`/`post` return `T` or throw, `getAsync`/`postAsync` return a `CompletableFuture<T>` (§2). |
 | `ResilientWebClientFactory`           | `ResilientRestClientFactory`           | Same optional collaborators, same required `RestClient.Builder` bean from Boot, same startup lines. |
 | `ReactiveResilienceDecorator`         | `BlockingResilienceDecorator` (`veredium-core`) | Same order `CircuitBreaker(TimeLimiter(Bulkhead(call)))`, see §2. The blocking one is a component of the core, usable without this client; this module declares its bean in `RestClientConfiguration`. |
-| `WebClientVerdicts` / `WebClientConfiguration` | `RestClientVerdicts` / `RestClientConfiguration` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the config bean that imports the core's `MeshTimeoutConfig` (§8). |
+| `WebClientVerdicts` / `WebClientConfiguration` | `RestClientVerdicts` / `RestClientConfiguration` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the config bean that imports the core's `MeshResilienceConfiguration` (§8). |
 | `WebClientProperties` (`app.webclient`) | `RestClientProperties` (`app.restclient`) | Same keys except `pool.pending-acquire-max-count` (§3). |
 | `WebClientObservationReport` | `RestClientObservationReport` | Each a five-line subclass of the core's `HttpObservationReport` with the stack's name and toggle key; the two startup lines and their four verdicts are written once. |
 | `ResponseValidation`, `ResponseValidationProperties` (`validation.*` of either properties tree) | the same classes (`veredium-core`) | The validator derived from the host's factory with its messages pinned to English, the per-alias toggle, the provider verdict - the webclient used to carry this inline in its factory. |
@@ -67,7 +67,7 @@ adds is its bean (`RestClientConfiguration`) with the worker name `restclient-ca
    a caller's `CORRELATION_ID` reaches legatium's exchange event **without any host recipe** — on the reactive
    stack that was a documented gap closed by a `ThreadLocalAccessor` — and why the `http.client.requests`
    observation nests under the caller's span instead of starting a detached root. There is no JVM-wide hook: the
-   twin's `WebClientReactorContextPropagationConfig` has no counterpart here.
+   twin's `WebClientReactorContextPropagationConfiguration` has no counterpart here.
 3. **What cancellation does.** Cancelling the future interrupts the worker, and since JDK 13 a blocking socket
    read *does* react to that: the socket is closed and the read fails at once with
    `SocketException: Closed by interrupt` (connect and pool lease are interruptible too). The worker is released
@@ -279,7 +279,7 @@ auto-configuration, so a customizer's effect could not be observed in its tests.
 This module used that extension point from the start, and since the module cut of ADR-0001 both stacks do, from
 one implementation in `veredium-core`: `MeshResilienceCustomizers.kt` registers one `CircuitBreakerConfigCustomizer`
 per mesh alias and one `TimeLimiterConfigCustomizer` per alias whose time-limiter derivation is on (a Spring 7
-`BeanRegistrar`, imported by the core's `MeshTimeoutConfig`, because the number of beans follows the endpoint
+`BeanRegistrar`, imported by the core's `MeshResilienceConfiguration`, because the number of beans follows the endpoint
 list). Resilience4j's Boot configuration consults them as the last step of building each `instances.<alias>`
 entry — after the named base config and the instance's own YAML, before the instance exists — so the binders
 bind to the final instance and nothing is rebuilt later. The verdicts are folded onto what YAML produced (ignore
@@ -288,7 +288,7 @@ OR-ed, record AND-ed), so an operator's own lists survive.
 What the stack contributes is one bean, `BreakerVerdicts` (`RestClientVerdicts` here, `WebClientVerdicts` in the
 twin): how to read a response status off this stack's exception, which exception types this stack raises
 itself, and a 404 in the shape this stack throws it as the guard's probe. `RestClientConfiguration` declares the
-bean and `@Import`s `MeshTimeoutConfig`, so a host that scans this module's package gets the core wiring too.
+bean and `@Import`s `MeshResilienceConfiguration`, so a host that scans this module's package gets the core wiring too.
 The RULES — a benign 4xx except 408/429 is a success, a client-side failure is ignored, the cause chain is
 walked to a bounded depth — are written once and cannot drift between the stacks any more.
 

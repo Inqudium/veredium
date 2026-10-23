@@ -239,6 +239,7 @@ class ClientCallLog(
         )
     }
 
+    /** Writes one transport line without a throwable - [log] with its `error` left out. */
     fun log(
         level: Level,
         msg: String,

@@ -1,6 +1,6 @@
 package eu.inqudium.veredium.restclient
 
-import eu.inqudium.veredium.core.mesh.MeshTimeoutConfig
+import eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import eu.inqudium.veredium.core.resilience.BreakerVerdicts
 import io.github.resilience4j.bulkhead.BulkheadRegistry
@@ -18,7 +18,7 @@ import org.springframework.context.annotation.Import
  * host imports when it does not scan the package:
  *
  * - the `app.restclient` binding ([RestClientProperties]);
- * - the shared mesh wiring of `veredium-core` ([MeshTimeoutConfig]: the `app.mesh` binding, the per-alias
+ * - the shared mesh wiring of `veredium-core` ([MeshResilienceConfiguration]: the `app.mesh` binding, the per-alias
  *   Resilience4j customizers, the startup guard, the ladder logger), fed with this stack's verdicts
  *   ([RestClientVerdicts]) through the [BreakerVerdicts] bean - so a host that scans this module's package gets
  *   the core wiring too, without knowing the core package exists;
@@ -37,7 +37,7 @@ import org.springframework.context.annotation.Import
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(RestClientProperties::class)
-@Import(MeshTimeoutConfig::class)
+@Import(MeshResilienceConfiguration::class)
 class RestClientConfiguration {
     @Bean
     fun breakerVerdicts(): BreakerVerdicts = RestClientVerdicts.breakerVerdicts

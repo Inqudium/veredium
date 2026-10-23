@@ -12,7 +12,7 @@ import org.springframework.stereotype.Component
  * one. Lines are written under this class's logger name.
  *
  * The JVM-global Reactor context-propagation hook this observation setup depends on is NOT flipped here or in
- * the factory - it lives in [WebClientReactorContextPropagationConfig], so a process-wide switch is not a side
+ * the factory - it lives in [WebClientReactorContextPropagationConfiguration], so a process-wide switch is not a side
  * effect of constructing either.
  */
 @Component

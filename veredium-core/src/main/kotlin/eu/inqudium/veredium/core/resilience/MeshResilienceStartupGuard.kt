@@ -70,8 +70,8 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  * WARN naming both numbers and every alias, not a failed start. Which aliases share a pool is the client
  * modules' knowledge - each engine of a client factory has a pool of its own - so the pools come from the
  * [MeshConnectionPools] beans the factories are; a pool without a bound (the JDK client) is not
- * checked. Without such a bean the sum runs over ALL mesh aliases against one pool, as before the engines were
- * selectable. Per engine the sum is exact for Apache's blocking pool (one total cap for every route) and
+ * checked. Without such a bean the sum runs over ALL mesh aliases against the one pool the mesh transport
+ * describes. Per engine the sum is exact for Apache's blocking pool (one total cap for every route) and
  * conservative where the cap is per remote address and an endpoint has a `base-url` of its own.
  * The values are read off the registry's instances, i.e. after base config and instance properties were
  * merged; the wiring check guarantees there is one per alias by then.

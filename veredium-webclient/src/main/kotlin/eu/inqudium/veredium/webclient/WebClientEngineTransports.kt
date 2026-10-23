@@ -177,18 +177,22 @@ internal class EngineTransports(
  * `HttpResources` even with own loops. The resolver is Netty's `DefaultAddressResolverGroup`, a stateless
  * singleton carrying no setting, which resolves through `InetAddress` - as the JDK, Jetty and Apache clients do.
  * The lookup runs on the event loop: nothing for the loopback sidecar (`localhost`), a blocking DNS query for a
- * remote base URL. Until the engine switch existed, this engine ran on the global loops and resolver.
+ * remote base URL.
  *
- * The loops are disposed [loopDisposeDelay] after the pool, not with it: closing a loop group closes every
- * channel on it at once, and the pool disposal deliberately lets an in-flight call finish on its connection. No
- * call outlives that delay (it is the factory's drain bound, longer than any response timeout), so the loops go
+ * The loops are disposed [drainBound] after the pool, not with it: closing a loop group closes every channel on it
+ * at once, and the pool disposal deliberately lets an in-flight call finish on its connection. No call outlives
+ * that bound (it is longer than any response timeout), so the loops go
  * when nothing can still need them; the threads are daemons, so a JVM exiting before that is not held up.
  */
 internal class ReactorNettyTransport(
     properties: WebClientProperties,
     private val meshTransport: MeshProperties.Transport,
     poolName: String,
-    private val loopDisposeDelay: Duration,
+    /**
+     * The factory's drain bound, longer than any response timeout: the pool's graceful `disposeTimeout`, and how
+     * long after the pool's disposal the loops are disposed.
+     */
+    private val drainBound: Duration,
     /** Waits for the pool's disposal, bounded by the time given - the factory's drain, which reports an expiry. */
     private val dispose: (Mono<Void>, Duration) -> Unit,
 ) : EngineTransport {
@@ -214,7 +218,7 @@ internal class ReactorNettyTransport(
             // acquire, serves the waiting ones and completes once every connection came back - or fails with a
             // TimeoutException at the bound, which Reactor Netty logs at ERROR; the factory's own wait, bounded by
             // what is left of the shared deadline, has reported the pool with a WARN before that.
-            .disposeTimeout(loopDisposeDelay)
+            .disposeTimeout(drainBound)
             .metrics(true)
             .build()
 
@@ -248,13 +252,13 @@ internal class ReactorNettyTransport(
         dispose(connectionProvider.disposeLater(), EngineDrain.remaining(deadlineNanos, nanoTime))
         if (loopsScheduled.compareAndSet(false, true)) {
             Mono
-                .delay(loopDisposeDelay)
+                .delay(drainBound)
                 .then(loops.disposeLater())
                 .subscribe()
         }
     }
 
-    /** The pool is disposed; the loops follow [loopDisposeDelay] later (class KDoc). */
+    /** The pool is disposed; the loops follow [drainBound] later (class KDoc). */
     override fun isReleased(): Boolean = connectionProvider.isDisposed
 }
 

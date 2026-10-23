@@ -135,12 +135,12 @@ itself; this flag decides whether it *keeps* it.
   at startup with a message naming `WebClient.Builder` instead of running on a bare builder without a span. The
   module brings `spring-boot-starter-webclient` itself, so the auto-configuration is on the classpath whether or
   not the host declares that starter; a host that excludes it declares its own `WebClient.Builder` bean.
-- Enabling it also flips a **JVM-wide** hook: `WebClientReactorContextPropagationConfig` calls
+- Enabling it also flips a **JVM-wide** hook: `WebClientReactorContextPropagationConfiguration` calls
   `Hooks.enableAutomaticContextPropagation()` so the active observation survives Reactor thread hops. This lives
   in its own `@Configuration` (not the factory constructor) precisely because the effect is process-wide and
   cannot be undone — it must be deliberate wiring, gated on this toggle, not a side effect of constructing a
   factory (which a test may do repeatedly). Both branches are pinned by
-  `WebClientReactorContextPropagationConfigTest` (a ThreadLocal carried across a thread hop with the toggle on,
+  `WebClientReactorContextPropagationConfigurationTest` (a ThreadLocal carried across a thread hop with the toggle on,
   nothing changed with it off).
 - Self-contained: it resolves from this module's own property and references nothing from sync-bridge.
 - See also §4.2 for the **central** disable-filter that can suppress the observation even when this is on.

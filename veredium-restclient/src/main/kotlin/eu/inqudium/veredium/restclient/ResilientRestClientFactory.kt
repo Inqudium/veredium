@@ -168,8 +168,8 @@ class ResilientRestClientFactory(
 
     /**
      * The engines in use, one transport each, created here in a stable order (the enum's) and only for an engine
-     * some backend selects. Apache first, as before the engines existed: its pool and its meters come up when
-     * the factory does.
+     * some backend selects. Apache, the default, comes first: its pool and its meters come up when the factory
+     * does.
      */
     private val transports: Map<RestClientEngine, EngineTransport> =
         EngineTransport.createAll(engineByBackend.values.toSortedSet(), logger) { engine ->

@@ -55,7 +55,7 @@ vocabulary.
 ### What lives in the core
 
 - `eu.inqudium.veredium.core.mesh`: `MeshProperties` (`app.mesh`),
-  `ResolvedTimeouts`, `MeshLadderLogger`, `MeshTimeoutConfig`.
+  `ResolvedTimeouts`, `MeshLadderLogger`, `MeshResilienceConfiguration`.
 - `eu.inqudium.veredium.core.resilience`: `HttpExchangeErrorPolicy`,
   `ClientSideFailurePolicy`, `BreakerVerdicts`, the per-alias customizers
   (`MeshResilienceCustomizers.kt`, `MeshResilienceCustomizerRegistrar`) and
@@ -92,7 +92,7 @@ class BreakerVerdicts(httpExchangeError, clientSideFailure, benignClientErrorPro
 Each stack holds one instance (`RestClientVerdicts`, `WebClientVerdicts`)
 and one `@Configuration` (`RestClientConfiguration`, `WebClientConfiguration`)
 that declares the `BreakerVerdicts` bean and `@Import`s the core's
-`MeshTimeoutConfig`. The core's configuration is therefore never scanned
+`MeshResilienceConfiguration`. The core's configuration is therefore never scanned
 on its own: a host that scans its stack's package gets the shared wiring
 with it. `BreakerVerdicts` verifies at construction that the stack's own
 policy reads the probe as a benign client error, so a stack cannot ship a

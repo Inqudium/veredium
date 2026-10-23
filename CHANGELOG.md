@@ -217,6 +217,12 @@ Findings of `docs/assessment/CODE_STYLE-2026-10-23T10-45-28.md`:
     would have fooled.
   - Both stacks' engines drain through `EngineDrain` and report an engine that did not drain with one WARN form:
     `HTTP engine '<key>' did not drain <reason> - closing it with <n> exchange(s) still in flight`.
+- **Renamed configuration classes:** `MeshTimeoutConfig` is `MeshResilienceConfiguration` - it wires the ladder
+  logger, the startup guard and the customizers, not only timeouts - and the reactive
+  `WebClientReactorContextPropagationConfig` is `WebClientReactorContextPropagationConfiguration`, now in
+  `WebClientConfiguration.kt`. A host that `@Import`s either by name updates the import.
+- `veredium-webclient`: `ResilientWebClientFactory` takes an optional `nanoTime` clock for its shutdown deadline,
+  as the blocking twin does.
 
 Earlier:
 

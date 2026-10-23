@@ -99,6 +99,13 @@ class ReactiveResilienceDecorator(
     private val timeLimiterRegistry: TimeLimiterRegistry,
     private val bulkheadRegistry: BulkheadRegistry,
 ) {
+    /**
+     * [source] guarded by the three instances registered under [backendName], nested as the class KDoc's table
+     * orders them: bulkhead innermost, then TimeLimiter, then CircuitBreaker. Cold like [source]: every
+     * subscription takes a permit, starts the budget and asks the breaker anew. The verdicts arrive as error
+     * signals - `TimeoutException` when the budget expired, `CallNotPermittedException` from an open breaker,
+     * `BulkheadFullException` from a full bulkhead.
+     */
     fun <T : Any> decorate(
         backendName: String,
         source: Mono<T>,

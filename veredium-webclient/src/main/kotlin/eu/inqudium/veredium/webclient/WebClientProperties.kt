@@ -127,9 +127,9 @@ data class WebClientProperties(
             // and each call opens a new connection; Jetty reads 0 as "no idle timeout" and never closes an idle
             // connection; Apache's evictor closes every idle connection on each sweep. There is no one meaning to
             // give the value, so it is refused, naming the key.
-            require(!maxIdleTime.isNegative && !maxIdleTime.isZero) {
-                "app.webclient.pool.max-idle-time must be positive, but was $maxIdleTime " +
-                    "(0 would disable keep-alive on reactor-netty and never close an idle connection on jetty)"
+            require(maxIdleTime.isPositive) {
+                "app.webclient.pool.max-idle-time must be positive (0 would mean no keep-alive on Reactor Netty and " +
+                    "no idle timeout on Jetty), but was $maxIdleTime"
             }
             require(!maxLifeTime.isNegative) { "app.webclient.pool.max-life-time must not be negative, but was $maxLifeTime" }
             require(!evictInBackground.isNegative) {
@@ -179,7 +179,7 @@ data class WebClientProperties(
      * [ResilientWebClientFactory] clones Boot's auto-configured `WebClient.Builder`, on which Boot's
      * `ObservationWebClientCustomizer` has already placed the host's `ObservationRegistry` (and observation
      * convention) - the factory does not wire the registry itself. This flag has two jobs: it gates the JVM-wide
-     * Reactor context-propagation hook (`WebClientReactorContextPropagationConfig`), and when `false` it
+     * Reactor context-propagation hook (`WebClientReactorContextPropagationConfiguration`), and when `false` it
      * REPLACES the registry Boot wired with a NOOP, so this module's clients open no `http.client.requests`
      * observation while every other WebClient of the host keeps its own. When `true`, each request opens that
      * observation; with a tracing bridge on the (host's) classpath that becomes a CLIENT span and injects the

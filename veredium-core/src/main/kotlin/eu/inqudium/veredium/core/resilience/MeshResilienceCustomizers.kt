@@ -138,7 +138,7 @@ fun timeLimiterCustomizer(endpoint: ResolvedTimeouts): TimeLimiterConfigCustomiz
  * set of [ResolvedTimeouts] the context holds. The bean name carries the alias so two customizers can never
  * collide on a Spring name either.
  *
- * Imported by `MeshTimeoutConfig`; it is not a component of its own.
+ * Imported by `MeshResilienceConfiguration`; it is not a component of its own.
  */
 class MeshResilienceCustomizerRegistrar : BeanRegistrar {
     override fun register(

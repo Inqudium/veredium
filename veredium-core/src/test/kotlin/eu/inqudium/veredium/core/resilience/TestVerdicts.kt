@@ -1,6 +1,6 @@
 package eu.inqudium.veredium.core.resilience
 
-import eu.inqudium.veredium.core.mesh.MeshTimeoutConfig
+import eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration
 import io.github.resilience4j.bulkhead.Bulkhead
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
@@ -47,7 +47,7 @@ object TestVerdicts {
 
 /** What a stack's `*VerdictsConfig` is: the verdicts bean next to the import of the shared wiring. */
 @Configuration(proxyBeanMethods = false)
-@Import(MeshTimeoutConfig::class)
+@Import(MeshResilienceConfiguration::class)
 class TestVerdictsConfig {
     @Bean
     fun breakerVerdicts(): BreakerVerdicts = TestVerdicts.breakerVerdicts

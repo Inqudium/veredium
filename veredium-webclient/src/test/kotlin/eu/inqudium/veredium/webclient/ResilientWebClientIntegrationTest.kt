@@ -330,8 +330,8 @@ class ResilientWebClientIntegrationTest {
         // Why it matters: WebFlux hops Reactor threads, so without the capture the client span would be a
         //   detached root and the outbound call would not join the caller's trace. This is the regression guard
         //   for `contextCapture()` in ResilientWebClient, proven over a real HTTP call. It runs WITHOUT Reactor's
-        //   automatic context propagation (WebClientReactorContextPropagationConfig is not constructed here);
-        //   the hook itself is pinned in WebClientReactorContextPropagationConfigTest.
+        //   automatic context propagation (WebClientReactorContextPropagationConfiguration is not constructed here);
+        //   the hook itself is pinned in WebClientReactorContextPropagationConfigurationTest.
         //
         // Given: a client with observation ON, and an ACTIVE parent observation
         val handler = RecordingObservationHandler()

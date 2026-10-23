@@ -32,7 +32,6 @@ import java.util.concurrent.TimeUnit
  * The Apache HttpClient 5 engine ([RestClientEngine.APACHE], the default): one shared
  * `PoolingHttpClientConnectionManager` for every backend on it, one `CloseableHttpClient` per backend over that
  * pool carrying the backend's response timeout, wrapped in Spring's [HttpComponentsClientHttpRequestFactory].
- * This is the module's wiring from before the engine became selectable, moved here unchanged.
  *
  * ## The transport, mapped from the reactive twin
  *

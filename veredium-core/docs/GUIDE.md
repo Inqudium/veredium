@@ -80,7 +80,7 @@ exception vocabulary - which type carries a status, which type is the buffer lim
 what each stack contributes as its one `BreakerVerdicts` bean (`RestClientVerdicts`,
 `WebClientVerdicts`).
 
-**The wiring.** `MeshTimeoutConfig` registers one circuit-breaker customizer per alias and one
+**The wiring.** `MeshResilienceConfiguration` registers one circuit-breaker customizer per alias and one
 time-limiter customizer per alias whose derivation is on; Resilience4j's Boot configuration
 consults them as the last step of building each `instances.<alias>` entry, so the instance the
 metric and health binders bind to is already the final one. `MeshResilienceStartupGuard` fails
@@ -89,7 +89,7 @@ instance would silently run on the registry default) or when the customizer's ef
 observable on the instance the registry serves, and logs a WARN when the mesh bulkheads together
 admit more calls (`sum(max-concurrent-calls)`) than the shared pool has connections
 (`app.mesh.defaults.transport.max-connections`). Each stack's `*VerdictsConfig` `@Import`s
-`MeshTimeoutConfig`, so a host that scans its stack's package gets all of it.
+`MeshResilienceConfiguration`, so a host that scans its stack's package gets all of it.
 
 **The blocking decorator.** `BlockingResilienceDecorator` runs a `() -> T` as
 `CircuitBreaker( TimeLimiter( Bulkhead( call ) ) )` - Resilience4j's own aspect order - on a fresh

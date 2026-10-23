@@ -14,14 +14,12 @@ import jakarta.annotation.PreDestroy
 import jakarta.validation.ValidatorFactory
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
-import org.springframework.context.annotation.Configuration
 import org.springframework.core.io.ResourceLoader
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.http.client.reactive.ClientHttpConnector
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.WebClient
-import reactor.core.publisher.Hooks
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Scheduler
 import reactor.core.scheduler.Schedulers
@@ -89,6 +87,12 @@ class ResilientWebClientFactory(
     // the class loader the context was started with (which is what a test with a filtered class loader varies).
     // Absent -> this class's own loader.
     resourceLoader: ResourceLoader? = null,
+    /**
+     * Monotonic clock for the ONE wait this factory makes - the shared release deadline in [shutdown]. Injectable so
+     * the deadline can be reached by a test that controls time; defaults to `System::nanoTime`, as the blocking
+     * twin's factory does.
+     */
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : MeshConnectionPools {
     private val logger: Logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java)
 
@@ -336,7 +340,7 @@ class ResilientWebClientFactory(
      */
     @PreDestroy
     fun shutdown() {
-        transports.release(System.nanoTime() + poolDisposeTimeout.toNanos(), System::nanoTime)
+        transports.release(nanoTime() + poolDisposeTimeout.toNanos(), nanoTime)
     }
 
     /**
@@ -383,38 +387,6 @@ class ResilientWebClientFactory(
 }
 
 /**
- * Owns the ONE process-wide switch this module makes: Reactor's automatic context propagation.
- *
- * The observation's "current observation" is a thread-local, and WebFlux hops Reactor threads constantly, so at
- * the client-call injection point the thread-local would otherwise be empty. Enabling the hook makes Reactor
- * capture and restore the registered `ThreadLocalAccessor`s (the `ObservationThreadLocalAccessor`, auto-loaded
- * via `ServiceLoader` once `io.micrometer:context-propagation` is present) across operator boundaries - so the
- * `http.client.requests` client span nests on the active trace instead of starting a fresh root.
- *
- * It lives in its own `@Configuration` rather than in [ResilientWebClientFactory]'s constructor because its
- * effect is JVM-WIDE and cannot be undone: it must be a deliberate, declared piece of wiring, not a side effect
- * of instantiating a factory (which a test may do repeatedly, and which then silently changes the behaviour of
- * every later context in the same JVM). Gated on the module toggle, so a host that did not opt in gets no
- * global change at all.
- */
-@Configuration(proxyBeanMethods = false)
-class WebClientReactorContextPropagationConfig(
-    properties: WebClientProperties,
-) {
-    private val logger: Logger = LoggerFactory.getLogger(WebClientReactorContextPropagationConfig::class.java)
-
-    init {
-        if (properties.observability.httpObservationEnabled) {
-            // Idempotent: repeated calls are a no-op, so several contexts in one JVM are harmless.
-            Hooks.enableAutomaticContextPropagation()
-            logger.info("Reactor automatic context propagation ENABLED (JVM-wide) - HTTP observation is on")
-        } else {
-            logger.debug("Reactor automatic context propagation NOT enabled - HTTP observation is off")
-        }
-    }
-}
-
-/**
  * Central URI tag mapper for Reactor-Netty HTTP-client metrics. Left raw, a path variable (a UUID per call)
  * would mint a new time series per request - an unbounded cardinality leak. This maps each known path to its
  * low-cardinality TEMPLATE and collapses the rest to a single [UNKNOWN] bucket.
@@ -454,8 +426,8 @@ object WebClientMetrics {
      *
      * Each endpoint gets its own Reactor-Netty `HttpClient` (the transport builds one per endpoint),
      * and each such client only ever calls its own path - the adapters build the URI from
-     * `ResilientWebClient.pathTemplate`. Handing it the templates of ALL endpoints, as this once did, gave a
-     * request the chance to match a FOREIGN template first and be counted under another endpoint's series.
+     * `ResilientWebClient.pathTemplate`. A mapper holding the templates of ALL endpoints would give a request the
+     * chance to match a FOREIGN template first and be counted under another endpoint's series.
      * Scoping the mapper to the one template the client can actually call removes that by construction, rather
      * than relying on the prefix ordering to resolve it correctly.
      *

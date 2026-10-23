@@ -27,7 +27,7 @@ import java.util.function.Supplier
 /**
  * Boots Resilience4j's own Boot auto-configuration on the `resilience4j.*` and `app.mesh.*` blocks of the test
  * fixture, with the shared mesh wiring the way a client stack imports it (`TestVerdictsConfig`: the verdicts
- * bean plus `MeshTimeoutConfig` - the per-alias customizer beans, the startup guard, the ladder logger) - and
+ * bean plus `MeshResilienceConfiguration` - the per-alias customizer beans, the startup guard, the ladder logger) - and
  * pins both directions of the guard.
  *
  * 1. What is tested: that every instance the fixture declares is built WITH the mesh customizer's effect (the

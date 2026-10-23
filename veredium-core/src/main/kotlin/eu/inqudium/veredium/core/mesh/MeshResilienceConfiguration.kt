@@ -34,7 +34,7 @@ import org.springframework.context.annotation.Import
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(MeshProperties::class)
 @Import(MeshResilienceCustomizerRegistrar::class)
-class MeshTimeoutConfig {
+class MeshResilienceConfiguration {
     @Bean
     fun meshLadderLogger(meshProperties: MeshProperties): MeshLadderLogger = MeshLadderLogger(meshProperties)
 

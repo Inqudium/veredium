@@ -134,8 +134,13 @@ class ResilientRestClient(
      */
     private val nanoTime: () -> Long = System::nanoTime,
 ) {
+    /** The endpoint's path template - the URI an adapter builds its calls on, and the low-cardinality tag of their metrics. */
     val pathTemplate: String get() = endpoint.pathTemplate
+
+    /** The transport's rung of the ladder for this backend - what an adapter publishes as `BaseAdapter.responseTimeout`. */
     val responseTimeout: Duration get() = endpoint.responseTimeout
+
+    /** The TimeLimiter budget of this backend - what an adapter publishes as `BaseAdapter.timeLimiterTimeout`. */
     val timeLimiterTimeout: Duration get() = resilience.requestBudget(backendName)
     private val logger: Logger = LoggerFactory.getLogger(ResilientRestClient::class.java)
 
