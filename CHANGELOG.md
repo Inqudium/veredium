@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Build:** a new build-only module, `veredium-examples`, shows a host using both clients: one Spring Boot
-  application per stack, an adapter over two backends and the configuration it needs. Its tests start each
+  application per calling style - blocking and asynchronous on the RestClient, reactive on the WebClient - each
+  with an adapter over two backends and the configuration it needs. Its tests start each
   application against a WireMock stand-in for the sidecar, so an example that stops working fails the build. Like
   `veredium-coverage` and `veredium-test-support` it is never published; all three have a README that says why
   each is a module of its own.

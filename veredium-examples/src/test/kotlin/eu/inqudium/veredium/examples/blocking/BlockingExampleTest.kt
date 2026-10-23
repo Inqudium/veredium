@@ -1,6 +1,5 @@
 package eu.inqudium.veredium.examples.blocking
 
-import eu.inqudium.veredium.examples.CustomerOverview
 import eu.inqudium.veredium.examples.Sidecar
 import eu.inqudium.veredium.examples.Sidecar.ADA
 import eu.inqudium.veredium.examples.Sidecar.ADAS_ORDERS
@@ -11,7 +10,6 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
-import java.util.concurrent.TimeUnit
 
 /**
  * The blocking example as a host runs it: the whole Boot application, its adapter calling the stand-in sidecar.
@@ -63,19 +61,6 @@ class BlockingExampleTest {
 
         // Then
         assertThat(page.orders).isEqualTo(ADAS_ORDERS)
-    }
-
-    @Test
-    fun `should combine both calls into one overview on one future`() {
-        // What is tested: BlockingCustomerAdapter.overview, the asynchronous form.
-        // Success criteria: the future completes within 5 s with the customer and the orders.
-        // Why it matters: it shows two calls in flight at once, composed with the CompletableFuture API.
-        //
-        // When
-        val overview = adapter.overview("c-1").get(5, TimeUnit.SECONDS)
-
-        // Then
-        assertThat(overview).isEqualTo(CustomerOverview(ADA, ADAS_ORDERS))
     }
 
     @Test

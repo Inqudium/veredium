@@ -59,7 +59,7 @@ group, the fictional periodic table of **Inqudium**.
 | [`veredium-webclient`](veredium-webclient/README.md) | the reactive client: Spring `WebClient` over Reactor Netty, mesh timeout ladder, Resilience4j | `eu.inqudium.veredium.webclient` |
 
 [`veredium-examples`](veredium-examples/README.md) shows a host using both clients: one Spring Boot application per
-stack, its adapter and its configuration, each run by the build's tests. It is never published, and neither are the
+calling style (blocking, asynchronous, reactive), its adapter and its configuration, each run by the build's tests. It is never published, and neither are the
 other two build-only modules, [`veredium-test-support`](veredium-test-support/README.md) and
 [`veredium-coverage`](veredium-coverage/README.md).
 

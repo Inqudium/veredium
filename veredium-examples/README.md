@@ -1,9 +1,9 @@
 # veredium-examples
 
 Worked examples of a host using the two client modules of [Veredium](../README.md): one Spring Boot application
-per stack, each with an adapter over two backends and the configuration it needs. A build-only module: it is never
-published, and its tests run every example against a stand-in sidecar, so an example that no longer works fails
-the build.
+per calling style - blocking, asynchronous, reactive - each with an adapter over two backends and the configuration
+it needs. A build-only module: it is never published, and its tests run every example against a stand-in sidecar,
+so an example that no longer works fails the build.
 
 ## What it shows
 
@@ -16,7 +16,9 @@ search (POST with a JSON body). Both are configured once in
 | [`application.yml`](src/main/resources/application.yml) | The whole configuration of a host: the mesh endpoints with their triplets and aliases, the Resilience4j instance every alias needs, legatium's exchange log, the engine knob. |
 | [`Customers.kt`](src/main/kotlin/eu/inqudium/veredium/examples/Customers.kt) | The payloads, and the aliases as constants: one string is the client, its Resilience4j instances and its metrics. |
 | [`BlockingExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingExampleApplication.kt) | The wiring of the blocking client: one package scan. |
-| [`BlockingCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingCustomerAdapter.kt) | `ResilientRestClient`: a blocking GET and POST, a 404 turned into `null`, two calls in flight at once on `CompletableFuture`s, and the two budgets a `BaseAdapter` publishes. |
+| [`BlockingCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingCustomerAdapter.kt) | `ResilientRestClient` called blocking: a GET and a POST, a 404 turned into `null`, and the two budgets a `BaseAdapter` publishes. |
+| [`AsyncExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/async/AsyncExampleApplication.kt) | The same client, the same wiring - called without blocking. |
+| [`AsyncCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/async/AsyncCustomerAdapter.kt) | `getAsync`/`postAsync`: every outcome on a `CompletableFuture`, a 404 mapped to `null` on the future, two calls in flight with `thenCombine`, and a cancel handed on to the calls a derived future came from. |
 | [`ReactiveExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveExampleApplication.kt) | The same wiring for the reactive client. |
 | [`ReactiveCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveCustomerAdapter.kt) | `ResilientWebClient`: the same adapter on `Mono`s, a 404 turned into an empty `Mono`, `Mono.zip` for both calls, and a `suspend` function for coroutine code. |
 
@@ -61,6 +63,6 @@ published artifact the same way as [`veredium-coverage`](../veredium-coverage/RE
 
 - **Both stacks are on one classpath.** A real host usually picks one. Each example application therefore scans
   exactly one client package. `spring.main.web-application-type: none` keeps `spring-webflux`, which the reactive
-  client brings, from starting a web server in either of them.
-- **Two Boot contexts share one test JVM.** The tests keep both contexts off Micrometer's global registry
+  client brings, from starting a web server in any of them.
+- **Three Boot contexts share one test JVM.** The tests keep every context off Micrometer's global registry
   (`management.metrics.use-global-registry=false`). A single host does not need that setting.
