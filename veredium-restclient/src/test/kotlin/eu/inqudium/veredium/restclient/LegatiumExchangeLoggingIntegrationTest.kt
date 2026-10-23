@@ -41,6 +41,8 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.EnumSource
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.boot.autoconfigure.AutoConfigurations
@@ -419,24 +421,23 @@ class LegatiumExchangeLoggingIntegrationTest {
             }
         }
 
-        @Test
-        fun `should log a TimeLimiter timeout as the cancelled worker's failure, not as a timeout`() {
-            // What is tested: the resilience budget expiring BEFORE the transport gives up. The caller is
-            //   released at 200 ms with a TimeoutException and the worker's future is cancelled; the interrupt
-            //   closes the worker's socket, so the exchange ends at once with `Closed by interrupt` - which the
-            //   library classifies as a `failure` at ERROR, not as a `timeout` and not as the reactive twin's
-            //   `cancelled`.
-            // Success criteria: the caller's failure is the TimeLimiter's; the event is ERROR `failure`,
-            //   written on the worker thread, and its duration is well below the 1400 ms response timeout - the
-            //   proof that the cancellation freed the worker rather than leaving it to the transport.
-            // Why it matters: an alert on `adapter_outcome == "cancelled"` would never fire for this module, and
-            //   one on `timeout` would miss every budget expiry. The resilience verdict itself stays on
-            //   ResilientRestClient's transport line (`TimeoutException`); the exchange event reports what the
-            //   wire saw, and this is what it saw.
+        @ParameterizedTest
+        @EnumSource(RestClientEngine::class)
+        fun `should log a TimeLimiter timeout as a cancelled exchange, not as a failure or a timeout`(engine: RestClientEngine) {
+            // What is tested: the resilience budget expiring BEFORE the transport gives up, on each engine. The
+            //   caller is released at 200 ms with a TimeoutException and the worker's future is cancelled; the
+            //   interrupt ends the worker's exchange at once, with the exception that engine raises for it.
+            // Success criteria: the caller's failure is the TimeLimiter's; the event is WARN `cancelled` without a
+            //   status, written on the worker thread, and its duration is well below the 1400 ms response timeout
+            //   - the proof that the cancellation freed the worker rather than leaving it to the transport.
+            // Why it matters: the caller walked away, the backend did nothing wrong; an ERROR `failure` would page
+            //   for it, and an alert on `cancelled` - the reactive twin's outcome for the same case - would miss
+            //   the blocking stack. Each engine reports the abandoned exchange with a different exception, so the
+            //   outcome holds only if it holds on every one of them.
             //
             // Given: a 200 ms budget against a 3 s backend
             wireMock.stubFor(get(urlEqualTo("/things/budget")).willReturn(okJson("{}").withFixedDelay(3_000)))
-            hostContext("budget", timeLimiter = Duration.ofMillis(200)).run { context ->
+            hostContext("budget", timeLimiter = Duration.ofMillis(200), engine = engine).run { context ->
                 capturing(backend = "budget") { appender ->
                     // When
                     val failure = catchThrowable { context.client("budget").get(Greeting::class.java) { it.uri("/things/budget") } }
@@ -445,8 +446,8 @@ class LegatiumExchangeLoggingIntegrationTest {
                     assertThat(failure).isInstanceOf(TimeoutException::class.java)
                     // ... and the worker's exchange ended with the cancellation, promptly
                     val event = appender.awaitEvents().last()
-                    assertThat(event.level).isEqualTo(Level.ERROR)
-                    assertThat(event.field("adapter_outcome")).isEqualTo("failure")
+                    assertThat(event.level).isEqualTo(Level.WARN)
+                    assertThat(event.field("adapter_outcome")).isEqualTo("cancelled")
                     assertThat(event.field("adapter_response_status_code")).isNull()
                     assertThat(event.threadName).startsWith("restclient-call-")
                     assertThat((event.field("adapter_duration_ms") as Number).toLong())
@@ -456,23 +457,54 @@ class LegatiumExchangeLoggingIntegrationTest {
             }
         }
 
-        @Test
-        fun `should log an interrupted caller's exchange as the cancelled worker's failure`() {
-            // What is tested: the blocking counterpart of the twin's "caller's cancel" case. The interrupt
-            //   releases the caller and cancels the worker's future; the worker's socket is closed by that
-            //   interrupt and the library sees the exchange end at once.
-            // Success criteria: the caller gets an InterruptedException; one ERROR `failure` event with no
+        @ParameterizedTest
+        @EnumSource(RestClientEngine::class)
+        fun `should log a TimeLimiter timeout during the body as cancelled`(engine: RestClientEngine) {
+            // What is tested: the budget expiring AFTER the head arrived, while the body is still dribbling in, on
+            //   each engine. The interrupt ends the worker's body read, with the exception that engine raises.
+            // Success criteria: the caller gets the TimeLimiter's TimeoutException; the event carries the 200 the
+            //   head brought and is WARN `cancelled`.
+            // Why it matters: a cancellation in the body is the common case behind a slow backend, and an
+            //   operator reads it off the outcome. Jetty's body stream turns the interrupt into a bare
+            //   InterruptedIOException and clears the interrupt flag; without the Jetty transport setting it again,
+            //   legatium would have no signal left and log the cancellation as an ERROR `failure`.
+            //
+            // Given: a 400 ms budget against a body that takes 3 s to arrive
+            val body = """{"message":"${"x".repeat(2_000)}"}"""
+            wireMock.stubFor(get(urlEqualTo("/things/drip")).willReturn(okJson(body).withChunkedDribbleDelay(20, 3_000)))
+            hostContext("drip", timeLimiter = Duration.ofMillis(400), engine = engine).run { context ->
+                capturing(backend = "drip") { appender ->
+                    // When
+                    val failure = catchThrowable { context.client("drip").get(Greeting::class.java) { it.uri("/things/drip") } }
+
+                    // Then
+                    assertThat(failure).isInstanceOf(TimeoutException::class.java)
+                    val event = appender.awaitEvents().last()
+                    assertThat(event.field("adapter_response_status_code")).isEqualTo(200)
+                    assertThat(event.level).isEqualTo(Level.WARN)
+                    assertThat(event.field("adapter_outcome")).isEqualTo("cancelled")
+                }
+            }
+        }
+
+        @ParameterizedTest
+        @EnumSource(RestClientEngine::class)
+        fun `should log an interrupted caller's exchange as cancelled`(engine: RestClientEngine) {
+            // What is tested: the blocking counterpart of the twin's "caller's cancel" case, on each engine. The
+            //   interrupt releases the caller and cancels the worker's future, which ends the worker's exchange
+            //   at once.
+            // Success criteria: the caller gets an InterruptedException; one WARN `cancelled` event with no
             //   status follows, written on the worker.
-            // Why it matters: the blocking stack has no `cancelled` outcome - a caller walking away surfaces as a
-            //   `failure` at ERROR. An alert keyed on `cancelled` would never fire here; this records the
-            //   difference to the reactive twin as a test instead of a surprise.
+            // Why it matters: a caller walking away is the reactive twin's `cancelled` outcome; the blocking
+            //   stack has to report it the same way on every engine, or an alert keyed on `cancelled` misses it
+            //   and one on `failure` pages for a backend that did nothing wrong.
             //
             // Given: a backend that does not answer within the window, and a caller on its own thread; the
             // interrupt is sent only once the request is on the wire, otherwise the worker may be cancelled
             // before it ever sent anything and there would be no exchange to log
             wireMock.stubFor(get(urlEqualTo("/things/never")).willReturn(okJson("{}").withFixedDelay(30_000)))
             val inFlight = arrivals.arrivalOf("/things/never")
-            hostContext("walked-away").run { context ->
+            hostContext("walked-away", engine = engine).run { context ->
                 capturing(backend = "walked-away") { appender ->
                     val client = context.client("walked-away")
                     val callerThread = AtomicReference<Thread>()
@@ -492,8 +524,8 @@ class LegatiumExchangeLoggingIntegrationTest {
                     // Then: the caller is released at once, and the worker's exchange ends with the cancellation
                     assertThat(outcome.get(5, TimeUnit.SECONDS)).isInstanceOf(InterruptedException::class.java)
                     val event = appender.awaitEvents().last()
-                    assertThat(event.level).isEqualTo(Level.ERROR)
-                    assertThat(event.field("adapter_outcome")).isEqualTo("failure")
+                    assertThat(event.level).isEqualTo(Level.WARN)
+                    assertThat(event.field("adapter_outcome")).isEqualTo("cancelled")
                     assertThat(event.field("adapter_response_status_code")).isNull()
                     assertThat(event.threadName).startsWith("restclient-call-")
                 }
@@ -832,6 +864,7 @@ class LegatiumExchangeLoggingIntegrationTest {
         timeLimiter: Duration = Duration.ofSeconds(30),
         tracer: Tracer? = null,
         maxConnections: Int = MeshProperties.Transport().maxConnections,
+        engine: RestClientEngine = RestClientEngine.APACHE,
     ): ApplicationContextRunner {
         val meters = SimpleMeterRegistry()
         val observations = ObservationRegistry.create().apply { observationConfig().observationHandler(DefaultMeterObservationHandler(meters)) }
@@ -840,7 +873,8 @@ class LegatiumExchangeLoggingIntegrationTest {
         val bulkheads = BulkheadRegistry.ofDefaults()
         return ApplicationContextRunner()
             .withInitializer { context ->
-                context.environment.propertySources.addFirst(MapPropertySource(REFERENCE_PROPERTY_SOURCE, referenceProperties(*REFERENCE_PREFIXES.toTypedArray())))
+                val properties = referenceProperties(*REFERENCE_PREFIXES.toTypedArray()) + ("app.restclient.engine.default" to engine.key)
+                context.environment.propertySources.addFirst(MapPropertySource(REFERENCE_PROPERTY_SOURCE, properties))
             }.withConfiguration(
                 AutoConfigurations.of(
                     RestClientAutoConfiguration::class.java,
@@ -864,8 +898,10 @@ class LegatiumExchangeLoggingIntegrationTest {
                                 individualRequestTimeoutMs = 1000,
                                 transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl(), maxConnections = maxConnections),
                             ),
+                        // The triplet host is WireMock's own authority: the JDK engine refuses to send a Host header
+                        // that differs from the target unless the JVM allows restricted headers.
                         endpoints =
-                            listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/things/{id}", alias = backend)),
+                            listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost:${wireMock.port()}/GET/things/{id}", alias = backend)),
                     )
                 },
             ).withBean(CircuitBreakerRegistry::class.java, Supplier { circuitBreakers })

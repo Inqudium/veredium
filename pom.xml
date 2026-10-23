@@ -128,7 +128,7 @@
         <resilience4j.version>2.4.0</resilience4j.version>
         <!-- eu.inqudium legatium: outbound HTTP exchange logging, one twin per client stack. One property, so both
              modules carry the same version; there is no BOM. -->
-        <legatium.version>1.2.1</legatium.version>
+        <legatium.version>1.3.0</legatium.version>
         <!-- WireMock (test scope of both client modules). -->
         <wiremock.version>3.13.2</wiremock.version>
 

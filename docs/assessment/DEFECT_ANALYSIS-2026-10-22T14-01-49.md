@@ -127,6 +127,9 @@ Kategorien: test quality 13, resources 4, robustness 3, correctness 2, maintaina
 
 ## Bearbeitungsstand (2026-10-22, nach der Analyse)
 
+Nachgetragen (2026-10-23): **16** ist mit legatium 1.3.0 behoben. Der Nachweis und die neu aufgefallene
+Jetty-Lücke stehen bei Befund 19 von `./docs/assessment/DEFECT_ANALYSIS-2026-10-23T05-20-01.md`.
+
 23 von 24 Befunden sind behoben (abgehakt), auf Branch `fix/defect-analysis-2026-10-22` über Commit
 `1b72625602728c0ed578289986fc99e512a7c073`, noch nicht committet. Ein `mvn -o clean verify` über alle Module ist
 grün: 640 Tests (vorher 573: core 196, restclient 233, webclient 210 + 1 im eigenen JDK-Flag-Lauf), 0 Fehler,
@@ -428,7 +431,7 @@ Keine.
     die alte Gauge.
   - Fix strategy: Die gebundenen Meter merken und im Shutdown entfernen.
 
-- [ ] 16. [`./veredium-restclient/docs/timeouts-bulkheads-threads.md` — Klassifikationstabelle; aus dem Vorbericht übernommen, gegen legatium 1.2.1 nachgeprüft] {Low} {Confidence: high} {maintainability / logging}
+- [x] 16. [`./veredium-restclient/docs/timeouts-bulkheads-threads.md` — Klassifikationstabelle; aus dem Vorbericht übernommen, gegen legatium 1.2.1 nachgeprüft] {Low} {Confidence: high} {maintainability / logging}
   - Ein abgebrochener Exchange (TimeLimiter-Ablauf, unterbrochener Aufrufer: `Closed by interrupt`) erscheint im
     Exchange-Strom weiter als ERROR `adapter_outcome=failure`. Der Pool-Lease-Timeout ist seit 1.2.1 korrekt
     `timeout`. Mit den neuen Engines kommen weitere Abbruch-Exceptions hinzu (`InterruptedIOException` des

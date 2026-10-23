@@ -417,13 +417,19 @@ startup line says so; there is no fix short of a connector of the module's own.
 **Default (12.1.12).**
 - Blocking: Spring's request only **stops waiting**. The Jetty request stays in flight and holds its connection
   until the response arrives or its total timeout expires.
+- Blocking, reading the body: the body stream (`InputStreamResponseListener`) answers an interrupt with a bare
+  `InterruptedIOException` and **clears the interrupt flag**. The exchange log then cannot tell the abandoned call
+  from a failure and logs ERROR `failure`.
 - Reactive: the adapter aborts the request on cancel (`abortOnCancel`) and reports the failure afterwards - while
   waiting for the head. Cancelling the **body** only stops its delivery: Jetty goes on receiving the rest on the
   connection, for as long as the peer sends it.
 
 **With veredium.** Blocking: the request factory captures the Jetty request where Spring creates it
 (`HttpClient.newRequest(URI)`, on the calling thread). It aborts the request when the exchange fails, when a body
-read fails, and when the response is closed early. Reactive: a body cancelled before its end aborts the native
+read fails, and when the response is closed early. A body read that ends in Jetty's bare `InterruptedIOException`
+sets the interrupt flag again before it rethrows (`InterruptRestoringRequest`), so legatium logs the cancellation
+as `cancelled`; pinned by the per-engine "should log a TimeLimiter timeout during the body as cancelled" of
+`LegatiumExchangeLoggingIntegrationTest`. Reactive: a body cancelled before its end aborts the native
 request (`AbortJettyOnBodyCancel`). Pinned per engine by the reactive "should refuse a dripping body past the
 codec limit at once, dropping the connection"; before the fix the Jetty connection stayed open.
 
