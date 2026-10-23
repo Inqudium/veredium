@@ -23,7 +23,7 @@ import java.util.concurrent.CompletableFuture
  * once and the caller gets one future for the combined result.
  */
 @Component
-class CustomerAdapter(
+class BlockingCustomerAdapter(
     factory: ResilientRestClientFactory,
 ) : BaseAdapter {
     private val customers = factory.create(Backends.CUSTOMERS)

@@ -16,7 +16,7 @@ search (POST with a JSON body). Both are configured once in
 | [`application.yml`](src/main/resources/application.yml) | The whole configuration of a host: the mesh endpoints with their triplets and aliases, the Resilience4j instance every alias needs, legatium's exchange log, the engine knob. |
 | [`Customers.kt`](src/main/kotlin/eu/inqudium/veredium/examples/Customers.kt) | The payloads, and the aliases as constants: one string is the client, its Resilience4j instances and its metrics. |
 | [`BlockingExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingExampleApplication.kt) | The wiring of the blocking client: one package scan. |
-| [`CustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/blocking/CustomerAdapter.kt) | `ResilientRestClient`: a blocking GET and POST, a 404 turned into `null`, two calls in flight at once on `CompletableFuture`s, and the two budgets a `BaseAdapter` publishes. |
+| [`BlockingCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingCustomerAdapter.kt) | `ResilientRestClient`: a blocking GET and POST, a 404 turned into `null`, two calls in flight at once on `CompletableFuture`s, and the two budgets a `BaseAdapter` publishes. |
 | [`ReactiveExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveExampleApplication.kt) | The same wiring for the reactive client. |
 | [`ReactiveCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveCustomerAdapter.kt) | `ResilientWebClient`: the same adapter on `Mono`s, a 404 turned into an empty `Mono`, `Mono.zip` for both calls, and a `suspend` function for coroutine code. |
 
