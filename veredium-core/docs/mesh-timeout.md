@@ -72,17 +72,19 @@ logical budget.
 
 ## How the R4j registration works
 
-`MeshResilienceConfiguration` is the `@Configuration` of this package. It is **not** scanned on its own: each stack's
-configuration (`RestClientConfiguration` / `WebClientConfiguration`) `@Import`s it next to the one bean it
-needs from the stack — `BreakerVerdicts`, the stack's reading of the two breaker verdicts (see below) — so a
-host that scans its stack's package gets the mesh wiring with it. It wires:
+The mesh wiring comes in two halves, and neither is scanned on its own: each stack's configuration
+(`RestClientConfiguration` / `WebClientConfiguration`) `@Import`s both, so a host that scans its stack's package
+gets the mesh wiring with it.
 
-- the `app.mesh` binding (`MeshProperties`);
-- one `CircuitBreakerConfigCustomizer` per mesh alias and one `TimeLimiterConfigCustomizer` per alias whose
-  time-limiter derivation is on (`MeshResilienceCustomizerRegistrar`, a Spring `BeanRegistrar`, because the
-  number of beans follows the endpoint list);
-- `MeshResilienceStartupGuard`, which fails the start when an alias is not wired the way the decorators assume;
-- `MeshLadderLogger`, the startup line below.
+- `MeshResilienceConfiguration`, the `@Configuration` of this package, is stack-neutral: the `app.mesh` binding
+  (`MeshProperties`) and `MeshLadderLogger`, the startup line below.
+- `MeshResilienceRegistrar`, a Spring `BeanRegistrar` (because the number of beans follows the endpoint list),
+  needs the stack's `BreakerVerdicts` - its reading of the two breaker verdicts (see below). It is abstract; each
+  stack subclasses it with its verdicts object (`RestClientMeshRegistrar`, `WebClientMeshRegistrar`), so the
+  verdicts never pass through the context and no bean of a host can replace them. It registers one
+  `CircuitBreakerConfigCustomizer` per mesh alias, one `TimeLimiterConfigCustomizer` per alias whose
+  time-limiter derivation is on, and `MeshResilienceStartupGuard`, which fails the start when an alias is not
+  wired the way the decorators assume.
 
 Resilience4j's Boot configuration builds one config per `resilience4j.<layer>.instances.<name>` entry when it
 creates the registry bean, and consults the customizer bean named after the instance as the **last** step of

@@ -58,8 +58,8 @@ vocabulary.
   `ResolvedTimeouts`, `MeshLadderLogger`, `MeshResilienceConfiguration`.
 - `eu.inqudium.veredium.core.resilience`: `HttpExchangeErrorPolicy`,
   `ClientSideFailurePolicy`, `BreakerVerdicts`, the per-alias customizers
-  (`MeshResilienceCustomizers.kt`, `MeshResilienceCustomizerRegistrar`) and
-  `MeshResilienceStartupGuard`.
+  (`MeshResilienceCustomizers.kt`, and `MeshResilienceRegistrar`, which
+  registers them and the guard) and `MeshResilienceStartupGuard`.
 - The guide of the ladder, `veredium-core/docs/mesh-timeout.md`.
 - Added after the cut, by the same rule: `eu.inqudium.veredium.core.validation`
   (`ResponseValidationProperties`, the `validation.*` block of both
@@ -90,11 +90,17 @@ class BreakerVerdicts(httpExchangeError, clientSideFailure, benignClientErrorPro
 ```
 
 Each stack holds one instance (`RestClientVerdicts`, `WebClientVerdicts`)
-and one `@Configuration` (`RestClientConfiguration`, `WebClientConfiguration`)
-that declares the `BreakerVerdicts` bean and `@Import`s the core's
-`MeshResilienceConfiguration`. The core's configuration is therefore never scanned
+and hands it to the shared wiring directly: the core's abstract
+`MeshResilienceRegistrar` takes the verdicts as a constructor argument, and
+each stack subclasses it (`RestClientMeshRegistrar`, `WebClientMeshRegistrar`).
+The stack's `@Configuration` (`RestClientConfiguration`,
+`WebClientConfiguration`) `@Import`s that subclass next to the core's
+`MeshResilienceConfiguration`. The core's wiring is therefore never scanned
 on its own: a host that scans its stack's package gets the shared wiring
-with it. `BreakerVerdicts` verifies at construction that the stack's own
+with it. The verdicts are not a bean, so nothing in a host's context can
+replace them - neither a host's own `BreakerVerdicts` bean nor bean
+overriding, either of which would otherwise make the breakers record a
+benign 4xx while the guard probed with the same wrong verdicts. `BreakerVerdicts` verifies at construction that the stack's own
 policy reads the probe as a benign client error, so a stack cannot ship a
 guard that fails every start.
 
@@ -156,17 +162,19 @@ configuration now declares every derived alias under
   before the first release; recorded in the CHANGELOG.
 - The blocking module can no longer be lifted into another project as a
   single directory; it needs `veredium-core` next to it.
-- The per-stack test helpers that apply the customizers to plain
-  registries (`CustomizedRegistries`) exist three times - once in the core
-  with the stand-in stack, once per client with its real verdicts - because
-  a Maven test-jar would be published to Central alongside the modules.
-  Twenty lines each, deliberately.
+- The test helper that applies the customizers to plain registries
+  (`CustomizedRegistries`) exists twice: once in the core with the stand-in
+  stack, and once in the unpublished `veredium-test-support` that both
+  clients share, fed with each stack's real verdicts. The core's tests
+  cannot use the shared one (it depends on the core), and a Maven test-jar
+  would be published to Central alongside the modules.
 
 **Neutral:**
 
-- A stack's `*VerdictsConfig` is the single import point of the shared
+- A stack's configuration is the single import point of the shared
   wiring. A host that wants the ladder without a client depends on the
-  core directly and declares a `BreakerVerdicts` bean of its own.
+  core directly, subclasses `MeshResilienceRegistrar` with verdicts of its
+  own and imports that subclass next to `MeshResilienceConfiguration`.
 - The review's finding 3 on the origin (the unused asynchronous form) and
   the Helm twin test were already absent from the port and are not
   affected.

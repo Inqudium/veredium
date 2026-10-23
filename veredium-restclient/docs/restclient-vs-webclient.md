@@ -285,10 +285,12 @@ entry — after the named base config and the instance's own YAML, before the in
 bind to the final instance and nothing is rebuilt later. The verdicts are folded onto what YAML produced (ignore
 OR-ed, record AND-ed), so an operator's own lists survive.
 
-What the stack contributes is one bean, `BreakerVerdicts` (`RestClientVerdicts` here, `WebClientVerdicts` in the
+What the stack contributes is one object, `BreakerVerdicts` (`RestClientVerdicts` here, `WebClientVerdicts` in the
 twin): how to read a response status off this stack's exception, which exception types this stack raises
-itself, and a 404 in the shape this stack throws it as the guard's probe. `RestClientConfiguration` declares the
-bean and `@Import`s `MeshResilienceConfiguration`, so a host that scans this module's package gets the core wiring too.
+itself, and a 404 in the shape this stack throws it as the guard's probe. It is handed to the core's
+`MeshResilienceRegistrar` by `RestClientMeshRegistrar`, not declared as a bean, so nothing in a host's context can
+replace it. `RestClientConfiguration` `@Import`s that registrar and `MeshResilienceConfiguration`, so a host that
+scans this module's package gets the core wiring too.
 The RULES — a benign 4xx except 408/429 is a success, a client-side failure is ignored, the cause chain is
 walked to a bounded depth — are written once and cannot drift between the stacks any more.
 

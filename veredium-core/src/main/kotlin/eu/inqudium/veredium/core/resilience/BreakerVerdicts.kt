@@ -168,8 +168,9 @@ class ClientSideFailurePolicy(
 
 /**
  * What a client stack tells the shared resilience wiring about itself: its two breaker verdicts and a probe
- * for the startup guard. One bean per host, declared by the stack's configuration (`RestClientConfiguration`,
- * `WebClientConfiguration`) next to the `@Import` of [eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration].
+ * for the startup guard. One object per stack (`RestClientVerdicts`, `WebClientVerdicts`), handed to the shared
+ * wiring directly - to [MeshResilienceRegistrar] by the stack's subclass of it, and to `ClientCallLog` by the
+ * stack's client - and never declared as a bean, so nothing in a host's context can replace it.
  *
  * @property httpExchangeError The benign-4xx rule, with this stack's reading of a response exception.
  * @property clientSideFailure The client-side-failure rule, with this stack's exception types.

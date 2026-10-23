@@ -1,11 +1,10 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration
-import eu.inqudium.veredium.core.resilience.BreakerVerdicts
+import eu.inqudium.veredium.core.resilience.MeshResilienceRegistrar
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.boot.context.properties.EnableConfigurationProperties
-import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
 import reactor.core.publisher.Hooks
@@ -15,10 +14,10 @@ import reactor.core.publisher.Hooks
  * host imports when it does not scan the package:
  *
  * - the `app.webclient` binding ([WebClientProperties]);
- * - the shared mesh wiring of `veredium-core` ([MeshResilienceConfiguration]: the `app.mesh` binding, the per-alias
- *   Resilience4j customizers, the startup guard, the ladder logger), fed with this stack's verdicts
- *   ([WebClientVerdicts]) through the [BreakerVerdicts] bean - so a host that scans this module's package gets
- *   the core wiring too, without knowing the core package exists.
+ * - the shared mesh wiring of `veredium-core`: [MeshResilienceConfiguration] (the `app.mesh` binding, the ladder
+ *   logger) and [WebClientMeshRegistrar] (the per-alias Resilience4j customizers and the startup guard, with
+ *   this stack's verdicts, [WebClientVerdicts], handed in directly) - so a host that scans this module's package
+ *   gets the core wiring too, without knowing the core package exists.
  *
  * The scanned `@Component`s of this module - [ResilientWebClientFactory], [ReactiveResilienceDecorator],
  * [WebClientObservationReport] - and the `@Configuration` [WebClientReactorContextPropagationConfiguration] are
@@ -28,11 +27,11 @@ import reactor.core.publisher.Hooks
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(WebClientProperties::class)
-@Import(MeshResilienceConfiguration::class)
-class WebClientConfiguration {
-    @Bean
-    fun breakerVerdicts(): BreakerVerdicts = WebClientVerdicts.breakerVerdicts
-}
+@Import(MeshResilienceConfiguration::class, WebClientMeshRegistrar::class)
+class WebClientConfiguration
+
+/** The shared mesh wiring of `veredium-core`, registered with this stack's verdicts. */
+class WebClientMeshRegistrar : MeshResilienceRegistrar(WebClientVerdicts.breakerVerdicts)
 
 /**
  * Owns the ONE process-wide switch this module makes: Reactor's automatic context propagation.

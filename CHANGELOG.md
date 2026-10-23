@@ -196,6 +196,14 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
 
 ### Changed
 
+- `veredium-core`: a stack hands its `BreakerVerdicts` to the shared mesh wiring as an object instead of
+  declaring it as a bean. The new abstract `MeshResilienceRegistrar(verdicts)` registers the per-alias
+  customizers and the startup guard; each stack subclasses it (`RestClientMeshRegistrar`,
+  `WebClientMeshRegistrar`) and imports it next to `MeshResilienceConfiguration`, which keeps only the `app.mesh`
+  binding and the ladder logger. `MeshResilienceCustomizerRegistrar` and the `breakerVerdicts` bean are gone. A
+  host's own `BreakerVerdicts` bean - or bean overriding - can no longer replace a stack's verdicts, which would
+  have made the breakers record a benign 4xx unnoticed. A host that uses the core without a client subclasses the
+  registrar instead of declaring the bean.
 Findings of `docs/assessment/CODE_STYLE-2026-10-23T10-45-28.md`:
 
 - **Renamed resources (operator-visible):** the module's pools, clients and threads follow one scheme,

@@ -2,7 +2,7 @@ package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
-import eu.inqudium.veredium.core.resilience.BreakerVerdicts
+import eu.inqudium.veredium.core.resilience.MeshResilienceRegistrar
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
@@ -18,10 +18,10 @@ import org.springframework.context.annotation.Import
  * host imports when it does not scan the package:
  *
  * - the `app.restclient` binding ([RestClientProperties]);
- * - the shared mesh wiring of `veredium-core` ([MeshResilienceConfiguration]: the `app.mesh` binding, the per-alias
- *   Resilience4j customizers, the startup guard, the ladder logger), fed with this stack's verdicts
- *   ([RestClientVerdicts]) through the [BreakerVerdicts] bean - so a host that scans this module's package gets
- *   the core wiring too, without knowing the core package exists;
+ * - the shared mesh wiring of `veredium-core`: [MeshResilienceConfiguration] (the `app.mesh` binding, the ladder
+ *   logger) and [RestClientMeshRegistrar] (the per-alias Resilience4j customizers and the startup guard, with
+ *   this stack's verdicts, [RestClientVerdicts], handed in directly) - so a host that scans this module's package
+ *   gets the core wiring too, without knowing the core package exists;
  * - this module's instance of the core's [BlockingResilienceDecorator], the pipeline every call of a
  *   [ResilientRestClient] runs through, over the three registries `resilience4j-spring-boot4` auto-configures.
  *   The decorator carries no Spring annotation of its own - it is a plain component of `veredium-core`, usable
@@ -37,11 +37,8 @@ import org.springframework.context.annotation.Import
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(RestClientProperties::class)
-@Import(MeshResilienceConfiguration::class)
+@Import(MeshResilienceConfiguration::class, RestClientMeshRegistrar::class)
 class RestClientConfiguration {
-    @Bean
-    fun breakerVerdicts(): BreakerVerdicts = RestClientVerdicts.breakerVerdicts
-
     @Bean
     fun blockingResilienceDecorator(
         circuitBreakerRegistry: CircuitBreakerRegistry,
@@ -62,3 +59,6 @@ class RestClientConfiguration {
         const val WORKER_NAME_PREFIX: String = "restclient-call-"
     }
 }
+
+/** The shared mesh wiring of `veredium-core`, registered with this stack's verdicts. */
+class RestClientMeshRegistrar : MeshResilienceRegistrar(RestClientVerdicts.breakerVerdicts)

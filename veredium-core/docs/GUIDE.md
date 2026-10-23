@@ -77,10 +77,10 @@ records every exception by default. `HttpExchangeErrorPolicy` says which answers
 which failures the client raised itself (a bulkhead rejection, the buffer limit: *ignored*,
 evidence in neither direction). The rules are the same for both stacks; what differs is the
 exception vocabulary - which type carries a status, which type is the buffer limit - and that is
-what each stack contributes as its one `BreakerVerdicts` bean (`RestClientVerdicts`,
-`WebClientVerdicts`).
+what each stack contributes as its one `BreakerVerdicts` object (`RestClientVerdicts`,
+`WebClientVerdicts`), handed to the shared wiring directly rather than as a bean.
 
-**The wiring.** `MeshResilienceConfiguration` registers one circuit-breaker customizer per alias and one
+**The wiring.** The stack's subclass of `MeshResilienceRegistrar` registers one circuit-breaker customizer per alias and one
 time-limiter customizer per alias whose derivation is on; Resilience4j's Boot configuration
 consults them as the last step of building each `instances.<alias>` entry, so the instance the
 metric and health binders bind to is already the final one. `MeshResilienceStartupGuard` fails
@@ -88,8 +88,9 @@ the context when an alias is not declared under all three `resilience4j.<layer>.
 instance would silently run on the registry default) or when the customizer's effect is not
 observable on the instance the registry serves, and logs a WARN when the mesh bulkheads together
 admit more calls (`sum(max-concurrent-calls)`) than the shared pool has connections
-(`app.mesh.defaults.transport.max-connections`). Each stack's `*VerdictsConfig` `@Import`s
-`MeshResilienceConfiguration`, so a host that scans its stack's package gets all of it.
+(`app.mesh.defaults.transport.max-connections`). Each stack's configuration `@Import`s
+`MeshResilienceConfiguration` (the `app.mesh` binding, the ladder logger) next to its registrar, so a host that
+scans its stack's package gets all of it.
 
 **The blocking decorator.** `BlockingResilienceDecorator` runs a `() -> T` as
 `CircuitBreaker( TimeLimiter( Bulkhead( call ) ) )` - Resilience4j's own aspect order - on a fresh
