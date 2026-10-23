@@ -1,5 +1,6 @@
-# The configuration of both examples. Each example application scans one client module only, so the blocking one
-# binds app.restclient and the reactive one app.webclient; app.mesh and resilience4j are shared by both.
+# The configuration of every example. Each client example scans one client module only, so the blocking and the
+# asynchronous ones bind app.restclient and the reactive one app.webclient; app.mesh is shared by them. The decorator
+# example scans no client and reads legacy-directory and its own Resilience4j instances.
 
 spring:
   application:
@@ -16,6 +17,14 @@ adapter-logging:
   request-headers:
     includes: ["*"]
     masked: ["Authorization"]
+
+# The decorator example's legacy backend, reached through the sidecar like the others.
+legacy-directory:
+  base-url: "http://localhost:8042"
+  host: customers.example.com
+  connect-timeout: 100ms
+  response-timeout: 700ms
+  max-connections: 10
 
 app:
   restclient:
@@ -56,6 +65,10 @@ resilience4j:
         base-config: mesh-backend
       order-search:
         base-config: mesh-backend
+      legacy-directory:
+        timeout-duration: 1s
+        # Required by BlockingResilienceDecorator: without it the worker is not interrupted at the budget.
+        cancel-running-future: true
   bulkhead:
     configs:
       mesh-backend:
@@ -66,6 +79,9 @@ resilience4j:
         base-config: mesh-backend
       order-search:
         base-config: mesh-backend
+      legacy-directory:
+        max-concurrent-calls: 10
+        max-wait-duration: 0
   circuitbreaker:
     configs:
       mesh-backend:
@@ -79,4 +95,6 @@ resilience4j:
       customers:
         base-config: mesh-backend
       order-search:
+        base-config: mesh-backend
+      legacy-directory:
         base-config: mesh-backend

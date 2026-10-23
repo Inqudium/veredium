@@ -1,15 +1,16 @@
 # veredium-examples
 
-Worked examples of a host using the two client modules of [Veredium](../README.md): one Spring Boot application
-per calling style - blocking, asynchronous, reactive - each with an adapter over two backends and the configuration
-it needs. A build-only module: it is never published, and its tests run every example against a stand-in sidecar,
-so an example that no longer works fails the build.
+Worked examples of a host using [Veredium](../README.md): one Spring Boot application per calling style of the two
+client modules - blocking, asynchronous, reactive - each with an adapter over two backends and the configuration
+it needs, and one that bounds a blocking call of its own with the core's `BlockingResilienceDecorator`. A
+build-only module: it is never published, and its tests run every example against a stand-in sidecar, so an
+example that no longer works fails the build.
 
 ## What it shows
 
-Both examples call the same two backends behind the local sidecar: a customer directory (GET by id) and an order
-search (POST with a JSON body). Both are configured once in
-[`application.yml`](src/main/resources/application.yml).
+The client examples call the same two backends behind the local sidecar: a customer directory (GET by id) and an
+order search (POST with a JSON body). The decorator example reads the same customer directory with a native client.
+All of them are configured once in [`application.yml`](src/main/resources/application.yml).
 
 | File | Shows |
 |---|---|
@@ -21,10 +22,15 @@ search (POST with a JSON body). Both are configured once in
 | [`AsyncCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/async/AsyncCustomerAdapter.kt) | `getAsync`/`postAsync`: every outcome on a `CompletableFuture`, a 404 mapped to `null` on the future, two calls in flight with `thenCombine`, and a cancel handed on to the calls a derived future came from. |
 | [`ReactiveExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveExampleApplication.kt) | The same wiring for the reactive client. |
 | [`ReactiveCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveCustomerAdapter.kt) | `ResilientWebClient`: the same adapter on `Mono`s, a 404 turned into an empty `Mono`, `Mono.zip` for both calls, and a `suspend` function for coroutine code. |
+| [`DecoratorExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorExampleApplication.kt) | A host without a client module: it scans only its own package. |
+| [`DecoratorConfiguration`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorConfiguration.kt) | The wiring a host declares itself for `BlockingResilienceDecorator`: the bean over the auto-configured registries, the breaker customizer that ignores `SELF_INFLICTED_FAILURES` and the backend's own "unknown customer" answer, and a native Apache HttpClient 4 with its bounds, no retries and no redirects. |
+| [`LegacyCustomerDirectory`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/LegacyCustomerDirectory.kt) | `decorate` and `decorateAsync` by instance name around a HttpClient 4 exchange that sets its own Host header, a 404 that the breaker ignores, and the two `BaseAdapter` budgets from the decorator and the client. |
 
 The tests under [`src/test/kotlin`](src/test/kotlin/eu/inqudium/veredium/examples) start each application as a
 host starts it (`@SpringBootTest`). A WireMock server plays the sidecar. Its stubs answer only the Host header the
-triplet names, so a passing test also shows the routing.
+triplet names, so a passing test also shows the routing. The decorator example's tests also show the layered
+bounds: against a silent backend HttpClient 4's socket timeout trips first; against a body that drips in, each read
+inside the socket timeout, the decorator's budget releases the caller and its interrupt ends the worker's read.
 
 ## Running them
 
@@ -40,7 +46,7 @@ and wait for nothing. They are meant to be read and copied, not run.
 Examples need a place where they compile against the published API, run against it, and still never ship. None of
 the existing modules is that place:
 
-- **Not the client modules' tests.** Their tests use factories and contexts built by hand, which pin one behaviour
+- **Not the library modules' tests.** Their tests use factories and contexts built by hand, which pin one behaviour
   each. A host never builds those. It scans a package and writes YAML, and that is what an example has to show. The
   client modules' tests also cannot see each other, and the point of these examples is the same adapter on both
   stacks, side by side.
@@ -49,7 +55,8 @@ the existing modules is that place:
 - **Not a client module's main code.** Example applications and adapters in a library jar would ship to every host,
   including a component scan of an `examples` package.
 
-A module that depends on both clients the way a host does has none of these problems. It is kept out of every
+A module that depends on both clients the way a host does has none of these problems. Its one dependency of its
+own, Apache HttpClient 4 for the decorator example, stays in this module too. It is kept out of every
 published artifact the same way as [`veredium-coverage`](../veredium-coverage/README.md) and
 [`veredium-test-support`](../veredium-test-support/README.md):
 
@@ -61,8 +68,8 @@ published artifact the same way as [`veredium-coverage`](../veredium-coverage/RE
 
 ## Consequences
 
-- **Both stacks are on one classpath.** A real host usually picks one. Each example application therefore scans
-  exactly one client package. `spring.main.web-application-type: none` keeps `spring-webflux`, which the reactive
+- **Both stacks are on one classpath.** A real host usually picks one. Each client example therefore scans
+  exactly one client package, and the decorator example none. `spring.main.web-application-type: none` keeps `spring-webflux`, which the reactive
   client brings, from starting a web server in any of them.
-- **Three Boot contexts share one test JVM.** The tests keep every context off Micrometer's global registry
+- **Four Boot contexts share one test JVM.** The tests keep every context off Micrometer's global registry
   (`management.metrics.use-global-registry=false`). A single host does not need that setting.

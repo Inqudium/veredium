@@ -58,10 +58,11 @@ group, the fictional periodic table of **Inqudium**.
 | [`veredium-restclient`](veredium-restclient/README.md) | the blocking client: Spring `RestClient` over Apache HttpClient 5, mesh timeout ladder, Resilience4j | `eu.inqudium.veredium.restclient` |
 | [`veredium-webclient`](veredium-webclient/README.md) | the reactive client: Spring `WebClient` over Reactor Netty, mesh timeout ladder, Resilience4j | `eu.inqudium.veredium.webclient` |
 
-[`veredium-examples`](veredium-examples/README.md) shows a host using both clients: one Spring Boot application per
-calling style (blocking, asynchronous, reactive), its adapter and its configuration, each run by the build's tests. It is never published, and neither are the
-other two build-only modules, [`veredium-test-support`](veredium-test-support/README.md) and
-[`veredium-coverage`](veredium-coverage/README.md).
+[`veredium-examples`](veredium-examples/README.md) shows a host using veredium: one Spring Boot application per
+calling style of the two clients (blocking, asynchronous, reactive), and one that bounds a native Apache
+HttpClient 4 call with the core's `BlockingResilienceDecorator`, each run by the build's tests. It is never
+published, and neither are the other two build-only modules,
+[`veredium-test-support`](veredium-test-support/README.md) and [`veredium-coverage`](veredium-coverage/README.md).
 
 ## Documentation
 
