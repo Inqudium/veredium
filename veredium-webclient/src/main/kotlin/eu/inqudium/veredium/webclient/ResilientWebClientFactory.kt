@@ -169,9 +169,7 @@ class ResilientWebClientFactory(
         EngineTransports(engineByBackend.values.toSet(), logger) { engine ->
             when (engine) {
                 WebClientEngine.REACTOR_NETTY -> {
-                    ReactorNettyTransport(properties, meshTransport, POOL_NAME, poolDisposeTimeout) { disposal, left ->
-                        drain(disposal, Schedulers.parallel(), left).block()
-                    }
+                    ReactorNettyTransport(properties, meshTransport, POOL_NAME, poolDisposeTimeout, ::awaitPoolDisposal)
                 }
 
                 WebClientEngine.JDK -> {
@@ -339,6 +337,17 @@ class ResilientWebClientFactory(
     @PreDestroy
     fun shutdown() {
         transports.release(System.nanoTime() + poolDisposeTimeout.toNanos(), System::nanoTime)
+    }
+
+    /**
+     * The Reactor Netty engine's wait for its pool's [disposal] during [shutdown], bounded by [left] - what is left of
+     * the shared deadline when that engine's turn comes, never the full [poolDisposeTimeout] again ([drain]).
+     */
+    internal fun awaitPoolDisposal(
+        disposal: Mono<Void>,
+        left: Duration,
+    ) {
+        drain(disposal, Schedulers.parallel(), left).block()
     }
 
     /**

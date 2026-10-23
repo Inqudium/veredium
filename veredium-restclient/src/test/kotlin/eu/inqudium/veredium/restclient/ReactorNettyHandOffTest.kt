@@ -118,7 +118,7 @@ class ReactorNettyHandOffTest {
         offload.shutdownNow()
 
         // When
-        val failure = catchThrowable { ReactorNettyEngineTransport.handOff(offload, "Request") { "never run" } }
+        val failure = catchThrowable { ReactorNettyEngineTransport.handOff<Unit>(offload, "Request") { } }
 
         // Then
         assertThat(failure)

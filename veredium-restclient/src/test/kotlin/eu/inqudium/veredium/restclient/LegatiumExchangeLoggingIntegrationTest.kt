@@ -53,6 +53,7 @@ import org.springframework.web.client.ResourceAccessException
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
@@ -124,10 +125,23 @@ class LegatiumExchangeLoggingIntegrationTest {
 
         private lateinit var wireMock: WireMockServer
 
+        /**
+         * What a request to a URL triggers once it reached WireMock, per test ([arrivalOf]) - behind ONE listener for
+         * the class, registered with the server: `resetAll()` does not remove a request listener, so one added per
+         * test would pile up and fire for a later test's request to the same URL. Cleared before every test.
+         */
+        private val arrivals = ConcurrentHashMap<String, () -> Unit>()
+
+        /** A latch that opens once a request to [url] reached WireMock in the current test. */
+        private fun arrivalOf(url: String): CountDownLatch = CountDownLatch(1).also { latch -> arrivals[url] = latch::countDown }
+
         @JvmStatic
         @BeforeAll
         fun startWireMock() {
-            wireMock = WireMockServer(wireMockConfig().dynamicPort()).apply { start() }
+            wireMock =
+                WireMockServer(wireMockConfig().dynamicPort())
+                    .apply { start() }
+                    .also { server -> server.addMockServiceRequestListener { request, _ -> arrivals[request.url]?.invoke() } }
         }
 
         @JvmStatic
@@ -146,6 +160,7 @@ class LegatiumExchangeLoggingIntegrationTest {
     @BeforeEach
     fun setUp() {
         wireMock.resetAll()
+        arrivals.clear()
         // The runner does not initialise Boot's LoggingSystem, so the reference `logging.level` block does not
         // apply here; the level is set by hand to the value that block recommends (INFO = every exchange).
         previousExchangeLevel = exchangeLogger.level
@@ -547,8 +562,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             //
             // Given: a pool of one connection, held by a call to a 3 s backend that is already on the wire
             wireMock.stubFor(get(urlEqualTo("/things/hold")).willReturn(okJson("{}").withFixedDelay(3_000)))
-            val inFlight = CountDownLatch(1)
-            wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/things/hold") inFlight.countDown() }
+            val inFlight = arrivalOf("/things/hold")
             hostContext("pool-lease", maxConnections = 1).run { context ->
                 capturing(backend = "pool-lease", expectedEvents = 1) { appender ->
                     val client = context.client("pool-lease")
@@ -626,8 +640,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // interrupt is sent only once the request is on the wire, otherwise the worker may be cancelled
             // before it ever sent anything and there would be no exchange to log
             wireMock.stubFor(get(urlEqualTo("/things/never")).willReturn(okJson("{}").withFixedDelay(30_000)))
-            val inFlight = CountDownLatch(1)
-            wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/things/never") inFlight.countDown() }
+            val inFlight = arrivalOf("/things/never")
             hostContext("walked-away").run { context ->
                 capturing(backend = "walked-away", expectedEvents = 1) { appender ->
                     val client = context.client("walked-away")

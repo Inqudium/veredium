@@ -401,19 +401,28 @@ engine reports after that is the expected end of an aborted exchange, not an err
   exchange. Reading the body, the JDK's stream closes itself and fails the read.
 - Reactive: cancelling the subscription cancels the client's future, which completes it at once. Whether the
   exchange's own failure follows **after** the cancellation depends on timing: sometimes it does, sometimes not.
+- Reactive, once the head arrived: cancelling the **body** subscription only unregisters the subscriber
+  (`HttpBodySubscriberWrapper.onCancel`); the client reads the rest of the body on, for as long as the peer sends
+  it. The JDK client has no public way to abort an exchange whose head arrived.
 
-**With veredium.** Nothing to add on the blocking side. Reactive: see "Errors after a cancellation" below.
+**With veredium.** Nothing to add on the blocking side. Reactive: see "Errors after a cancellation" below. A body
+cancelled after the head (a codec refusal, a TimeLimiter abort) keeps its connection until the peer stops: the
+startup line says so; there is no fix short of a connector of the module's own.
 
 ### Jetty
 
 **Default (12.1.12).**
 - Blocking: Spring's request only **stops waiting**. The Jetty request stays in flight and holds its connection
   until the response arrives or its total timeout expires.
-- Reactive: the adapter aborts the request on cancel (`abortOnCancel`) and reports the failure afterwards.
+- Reactive: the adapter aborts the request on cancel (`abortOnCancel`) and reports the failure afterwards - while
+  waiting for the head. Cancelling the **body** only stops its delivery: Jetty goes on receiving the rest on the
+  connection, for as long as the peer sends it.
 
 **With veredium.** Blocking: the request factory captures the Jetty request where Spring creates it
 (`HttpClient.newRequest(URI)`, on the calling thread). It aborts the request when the exchange fails, when a body
-read fails, and when the response is closed early.
+read fails, and when the response is closed early. Reactive: a body cancelled before its end aborts the native
+request (`AbortJettyOnBodyCancel`). Pinned per engine by the reactive "should refuse a dripping body past the
+codec limit at once, dropping the connection"; before the fix the Jetty connection stayed open.
 
 ### Reactor Netty
 
@@ -611,7 +620,7 @@ Pinned per engine by "should let an in-flight exchange finish before closing the
 waiting for a connection finish before closing the engine", "should report an engine that does not drain by the
 deadline and close it anyway", "should stop waiting when the shutdown thread is interrupted and leave the flag set"
 and "should refuse a client requested after shutdown" (blocking), and by the reactive "Draining shutdown" (the same
-two cases on every engine), "Release against the shutdown deadline" and "Jetty's shutdown" cases. `EngineTransportLifecycleTest`
+two cases on every engine), "Release against the shutdown deadline" and "Interrupted shutdown" cases. `EngineTransportLifecycleTest`
 and `EngineTransportsTest` pin the isolation of a failing release.
 
 ## Test infrastructure

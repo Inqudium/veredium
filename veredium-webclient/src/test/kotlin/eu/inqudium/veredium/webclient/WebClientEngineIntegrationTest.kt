@@ -74,11 +74,13 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.LockSupport
 import java.util.function.Consumer
 import java.util.stream.Stream
 import java.util.zip.GZIPOutputStream
@@ -107,6 +109,16 @@ class WebClientEngineIntegrationTest {
     companion object {
         private lateinit var wireMock: WireMockServer
 
+        /**
+         * What a request to a URL triggers once it reached WireMock, per test ([arrivalOf]) - behind ONE listener for
+         * the class, registered with the server: `resetAll()` does not remove a request listener, so one added per
+         * test would pile up and fire for a later test's request to the same URL. Cleared before every test.
+         */
+        private val arrivals = ConcurrentHashMap<String, () -> Unit>()
+
+        /** A latch that opens once a request to [url] reached WireMock in the current test. */
+        private fun arrivalOf(url: String): CountDownLatch = CountDownLatch(1).also { latch -> arrivals[url] = latch::countDown }
+
         /** The TimeLimiter budget of every case not ABOUT the budget - see `newFactory` there for why not 1 s. */
         private val GENEROUS_BUDGET: Duration = Duration.ofSeconds(30)
 
@@ -133,7 +145,10 @@ class WebClientEngineIntegrationTest {
         @JvmStatic
         @BeforeAll
         fun startWireMock() {
-            wireMock = WireMockServer(wireMockConfig().dynamicPort()).apply { start() }
+            wireMock =
+                WireMockServer(wireMockConfig().dynamicPort())
+                    .apply { start() }
+                    .also { server -> server.addMockServiceRequestListener { request, _ -> arrivals[request.url]?.invoke() } }
         }
 
         @JvmStatic
@@ -168,6 +183,7 @@ class WebClientEngineIntegrationTest {
     @BeforeEach
     fun resetStubs() {
         wireMock.resetAll()
+        arrivals.clear()
     }
 
     @AfterEach
@@ -315,9 +331,10 @@ class WebClientEngineIntegrationTest {
             // Success criteria: against a backend 3 s late and a 30 s budget, each call fails with a
             //   WebClientRequestException (the transport's verdict, not the TimeLimiter's TimeoutException), no
             //   earlier than its OWN response timeout (900 ms for the 500 ms anchor, 1400 ms for the 1000 ms one)
-            //   and before its ladder's TimeLimiter rung 400 ms above it (connect 100 + pending-acquire 200 + 100
-            //   headroom). Each window is measured after a warm-up call of the same backend, so it holds the
-            //   timeout and not the engine's first-exchange class loading.
+            //   and before the OTHER backend's larger timeout would have fired (quick) or the backend answers
+            //   (slow), each less 50 ms. Each window is measured after a warm-up call of the same backend, so it
+            //   holds the timeout and not the engine's first-exchange class loading. The windows are as wide as
+            //   telling the two timeouts apart allows - a loaded runner only ever makes a timeout late.
             // Why it matters: the response timeout is the ladder's transport guard - tighter than the budget, so
             //   the breaker records a transport failure rather than a budget overrun. The JDK, Jetty and Apache
             //   engines share ONE client between their backends and carry the timeout per connector; one that kept
@@ -347,7 +364,99 @@ class WebClientEngineIntegrationTest {
 
                 // Then
                 assertThat(failure).`as`(backend).isInstanceOf(WebClientRequestException::class.java)
-                assertThat(elapsed).`as`(backend).isGreaterThanOrEqualTo(responseTimeout.minusMillis(50)).isLessThan(responseTimeout.plusMillis(400))
+                val upper = timeouts.values.filter { it > responseTimeout }.minOrNull() ?: Duration.ofMillis(3_000)
+                assertThat(elapsed).`as`(backend).isGreaterThanOrEqualTo(responseTimeout.minusMillis(50)).isLessThan(upper.minusMillis(50))
+            }
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(WebClientEngine::class)
+        fun `should refuse a dripping body past the codec limit at once, dropping the connection`(engine: WebClientEngine) {
+            // What is tested: what the codec's refusal of an over-limit body does to the exchange on each engine when
+            //   the rest of the body is still on its way - the body-phase cancellation (Apache: AbortOnBodyCancel).
+            // Success criteria: against a backend that sends the head and 4 KiB of a declared 1 MiB body at once and
+            //   then one byte every 200 ms, a 1 KiB limit and a generous budget, the call fails with
+            //   DataBufferLimitException as its root cause within 2 s, and the backend sees its connection dropped
+            //   within 2 s - except on the JDK client, which has no way to abort an exchange once its head arrived:
+            //   cancelling its body subscription only unregisters the subscriber, the client reads the rest. For it
+            //   the case pins that the connection is NOT dropped, so a JDK that changes this turns it red.
+            // Why it matters: the codec cancels the body when it refuses it. An engine whose exchange outlived that
+            //   cancellation would keep the connection - and its pool slot - for as long as the peer drips, up to
+            //   the response timeout. A body that arrives in one piece cannot tell the difference; only one still
+            //   arriving can.
+            //
+            // Given
+            DrippingBackend().use { backend ->
+                val factory =
+                    newFactory(
+                        WebClientProperties.Engine(default = engine),
+                        listOf("flooded"),
+                        maxInMemorySize = DataSize.ofKilobytes(1),
+                        mesh = meshFor(listOf("flooded"), backend.baseUrl, anchors = mapOf("flooded" to LONG_ANCHOR_MS)),
+                    )
+                val client = factory.create("flooded")
+
+                // When
+                val started = System.nanoTime()
+                val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/flood") }.block(Duration.ofSeconds(10)) }
+                val elapsed = Duration.ofNanos(System.nanoTime() - started)
+
+                // Then
+                assertThat(failure).hasRootCauseInstanceOf(DataBufferLimitException::class.java)
+                assertThat(elapsed).`as`("the refusal must not wait for the rest of the body").isLessThan(Duration.ofSeconds(2))
+                if (engine == WebClientEngine.JDK) {
+                    assertThat(backend.connectionDropped.await(500, TimeUnit.MILLISECONDS))
+                        .`as`("the JDK client reads a cancelled body on (see the startup line); if this fails, it no longer does")
+                        .isFalse()
+                } else {
+                    assertThat(backend.connectionDropped.await(2, TimeUnit.SECONDS))
+                        .`as`("the %s engine must drop the connection once the codec refused the body", engine)
+                        .isTrue()
+                }
+            }
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(WebClientEngine::class)
+        fun `should drop the connection when the budget expires while the body is still arriving`(engine: WebClientEngine) {
+            // What is tested: the TimeLimiter's cancellation in the BODY phase on each engine - the head arrived, the
+            //   body drips, nothing on the client refuses it.
+            // Success criteria: against the dripping backend, a 1 s budget and the default codec limit, the call
+            //   fails with a TimeoutException within 2.5 s, and the backend sees its connection dropped within 2 s -
+            //   except on the JDK client, which reads a cancelled body on (see the codec case above); for it the case
+            //   pins that the connection is NOT dropped.
+            // Why it matters: the body is the phase no per-read timeout bounds as a whole - a peer that drips passes
+            //   every one - so the TimeLimiter's cancellation is what ends it, and only if it reaches the engine's
+            //   exchange does the connection come back instead of being held for as long as the peer sends.
+            //
+            // Given
+            DrippingBackend().use { backend ->
+                val factory =
+                    newFactory(
+                        WebClientProperties.Engine(default = engine),
+                        listOf("dripping"),
+                        timeLimiter = Duration.ofSeconds(1),
+                        mesh = meshFor(listOf("dripping"), backend.baseUrl, anchors = mapOf("dripping" to LONG_ANCHOR_MS)),
+                    )
+                val client = factory.create("dripping")
+
+                // When
+                val started = System.nanoTime()
+                val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/drip") }.block(Duration.ofSeconds(10)) }
+                val elapsed = Duration.ofNanos(System.nanoTime() - started)
+
+                // Then
+                assertThat(failure).hasCauseExactlyInstanceOf(TimeoutException::class.java)
+                assertThat(elapsed).isLessThan(Duration.ofMillis(2_500))
+                if (engine == WebClientEngine.JDK) {
+                    assertThat(backend.connectionDropped.await(500, TimeUnit.MILLISECONDS))
+                        .`as`("the JDK client reads a cancelled body on (see the startup line); if this fails, it no longer does")
+                        .isFalse()
+                } else {
+                    assertThat(backend.connectionDropped.await(2, TimeUnit.SECONDS))
+                        .`as`("the %s engine must drop the connection once the TimeLimiter cancelled the body", engine)
+                        .isTrue()
+                }
             }
         }
 
@@ -737,6 +846,46 @@ class WebClientEngineIntegrationTest {
             assertThat(disposed).isTrue()
         }
 
+        @Test
+        fun `should bound the reactor-netty disposal by what is left of the shared deadline`() {
+            // What is tested: the wait for the Reactor Netty pool's disposal when the engine's turn comes late - the
+            //   transport's share of the shared deadline, and the factory's wait bounded by it.
+            // Success criteria: released with a deadline already spent, the transport hands its wait a remaining
+            //   time of zero; the factory's wait, given 100 ms left and a disposal that never ends, returns within
+            //   1 s with its WARN naming those 100 ms - not after the full drain bound.
+            // Why it matters: the deadline is shared so that releasing several engines takes the drain bound once,
+            //   not once per engine. A wait that took the full bound for Reactor Netty would add it again after the
+            //   engines before it had spent the deadline.
+            //
+            // Given
+            val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
+            val lines = ConcurrentAppender().apply { start() }
+            logger.addAppender(lines)
+            try {
+                val recorded = mutableListOf<Duration>()
+                val transport =
+                    ReactorNettyTransport(WebClientProperties(), MeshProperties.Transport(), "left-probe", Duration.ofMillis(50)) { disposal, left ->
+                        recorded += left
+                        disposal.block()
+                    }
+                val factory = newFactory(WebClientEngine.REACTOR_NETTY, "late")
+
+                // When
+                transport.release(System.nanoTime() - 1, System::nanoTime)
+                val started = System.nanoTime()
+                factory.awaitPoolDisposal(Mono.never(), Duration.ofMillis(100))
+                val waited = Duration.ofNanos(System.nanoTime() - started)
+
+                // Then
+                assertThat(recorded).containsExactly(Duration.ZERO)
+                assertThat(waited).isLessThan(Duration.ofSeconds(1))
+                assertThat(lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage })
+                    .anySatisfy { assertThat(it).contains("did not drain within PT0.1S") }
+            } finally {
+                logger.detachAppender(lines)
+            }
+        }
+
         @ParameterizedTest(name = "{0}")
         @EnumSource(WebClientEngine::class)
         fun `should release the engine's resources on shutdown`(engine: WebClientEngine) {
@@ -820,6 +969,11 @@ class WebClientEngineIntegrationTest {
                     assertThat(transport.isReleased()).isTrue()
                     assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
                     assertThat(catchThrowable { held.get(2, TimeUnit.SECONDS) }).isNotNull().isNotInstanceOf(TimeoutException::class.java)
+                    // The hard close does not join the reactor's workers: a ClosedSelectorException arrives after
+                    // release() returned, if at all. Wait for the workers to end, so "no ERROR" is a statement.
+                    assertThat(eventually { Thread.getAllStackTraces().keys.none { it.name.startsWith(ApacheTransport.THREAD_NAME_PREFIX) } })
+                        .`as`("the Apache engine's I/O threads must end")
+                        .isTrue()
                     assertThat(engineLines.events.filter { it.level == Level.ERROR }.map { it.throwableProxy?.className }).isEmpty()
                     assertThat(lines.events.filter { it.level == Level.ERROR }.map { it.formattedMessage }).isEmpty()
                 }
@@ -845,8 +999,7 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/finishing")).willReturn(okJson("""{"message":"finished"}""").withFixedDelay(500)))
-            val arrived = CountDownLatch(1)
-            wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/finishing") arrived.countDown() }
+            val arrived = arrivalOf("/finishing")
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
             val lines = ConcurrentAppender().apply { start() }
             logger.addAppender(lines)
@@ -886,8 +1039,7 @@ class WebClientEngineIntegrationTest {
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/queued")).willReturn(okJson("""{"message":"served"}""").withFixedDelay(500)))
-            val arrived = CountDownLatch(1)
-            wireMock.addMockServiceRequestListener { request, _ -> if (request.url == "/queued") arrived.countDown() }
+            val arrived = arrivalOf("/queued")
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
             val lines = ConcurrentAppender().apply { start() }
             logger.addAppender(lines)
@@ -925,17 +1077,19 @@ class WebClientEngineIntegrationTest {
     }
 
     @Nested
-    inner class `Jetty's shutdown` {
-        @Test
-        fun `should stop waiting when the shutdown thread is interrupted and leave the flag set`() {
-            // What is tested: the interrupt exit of the Jetty engine's drain, against an exchange that never ends
-            //   and a deadline far off.
+    inner class `Interrupted shutdown` {
+        @ParameterizedTest(name = "{0}")
+        @MethodSource("eu.inqudium.veredium.webclient.WebClientEngineIntegrationTest#drainingEngines")
+        fun `should stop waiting when the shutdown thread is interrupted and leave the flag set`(engine: WebClientEngine) {
+            // What is tested: the interrupt exit of the release of each engine that waits for its exchanges (the JDK
+            //   client's awaitTermination, Jetty's and Apache's drain), against an exchange that never ends and a
+            //   deadline far off.
             // Success criteria: release() on an interrupted thread returns within 2 s, the flag is still set, the
-            //   WARN names the interrupt, and the client is stopped shortly after (its stop runs on a thread of
-            //   its own), which closes the held connection.
+            //   WARN names the engine and the interrupt, and the engine is released shortly after (Jetty's stop
+            //   runs on a thread of its own), which closes the held connection.
             // Why it matters: a container tearing the context down under its own deadline interrupts the
-            //   shutdown thread. Jetty's stop waits for its own threads regardless of the interrupt; run on the
-            //   shutdown thread it would hold the shutdown anyway.
+            //   shutdown thread. A release that ignored the interrupt would hold the shutdown for the whole
+            //   window; Jetty's stop waits for its own threads regardless of it.
             //
             // Given
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
@@ -945,13 +1099,13 @@ class WebClientEngineIntegrationTest {
                 SilentBackend().use { backend ->
                     val factory =
                         newFactory(
-                            WebClientProperties.Engine(default = WebClientEngine.JETTY),
+                            WebClientProperties.Engine(default = engine),
                             listOf("held"),
                             mesh = meshFor(listOf("held"), backend.baseUrl, anchors = mapOf("held" to LONG_ANCHOR_MS)),
                         )
                     val held = factory.create("held").get(Greeting::class.java) { it.uri("/held") }.toFuture()
                     assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
-                    val transport = factory.startedEngines().getValue(WebClientEngine.JETTY)
+                    val transport = factory.startedEngines().getValue(engine)
 
                     // When
                     val release =
@@ -967,8 +1121,8 @@ class WebClientEngineIntegrationTest {
                     // Then
                     assertThat(release.get(2, TimeUnit.SECONDS)).`as`("the interrupt flag must survive release()").isTrue()
                     assertThat(lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage })
-                        .anySatisfy { assertThat(it).contains("'jetty'", "because the shutdown thread was interrupted") }
-                    assertThat(eventually { transport.isReleased() }).`as`("the client stops on its own thread").isTrue()
+                        .anySatisfy { assertThat(it).contains("'$engine'", "because the shutdown thread was interrupted") }
+                    assertThat(eventually { transport.isReleased() }).`as`("the %s engine is released", engine).isTrue()
                     assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
                     assertThat(catchThrowable { held.get(2, TimeUnit.SECONDS) }).isNotNull().isNotInstanceOf(TimeoutException::class.java)
                 }
@@ -980,6 +1134,136 @@ class WebClientEngineIntegrationTest {
 
     @Nested
     inner class `Pool limits on every engine` {
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(WebClientEngine::class)
+        fun `should replace a connection idle past max-idle-time where the engine applies it`(engine: WebClientEngine) {
+            // What is tested: pool.max-idle-time (300 ms) with pool.evict-in-background (100 ms) on each engine,
+            //   against a backend that answers and counts its connections.
+            // Success criteria: a second call 800 ms after the first runs on a NEW connection on reactor-netty,
+            //   jetty and apache; on the jdk client, whose startup line says the setting does NOT apply, it reuses
+            //   the first one.
+            // Why it matters: the startup line says "applies pool.max-idle-time" for three engines. An engine that
+            //   silently ran on its library's default (Reactor Netty: no limit, Jetty: 30 s, Apache: no evictor)
+            //   would keep connections the sidecar may already have closed, and nothing but this case would say so.
+            //
+            // Given
+            AnsweringBackend().use { backend ->
+                val client =
+                    newFactory(
+                        WebClientProperties.Engine(default = engine),
+                        listOf("idle"),
+                        mesh = meshFor(listOf("idle"), backend.baseUrl),
+                        pool = WebClientProperties.Pool(maxIdleTime = Duration.ofMillis(300), evictInBackground = Duration.ofMillis(100)),
+                    ).create("idle")
+                client.get(Greeting::class.java) { it.uri("/first") }.block(Duration.ofSeconds(5))
+
+                // When: the idle time passes - nothing to wait ON, the pool acts on its own clock
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(800))
+                client.get(Greeting::class.java) { it.uri("/second") }.block(Duration.ofSeconds(5))
+
+                // Then
+                assertThat(backend.connections.get())
+                    .`as`("connections the %s engine opened for two calls 800 ms apart", engine)
+                    .isEqualTo(if (engine == WebClientEngine.JDK) 1 else 2)
+            }
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(WebClientEngine::class)
+        fun `should replace a connection older than max-life-time where the engine applies it`(engine: WebClientEngine) {
+            // What is tested: pool.max-life-time (300 ms) on each engine, with an idle time far longer, against a
+            //   backend that answers and counts its connections.
+            // Success criteria: a second call 800 ms after the first runs on a NEW connection on reactor-netty,
+            //   jetty (whose pool checks the duration when it leases) and apache; on the jdk client, whose startup
+            //   line says the setting does NOT apply, it reuses the first one.
+            // Why it matters: the lifetime bound is what spreads connections over the sidecar's restarts and DNS
+            //   changes; a pool on the library's default (unbounded on every engine) would never recycle one, while
+            //   the startup line says "applies pool.max-life-time".
+            //
+            // Given
+            AnsweringBackend().use { backend ->
+                val client =
+                    newFactory(
+                        WebClientProperties.Engine(default = engine),
+                        listOf("aging"),
+                        mesh = meshFor(listOf("aging"), backend.baseUrl),
+                        pool =
+                            WebClientProperties.Pool(
+                                maxIdleTime = Duration.ofSeconds(30),
+                                maxLifeTime = Duration.ofMillis(300),
+                                evictInBackground = Duration.ofMillis(100),
+                            ),
+                    ).create("aging")
+                client.get(Greeting::class.java) { it.uri("/first") }.block(Duration.ofSeconds(5))
+
+                // When: the lifetime passes - nothing to wait ON, the pool acts on its own clock
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(800))
+                client.get(Greeting::class.java) { it.uri("/second") }.block(Duration.ofSeconds(5))
+
+                // Then
+                assertThat(backend.connections.get())
+                    .`as`("connections the %s engine opened for two calls 800 ms apart", engine)
+                    .isEqualTo(if (engine == WebClientEngine.JDK) 1 else 2)
+            }
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(value = WebClientEngine::class, names = ["REACTOR_NETTY", "JETTY"])
+        fun `should reject a call beyond pending-acquire-max-count the way the engine's startup line says`(engine: WebClientEngine) {
+            // What is tested: pool.pending-acquire-max-count (1) with max-connections 1 on the two engines that apply
+            //   it, against a backend that never answers - one call holding the connection, the rest waiting.
+            // Success criteria: reactor-netty lets ONE call wait and rejects the next at once; jetty, whose request
+            //   queue holds max-connections + the count (jettyQueueCapacity), lets TWO wait and rejects the next at
+            //   once - each rejection well inside the case's 1 s, so it is the limit, not a timeout.
+            // Why it matters: the queue bound is what sheds a burst before it piles up behind a stalled backend. An
+            //   engine on its library's default (Reactor Netty 2 x max-connections, Jetty 1024) would let it pile
+            //   up, while the startup line says "applies pool.pending-acquire-max-count=1".
+            //
+            // Given
+            SilentBackend().use { backend ->
+                val factory =
+                    newFactory(
+                        WebClientProperties.Engine(default = engine),
+                        listOf("queued"),
+                        mesh =
+                            meshFor(
+                                listOf("queued"),
+                                backend.baseUrl,
+                                MeshProperties.Transport(maxConnections = 1, pendingAcquireTimeoutMs = 5_000),
+                                anchors = mapOf("queued" to LONG_ANCHOR_MS),
+                            ),
+                        pool = WebClientProperties.Pool(pendingAcquireMaxCount = 1),
+                    )
+                val client = factory.create("queued")
+                val waiting = if (engine == WebClientEngine.JETTY) 2 else 1
+                // The holder first, and the others only once it is ON its connection: on a cold pool Jetty keeps the
+                // holder in its queue until the connection is open, so a burst would meet the queue's cold-pool
+                // capacity (max-connections + the count) instead of the count behind a busy connection.
+                val held = mutableListOf(client.get(Greeting::class.java) { it.uri("/held") }.toFuture())
+                try {
+                    assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the first call holds the connection").isTrue()
+
+                    // When: one call more than may wait - in whatever order they reach the pool
+                    val started = System.nanoTime()
+                    repeat(waiting + 1) { held += client.get(Greeting::class.java) { it.uri("/held") }.toFuture() }
+                    val behind = held.drop(1)
+
+                    // Then: exactly one is rejected at once, by the limit, not by a timeout; the others wait
+                    assertThat(eventually(Duration.ofMillis(800)) { behind.count { it.isDone } == 1 })
+                        .`as`("one call beyond the limit must be rejected at once")
+                        .isTrue()
+                    val elapsed = Duration.ofNanos(System.nanoTime() - started)
+                    val rejected = behind.single { it.isDone }
+                    assertThat(causeNames(catchThrowable { rejected.get() })).doesNotContain("TimeoutException")
+                    assertThat(elapsed).`as`("the limit rejects at once").isLessThan(Duration.ofMillis(800))
+                    assertThat(behind.count { !it.isDone }).`as`("calls waiting behind the busy connection").isEqualTo(waiting)
+                    assertThat(held.first()).isNotDone()
+                } finally {
+                    held.forEach { it.cancel(true) }
+                }
+            }
+        }
+
         @ParameterizedTest(name = "{0}")
         @EnumSource(WebClientEngine::class)
         fun `should bound a call beyond max-connections the way the engine's startup line says`(engine: WebClientEngine) {
@@ -1055,13 +1339,20 @@ class WebClientEngineIntegrationTest {
             // What is tested: transport.connect-timeout-ms (100 ms) on each engine, against a listening socket
             //   whose accept backlog is full, so the kernel leaves the connect unanswered.
             // Success criteria: the call fails as a transport failure (a WebClientRequestException, not the
-            //   TimeLimiter's TimeoutException) within 2 s, under a 30 s budget and a 10.4 s response timeout.
+            //   TimeLimiter's TimeoutException) carrying the engine's own connect-timeout exception, not before
+            //   the 100 ms (less 50 ms of timer slack) and within 2 s, under a 30 s budget and a 10.4 s response
+            //   timeout; on CI the case may not skip itself.
             // Why it matters: the connect timeout is a rung of the ladder - the TimeLimiter margin is computed
             //   from it. Without it an engine waits on its library's default (Reactor Netty 30 s, Jetty 15 s,
             //   Apache 3 min) and every call to an unreachable sidecar spends the whole budget instead.
             //
             // Given: a socket that accepts no further connection, a client against it
             UnansweredConnectBackend().use { backend ->
+                // Skipped where the kernel refuses instead of dropping - but never silently on CI, where the case
+                // must run: a skip there would leave the connect timeout of every engine unchecked.
+                if (System.getenv("CI") == "true") {
+                    assertThat(backend.saturated).`as`("the CI runner must be able to hold a connect open").isTrue()
+                }
                 assumeTrue(backend.saturated, "the kernel answered every connect to the full backlog - no way to hold a connect open here")
                 val client =
                     newFactory(
@@ -1077,7 +1368,10 @@ class WebClientEngineIntegrationTest {
 
                 // Then
                 assertThat(failure).isInstanceOf(WebClientRequestException::class.java)
-                assertThat(elapsed).isLessThan(Duration.ofSeconds(2))
+                assertThat(causeNames(failure).any { it == "ConnectTimeoutException" || it == "HttpConnectTimeoutException" } || failure.cause?.message == "Connect Timeout")
+                    .`as`("a connect timeout, not another failure: %s", failure)
+                    .isTrue()
+                assertThat(elapsed).isGreaterThanOrEqualTo(Duration.ofMillis(50)).isLessThan(Duration.ofSeconds(2))
             }
         }
     }
@@ -1223,11 +1517,13 @@ class WebClientEngineIntegrationTest {
         observationEnabled: Boolean = false,
         mesh: MeshProperties = meshFor(backends, baseUrl),
         timeLimiters: TimeLimiterRegistry = TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(timeLimiter).build()),
+        pool: WebClientProperties.Pool = WebClientProperties.Pool(),
     ): ResilientWebClientFactory =
         ResilientWebClientFactory(
             WebClientProperties(
                 maxInMemorySize = maxInMemorySize,
                 engine = engine,
+                pool = pool,
                 observability = WebClientProperties.Observability(httpObservationEnabled = observationEnabled),
             ),
             mesh,
@@ -1288,6 +1584,126 @@ class WebClientEngineIntegrationTest {
 
         override fun append(eventObject: ILoggingEvent) {
             events += eventObject
+        }
+    }
+
+    /**
+     * A backend that answers every request with a 200 declaring a 1 MiB body, sends the head and the first 4 KiB at
+     * once and then one byte every 200 ms - a body that is still arriving long after any test is over, unless the
+     * client drops the connection, which [connectionDropped] reports. WireMock's dribble cannot stand in: it hands
+     * the body to its output buffer, and the head reaches the wire only once that buffer is full. The twin of the
+     * blocking module's backend of the same name.
+     */
+    private class DrippingBackend : AutoCloseable {
+        private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+        val baseUrl: String = "http://${server.inetAddress.hostAddress}:${server.localPort}"
+        val connectionDropped = CountDownLatch(1)
+
+        /** The connections accepted so far - closed with the backend, so an exchange the client kept ends with the test. */
+        private val accepted = CopyOnWriteArrayList<Socket>()
+
+        init {
+            thread(isDaemon = true, name = "dripping-backend-acceptor") {
+                try {
+                    while (true) {
+                        val socket = server.accept()
+                        accepted += socket
+                        thread(isDaemon = true, name = "dripping-backend-connection") { drip(socket) }
+                    }
+                } catch (_: IOException) {
+                    // The server socket was closed - the test is over.
+                }
+            }
+        }
+
+        private fun drip(socket: Socket) =
+            socket.use { connection ->
+                try {
+                    val request = connection.getInputStream().bufferedReader(Charsets.ISO_8859_1)
+                    while (request.readLine().orEmpty().isNotEmpty()) {
+                        // The request head, up to its empty line; the GET carries no body.
+                    }
+                    val out = connection.getOutputStream()
+                    out.write(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${1024 * 1024}\r\n\r\n"
+                            .toByteArray(Charsets.ISO_8859_1),
+                    )
+                    out.write(ByteArray(4096) { 'z'.code.toByte() })
+                    out.flush()
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+                    while (System.nanoTime() < deadline) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(200))
+                        out.write('z'.code)
+                        out.flush()
+                    }
+                } catch (_: IOException) {
+                    // The client went away - what the test waits for - or the backend was closed.
+                    connectionDropped.countDown()
+                }
+            }
+
+        override fun close() {
+            server.close()
+            accepted.forEach { it.close() }
+        }
+    }
+
+    /**
+     * A backend that answers every request with a small 200, keeping the connection alive, and counts the
+     * connections it accepted - what a pool's idle and lifetime bounds are seen by: a call after the bound runs on
+     * a connection of its own. WireMock cannot say this: it reports requests, not connections.
+     */
+    private class AnsweringBackend : AutoCloseable {
+        private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+        val baseUrl: String = "http://${server.inetAddress.hostAddress}:${server.localPort}"
+
+        /** The connections the backend accepted so far. */
+        val connections = AtomicInteger()
+
+        private val accepted = CopyOnWriteArrayList<Socket>()
+
+        init {
+            thread(isDaemon = true, name = "answering-backend-acceptor") {
+                try {
+                    while (true) {
+                        val socket = server.accept()
+                        connections.incrementAndGet()
+                        accepted += socket
+                        thread(isDaemon = true, name = "answering-backend-connection") { answer(socket) }
+                    }
+                } catch (_: IOException) {
+                    // The server socket was closed - the test is over.
+                }
+            }
+        }
+
+        private fun answer(socket: Socket) =
+            socket.use { connection ->
+                val body = """{"message":"hi"}""".toByteArray()
+                val head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\n\r\n"
+                try {
+                    val request = connection.getInputStream().bufferedReader(Charsets.ISO_8859_1)
+                    while (true) {
+                        // One request head per call, up to its empty line; the GETs carry no body.
+                        val first = request.readLine() ?: return@use
+                        if (first.isEmpty()) continue
+                        while (request.readLine().orEmpty().isNotEmpty()) {
+                            // The rest of the head.
+                        }
+                        connection.getOutputStream().apply {
+                            write(head.toByteArray(Charsets.ISO_8859_1))
+                            write(body)
+                            flush()
+                        }
+                    }
+                } catch (_: IOException) {
+                    // The client closed the connection.
+                }
+            }
+
+        override fun close() {
+            server.close()
+            accepted.forEach { it.close() }
         }
     }
 
