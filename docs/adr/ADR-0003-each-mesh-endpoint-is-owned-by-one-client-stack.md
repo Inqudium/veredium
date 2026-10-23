@@ -2,6 +2,7 @@
 
 **Status:** Proposed  
 **Date:** 2026-10-23  
+**Last updated:** 2026-10-23 (the stacks are wired by Boot auto-configuration; `stack` is required only when both client modules are dependencies)  
 **Deciders:** Dirk Haase (maintainer)  
 **Related:** ADR-0001 (the shared mesh wiring both stacks import, which
 this ADR makes stack-aware)
@@ -84,18 +85,26 @@ app:
         stack: webclient
 ```
 
+The ambiguity `stack` resolves exists only when a host depends on BOTH
+client modules. Each module registers its auto-configuration, so a
+stack is active exactly when its module is a dependency and the host has
+not excluded its auto-configuration. `stack` is therefore required only
+when both are active; a host with one client module - the common case -
+never sets it.
+
 The ownership rule, implemented once in the core and used by every part
 of the wiring:
 
-| `stack` of the endpoint | One stack in the context | Both stacks in the context |
+| `stack` of the endpoint | One client module (one auto-configuration active) | Both client modules (both auto-configurations active) |
 |---|---|---|
 | not set | owned by that stack | the start fails: `stack` is required |
-| set to a stack in the context | owned by it | owned by it |
-| set to a stack not in the context | the start fails | the start fails |
+| set to an active stack | owned by it | owned by it |
+| set to a stack that is not active | the start fails | the start fails |
 
-A host with one stack and no `stack` keys changes nothing. A `stack` that
-names the wrong stack fails the start instead of leaving the backend
-unserved.
+A host with one client module and no `stack` keys changes nothing. So does
+a host that depends on both modules but excludes one auto-configuration:
+for the ownership rule it has one stack. A `stack` that names the wrong
+stack fails the start instead of leaving the backend unserved.
 
 ```kotlin
 // veredium-core, eu.inqudium.veredium.core.mesh
@@ -193,7 +202,9 @@ can replace a stack's verdicts.
   it, which bean overriding could never guarantee.
 - A configuration that names a stack the context does not run fails the
   start instead of leaving a backend unserved until its first call.
-- Hosts with one stack are not affected: `stack` is optional for them.
+- Hosts with one client module are not affected: `stack` is required
+  only when both modules are dependencies with both auto-configurations
+  active.
 
 **Negative:**
 
