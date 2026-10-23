@@ -427,7 +427,8 @@ read fails, and when the response is closed early.
 
 **With veredium.** Blocking: each body read runs on a short-lived virtual thread while the worker waits for it
 interruptibly. On an interrupt the worker closes Spring's stream, which cancels the inbound, and fails the read
-with an `InterruptedIOException`.
+with an `InterruptedIOException`. The wait for the head is handed off the same way; on an interrupt the worker
+interrupts that thread, whose `block()` cancels the subscription as before (see §12 for why).
 
 ### Errors after a cancellation (reactive, every engine)
 
@@ -592,11 +593,16 @@ of an interrupt**.
 - With `disposeTimeout` it is: the pool refuses new acquires, serves the waiting ones, and completes once every
   connection came back, or fails at the timeout, which Reactor Netty logs at ERROR.
 - Disposing the event loops closes every channel on them.
+- Spring's wait for the head is a `block()` without a time bound, and the response timeout is a timer on the
+  event loops. Once the loops are disposed, an exchange whose end they did not signal any more holds its worker
+  until the TimeLimiter budget. Seen once on CI, after a shutdown past its deadline; not reproduced locally.
 - `block(Duration)` reports an expiry as an `IllegalStateException`.
 
 **With veredium.**
 - Blocking: waits for the acquired count to reach zero, then disposes pool and loops. An expiry is a WARN line,
-  not an exception; the hand-off executor is shut down whatever happens.
+  not an exception; the hand-off executor is shut down whatever happens. Its `shutdownNow` interrupts every
+  head wait and body read still running on it, so a call the loops no longer end fails at once with an
+  `IOException` instead of waiting for its budget (pinned by `ReactorNettyHandOffTest`).
 - Reactive: the pool is built with `disposeTimeout` = the drain bound, so its disposal waits for the calls in
   flight, those waiting for a connection included; the factory waits for it up to the shared deadline, with a WARN
   past it. The loops go after the pool, once no call can still need them.

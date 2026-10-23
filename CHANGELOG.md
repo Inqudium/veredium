@@ -60,6 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `veredium-restclient`: on the Reactor Netty engine, a call still waiting for its response head when a shutdown
+  past its deadline disposed the event loops could hang until its TimeLimiter budget. Spring's wait for the head
+  is a `block()` without a time bound, and the response timeout is a timer on those loops. Seen once on CI; not
+  reproduced locally. The wait now runs on the engine's hand-off executor, like each body read already did, and
+  the shutdown's `shutdownNow` of that executor ends it at once with an `IOException`. A unit test pins the
+  hand-off.
+
 Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-23T05-20-01.md`:
 
 - `veredium-webclient`: the Apache engine's release no longer fails a call that is still waiting for a
