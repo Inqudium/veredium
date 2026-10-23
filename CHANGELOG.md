@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Build:** a new build-only module, `veredium-examples`, shows a host using both clients: one Spring Boot
+  application per stack, an adapter over two backends and the configuration it needs. Its tests start each
+  application against a WireMock stand-in for the sidecar, so an example that stops working fails the build. Like
+  `veredium-coverage` and `veredium-test-support` it is never published; all three have a README that says why
+  each is a module of its own.
 - Selectable HTTP engine per client stack, with a per-backend override (`engine.endpoints.<mesh-alias>`):
   - `veredium-restclient`: `app.restclient.engine.default` takes `apache` (default), `jdk`, `jetty` or
     `reactor-netty`.

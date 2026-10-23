@@ -1,0 +1,82 @@
+# The configuration of both examples. Each example application scans one client module only, so the blocking one
+# binds app.restclient and the reactive one app.webclient; app.mesh and resilience4j are shared by both.
+
+spring:
+  application:
+    name: veredium-examples
+  main:
+    # The examples call backends; they serve nothing. Without this, spring-webflux on the classpath would start a
+    # reactive web server.
+    web-application-type: none
+
+# legatium: one structured exchange event per call on the adapter-http-exchange logger.
+adapter-logging:
+  enabled: true
+  logger-name: adapter-http-exchange
+  request-headers:
+    includes: ["*"]
+    masked: ["Authorization"]
+
+app:
+  restclient:
+    max-in-memory-size: 256KB
+    # The HTTP engine, for all backends or per backend (key = mesh alias). Apache is the default; jetty and
+    # reactor-netty also need their library on the classpath.
+    # engine:
+    #   default: apache
+    #   endpoints:
+    #     order-search: jetty
+  webclient:
+    max-in-memory-size: 256KB
+  mesh:
+    defaults:
+      transport:
+        # Every call goes to the local sidecar, which routes it by the Host header the triplet names.
+        sidecar-base-url: "http://localhost:8042"
+    endpoints:
+      # The triplet is the backend's identity: /endpoint/<host>/<METHOD>/<path template>. The ladder derives the
+      # response timeout and the TimeLimiter budget from the measured per-attempt time.
+      - triplet: "/endpoint/customers.example.com/GET/v1/customers/{id}"
+        alias: customers
+        individual-request-timeout-ms: 300
+      - triplet: "/endpoint/orders.example.com/POST/v1/orders/search"
+        alias: order-search
+        individual-request-timeout-ms: 500
+
+# One instance per alias and layer - the startup guard fails the start when one is missing. The base config is the
+# operator's policy; the mesh customizers lay the derived budget and the verdicts over it.
+resilience4j:
+  timelimiter:
+    configs:
+      mesh-backend:
+        timeout-duration: 3s
+        cancel-running-future: true
+    instances:
+      customers:
+        base-config: mesh-backend
+      order-search:
+        base-config: mesh-backend
+  bulkhead:
+    configs:
+      mesh-backend:
+        max-concurrent-calls: 25
+        max-wait-duration: 0
+    instances:
+      customers:
+        base-config: mesh-backend
+      order-search:
+        base-config: mesh-backend
+  circuitbreaker:
+    configs:
+      mesh-backend:
+        failure-rate-threshold: 50
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 100
+        minimum-number-of-calls: 100
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 10
+    instances:
+      customers:
+        base-config: mesh-backend
+      order-search:
+        base-config: mesh-backend
