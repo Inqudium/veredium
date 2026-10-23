@@ -222,11 +222,11 @@ class ResilientRestClientFactoryBuilderWiringTest {
             ).withBean(CircuitBreakerRegistry::class.java, Supplier { circuitBreakers })
             .withBean(TimeLimiterRegistry::class.java, Supplier { timeLimiters })
             .withBean(BulkheadRegistry::class.java, Supplier { bulkheads })
-            // Built here rather than through RestClientConfiguration, which would also import the core's mesh
+            // Built here rather than through VerediumRestClientAutoConfiguration, which would also import the core's mesh
             // wiring - whose guard needs Resilience4j's auto-configuration this hand-assembled context leaves out.
             .withBean(
                 BlockingResilienceDecorator::class.java,
-                Supplier { BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, workerNamePrefix = RestClientConfiguration.WORKER_NAME_PREFIX) },
+                Supplier { BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, workerNamePrefix = VerediumRestClientAutoConfiguration.WORKER_NAME_PREFIX) },
             ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
             // A recording registry: every observation lands as a meter in the SimpleMeterRegistry, which is what
             // the host's actuator ObservationAutoConfiguration does with its MeterRegistry.

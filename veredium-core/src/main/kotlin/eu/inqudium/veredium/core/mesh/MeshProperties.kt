@@ -41,9 +41,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  * - `time-limiter.enabled` / `circuit-breaker.enabled` (Boolean?, `null` -> inherit the `defaults` toggle;
  *   tri-state: an explicit `true`/`false` overrides the default). See [BackendToggle] for what `enabled` means -
  *   `false` does NOT disable the backend, it just leaves its config untouched.
- * - `margins` - a PARTIAL override, field-merged onto `defaults.margins` (only the fields you set change).
  *
- * **`margins`** (under `defaults` and, partially, per endpoint - shapes the derived ladder; see [Margins]):
+ * **`margins`** (under `defaults` only - shapes the derived ladder of every endpoint; see [Margins]):
  * - `global-margin-ms` (Long, `200`, `>= 0`) - buffer folded into `global = (1 + maxRetries)*individual + globalMargin`;
  *   the ONE margin the sidecar also reads.
  * - `response-timeout-margin-ms` (Long, `200`) - `responseTimeout = global + responseTimeoutMargin`: the
@@ -82,8 +81,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  *         max-retries: 2
  *         circuit-breaker:
  *           enabled: true                    # opt THIS endpoint's CircuitBreaker in (overrides the default off)
- *         margins:
- *           slow-call-cap-fraction: 0.7      # partial override; the rest stay at the shared defaults
  * ```
  */
 @ConfigurationProperties(prefix = MeshProperties.PREFIX)
@@ -109,7 +106,7 @@ data class MeshProperties(
      *
      * @property individualRequestTimeoutMs The fallback MEASURED anchor, used by an endpoint that sets none.
      * @property maxRetries The fallback retry count; mirrors the sidecar's `max-retries`.
-     * @property margins The shared margins, field-merged with each endpoint's [EndpointConfig.margins].
+     * @property margins The margins every endpoint's ladder is derived with.
      * @property transport The app->sidecar transport caps, shared by every endpoint.
      * @property timeLimiter The default TimeLimiter toggle (on); see [BackendToggle].
      * @property circuitBreaker The default CircuitBreaker toggle (off); see [BackendToggle].
@@ -135,7 +132,6 @@ data class MeshProperties(
      * @property maxRetries The endpoint's retry count; `null` takes [Defaults.maxRetries].
      * @property baseUrl The endpoint's client base URL; `null` takes [Transport.sidecarBaseUrl].
      * @property headers Extra static headers beyond the Host header derived from the [triplet].
-     * @property margins A PARTIAL override, field-merged onto [Defaults.margins]; `null` keeps them.
      * @property timeLimiter The tri-state TimeLimiter toggle; `null` inherits [Defaults.timeLimiter].
      * @property circuitBreaker The tri-state CircuitBreaker toggle; `null` inherits [Defaults.circuitBreaker].
      */
@@ -146,7 +142,6 @@ data class MeshProperties(
         val maxRetries: Int? = null,
         val baseUrl: String? = null,
         val headers: Map<String, String> = emptyMap(),
-        val margins: MarginsOverride? = null,
         val timeLimiter: BackendToggleOverride? = null,
         val circuitBreaker: BackendToggleOverride? = null,
     ) {
@@ -194,8 +189,8 @@ data class MeshProperties(
     }
 
     /**
-     * The margins that shape the derived ladder ([ResolvedTimeouts]), under `defaults` and, partially, per
-     * endpoint ([MarginsOverride]).
+     * The margins that shape the derived ladder ([ResolvedTimeouts]) of every endpoint, under `defaults` only. An
+     * endpoint is tuned through its measured anchor and its retries; the margins are the shared policy around them.
      *
      * @property globalMarginMs Buffer folded into `global = (1 + maxRetries) * individual + globalMargin`; the ONE
      *   margin the sidecar also reads. Must be `>= 0`.
@@ -214,21 +209,6 @@ data class MeshProperties(
         val slowCallBackoffMs: Long = DEFAULT_SLOW_CALL_BACKOFF_MS,
         val slowCallCapFraction: Double = DEFAULT_SLOW_CALL_CAP_FRACTION,
     ) {
-        /** Field-wise merge: each field from the override when present, otherwise this (the shared default). */
-        fun overriddenBy(endpoint: MarginsOverride?): Margins =
-            if (endpoint == null) {
-                this
-            } else {
-                copy(
-                    globalMarginMs = endpoint.globalMarginMs ?: globalMarginMs,
-                    responseTimeoutMarginMs = endpoint.responseTimeoutMarginMs ?: responseTimeoutMarginMs,
-                    p99MarginMs = endpoint.p99MarginMs ?: p99MarginMs,
-                    healthyRetries = endpoint.healthyRetries ?: healthyRetries,
-                    slowCallBackoffMs = endpoint.slowCallBackoffMs ?: slowCallBackoffMs,
-                    slowCallCapFraction = endpoint.slowCallCapFraction ?: slowCallCapFraction,
-                )
-            }
-
         /** The default margin values, exposed as named constants so callers and tests share one source of truth. */
         companion object {
             const val DEFAULT_GLOBAL_MARGIN_MS: Long = 200
@@ -239,20 +219,6 @@ data class MeshProperties(
             const val DEFAULT_SLOW_CALL_CAP_FRACTION: Double = 0.8
         }
     }
-
-    /**
-     * A per-endpoint override of [Margins], every field nullable so "not set" differs from "set to the
-     * default". resolveAll field-merges it onto defaults.margins, so a partial override touches only its
-     * own fields.
-     */
-    data class MarginsOverride(
-        val globalMarginMs: Long? = null,
-        val responseTimeoutMarginMs: Long? = null,
-        val p99MarginMs: Long? = null,
-        val healthyRetries: Int? = null,
-        val slowCallBackoffMs: Long? = null,
-        val slowCallCapFraction: Double? = null,
-    )
 
     /**
      * One per-endpoint feature switch, defaulted under `defaults` and overridable per endpoint. Each feature is
@@ -371,7 +337,7 @@ data class MeshProperties(
                     headers = e.headers,
                     individualRequestTimeoutMs = e.individualRequestTimeoutMs ?: defaults.individualRequestTimeoutMs,
                     maxRetries = e.maxRetries ?: defaults.maxRetries,
-                    margins = defaults.margins.overriddenBy(e.margins),
+                    margins = defaults.margins,
                     transport = defaults.transport,
                     // tri-state: a per-endpoint flag wins; null inherits the shared default.
                     timeLimiterEnabled = e.timeLimiter?.enabled ?: defaults.timeLimiter.enabled,

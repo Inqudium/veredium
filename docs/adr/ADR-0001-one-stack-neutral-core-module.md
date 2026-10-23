@@ -2,7 +2,7 @@
 
 **Status:** Accepted  
 **Date:** 2026-10-19  
-**Last updated:** 2026-10-19 (ADR-0002 moves the blocking decorator into the core as well; the same day, response validation and the HTTP observation report followed - see below)  
+**Last updated:** 2026-10-23 (the stacks are wired by Boot auto-configuration instead of a component scan of their package; 2026-10-19: ADR-0002 moves the blocking decorator into the core as well, and response validation and the HTTP observation report followed - see below)  
 **Deciders:** Dirk Haase (maintainer)  
 **Related:** ADR-0002 (the blocking resilience decorator, the one stack-specific piece this ADR left in the blocking client, moves to the core too)
 
@@ -93,11 +93,11 @@ Each stack holds one instance (`RestClientVerdicts`, `WebClientVerdicts`)
 and hands it to the shared wiring directly: the core's abstract
 `MeshResilienceRegistrar` takes the verdicts as a constructor argument, and
 each stack subclasses it (`RestClientMeshRegistrar`, `WebClientMeshRegistrar`).
-The stack's `@Configuration` (`RestClientConfiguration`,
-`WebClientConfiguration`) `@Import`s that subclass next to the core's
-`MeshResilienceConfiguration`. The core's wiring is therefore never scanned
-on its own: a host that scans its stack's package gets the shared wiring
-with it. The verdicts are not a bean, so nothing in a host's context can
+The stack's auto-configuration (`VerediumRestClientAutoConfiguration`,
+`VerediumWebClientAutoConfiguration`) `@Import`s that subclass next to the
+core's `MeshResilienceConfiguration`. The core's wiring is therefore never
+registered on its own: a host that depends on its stack's module gets the
+shared wiring with it. The verdicts are not a bean, so nothing in a host's context can
 replace them - neither a host's own `BreakerVerdicts` bean nor bean
 overriding, either of which would otherwise make the breakers record a
 benign 4xx while the guard probed with the same wrong verdicts. `BreakerVerdicts` verifies at construction that the stack's own

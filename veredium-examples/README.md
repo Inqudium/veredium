@@ -16,13 +16,13 @@ All of them are configured once in [`application.yml`](src/main/resources/applic
 |---|---|
 | [`application.yml`](src/main/resources/application.yml) | The whole configuration of a host: the mesh endpoints with their triplets and aliases, the Resilience4j instance every alias needs, legatium's exchange log, the engine knob. |
 | [`Customers.kt`](src/main/kotlin/eu/inqudium/veredium/examples/Customers.kt) | The payloads, and the aliases as constants: one string is the client, its Resilience4j instances and its metrics. |
-| [`BlockingExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingExampleApplication.kt) | The wiring of the blocking client: one package scan. |
+| [`BlockingExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingExampleApplication.kt) | The wiring of the blocking client: none beyond the dependency - the module's auto-configuration brings it. The one line it needs here excludes the reactive client's auto-configuration, which this module also has on its classpath. |
 | [`BlockingCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingCustomerAdapter.kt) | `ResilientRestClient` called blocking: a GET and a POST, a 404 turned into `null`, and the two budgets a `BaseAdapter` publishes. |
 | [`AsyncExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/async/AsyncExampleApplication.kt) | The same client, the same wiring - called without blocking. |
 | [`AsyncCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/async/AsyncCustomerAdapter.kt) | `getAsync`/`postAsync`: every outcome on a `CompletableFuture`, a 404 mapped to `null` on the future, two calls in flight with `thenCombine`, and a cancel handed on to the calls a derived future came from. |
 | [`ReactiveExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveExampleApplication.kt) | The same wiring for the reactive client. |
 | [`ReactiveCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveCustomerAdapter.kt) | `ResilientWebClient`: the same adapter on `Mono`s, a 404 turned into an empty `Mono`, `Mono.zip` for both calls, and a `suspend` function for coroutine code. |
-| [`DecoratorExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorExampleApplication.kt) | A host without a client module: it scans only its own package. |
+| [`DecoratorExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorExampleApplication.kt) | A host without a client module: it excludes both clients' auto-configurations, which this module has on its classpath and a real host of the decorator alone would not. |
 | [`DecoratorConfiguration`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorConfiguration.kt) | The wiring a host declares itself for `BlockingResilienceDecorator`: the bean over the auto-configured registries, the breaker customizer that ignores `SELF_INFLICTED_FAILURES` and the backend's own "unknown customer" answer, and a native Apache HttpClient 4 with its bounds, no retries and no redirects. |
 | [`DecoratorCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorCustomerAdapter.kt) | `decorate` and `decorateAsync` by instance name around a HttpClient 4 exchange that sets its own Host header, a 404 that the breaker ignores, and the two `BaseAdapter` budgets from the decorator and the client. |
 
@@ -49,13 +49,13 @@ Examples need a place where they compile against the published API, run against 
 the existing modules is that place:
 
 - **Not the library modules' tests.** Their tests use factories and contexts built by hand, which pin one behaviour
-  each. A host never builds those. It scans a package and writes YAML, and that is what an example has to show. The
+  each. A host never builds those. It adds a dependency and writes YAML, and that is what an example has to show. The
   client modules' tests also cannot see each other, and the point of these examples is the same adapter on both
   stacks, side by side.
 - **Not the guides.** A snippet in Markdown is never compiled. When the API changes, the snippet goes stale and
   nothing fails. Here the compiler and the tests catch it.
-- **Not a client module's main code.** Example applications and adapters in a library jar would ship to every host,
-  including a component scan of an `examples` package.
+- **Not a client module's main code.** Example applications and adapters in a library jar would ship to every host
+  that depends on it.
 
 A module that depends on both clients the way a host does has none of these problems. Its one dependency of its
 own, Apache HttpClient 4 for the decorator example, stays in this module too. It is kept out of every
@@ -70,9 +70,11 @@ published artifact the same way as [`veredium-coverage`](../veredium-coverage/RE
 
 ## Consequences
 
-- **Both stacks are on one classpath.** A real host usually picks one. Each client example therefore scans
-  exactly one client package, and the decorator example none. `spring.main.web-application-type: none` keeps `spring-webflux`, which the reactive
-  client brings, from starting a web server in any of them.
+- **Both stacks are on one classpath.** A real host usually picks one, and the two cannot share a context yet
+  ([ADR-0003](../docs/adr/ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md)). Each client example therefore
+  excludes the other stack's auto-configuration, and the decorator example both.
+  `spring.main.web-application-type: none` keeps `spring-webflux`, which the reactive client brings, from starting
+  a web server in any of them.
 - **Four Boot contexts share one test JVM.** The tests keep every context off Micrometer's global registry
   (`management.metrics.use-global-registry=false`, set once in `ExampleContext`). A single host does not need that
   setting.

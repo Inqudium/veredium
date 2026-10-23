@@ -255,7 +255,7 @@ as well - a host that sets Boot's switch moves its own WebClients and not these.
 pins both directions in a context with Boot's HTTP-client auto-configuration, reading the engine of the host's
 calls off the wire (the `User-Agent` each engine sends on its own).
 
-The engine resources belong to the factory: created when the first client of an engine is built (an engine no
+The engine resources belong to the factory: created with it for every engine some backend selects (an engine no
 backend selected is never created - not even Reactor Netty's pool), shared by that engine's backends, and
 released in `shutdown()`. That includes Reactor Netty: its pool, its event loops (threads named after the pool,
 `webclient-reactor-netty-...`) and its resolver (Netty's `InetAddress`-based `DefaultAddressResolverGroup`, set explicitly
@@ -426,7 +426,6 @@ Example: `/endpoint/api.example.com/GET/v5/access-profiles/by-involved-party/{id
 | `max-retries` | `Int?` | `null` → `defaults` | Mirrors the sidecar's max-retries; folds into `global`. |
 | `base-url` | `String?` | `null` → `transport.sidecar-base-url` | Per-endpoint WebClient base URL (the sidecar). |
 | `headers` | `Map<String,String>` | `{}` | Extra static headers (the Host header is derived, not set here). |
-| `margins` | `MarginsOverride?` | `null` | **Partial** override, field-merged onto `defaults.margins` (§2.4). |
 | `time-limiter` | `{enabled: Boolean?}` | `null` → inherit | Whether mesh derives this endpoint's TimeLimiter (§2.6). |
 | `circuit-breaker` | `{enabled: Boolean?}` | `null` → inherit | Whether mesh derives this endpoint's CircuitBreaker (§2.6). |
 
@@ -448,7 +447,8 @@ The whole `defaults` block may be omitted; each field then takes its Kotlin defa
 
 #### 2.4.1 `margins.*` (`Margins`)
 
-Under `defaults`, and — partially, field-merged — per endpoint. Every field optional.
+Under `defaults` only — one policy for every endpoint, which is tuned through its own anchor and retries. Every
+field optional.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -460,9 +460,6 @@ Under `defaults`, and — partially, field-merged — per endpoint. Every field 
 | `slow-call-cap-fraction` | `Double` | `0.8` | Hard cap: `slowCall` never exceeds `global · this`. |
 
 > The TimeLimiter margin is **not** a configurable field here — it is a computed property of `transport` (§2.5).
-
-A per-endpoint `margins:` is a **partial** override: only the fields you set change; the rest stay at
-`defaults.margins`.
 
 ### 2.5 `defaults.transport.*` (`Transport`)
 
@@ -604,7 +601,7 @@ resilience4j:
 
 ### 3.2 How mesh customizes the registries
 
-The mesh wiring lives in `veredium-core` and is shared with the blocking client; `WebClientConfiguration`
+The mesh wiring lives in `veredium-core` and is shared with the blocking client; `VerediumWebClientAutoConfiguration`
 imports it and contributes the one thing the core cannot know - this stack's exception vocabulary
 (`WebClientVerdicts`). For each endpoint, a `CircuitBreakerConfigCustomizer` and (when `time-limiter.enabled`)
 a `TimeLimiterConfigCustomizer` named after the alias are consulted by Resilience4j's Boot configuration as the
@@ -711,7 +708,7 @@ logging:
 - **`ResilientWebClient`'s own transport lines** (the error, cancellation and closing lines, and the report-only
   validation line) need no accessor: each subscription snapshots the caller's MDC on the subscribing thread and
   writes those lines under it on the event loop, restoring the loop's own MDC afterwards
-  (`ClientCallLog.withMdc`). They carry the caller's correlation keys whatever the host configured — with or
+  (`CallerMdc.with`). They carry the caller's correlation keys whatever the host configured — with or
   without the propagation hook of §1.3. Pinned in `ResilientWebClientIntegrationTest` for a plain subscriber and
   for a coroutine `MDCContext`.
 - Every other key and its default: the library's `docs/adapter-logging-reference.yml`.

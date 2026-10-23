@@ -50,7 +50,9 @@ import java.util.concurrent.TimeoutException
  *   backend and the type that was expected, the same exception the reactive twin raises;
  * - a 2xx past the buffer limit is a [ResponseBodyLimitExceededException];
  * - a body that does not parse is Jackson's exception, a schema violation a [ConstraintViolationException]
- *   (when validation enforces it for this backend);
+ *   (when validation enforces it for this backend). A body that parses but lacks a property the DTO declares
+ *   required and non-nullable, or carries it as an explicit `null`, fails too, never yields a partially populated
+ *   object: Jackson's `DatabindException` names the property - nothing downstream guards a Kotlin non-null type;
  * - the resilience verdicts arrive as themselves: `TimeoutException`, `CallNotPermittedException`,
  *   `BulkheadFullException`; a transport fault as Spring's `ResourceAccessException`.
  *

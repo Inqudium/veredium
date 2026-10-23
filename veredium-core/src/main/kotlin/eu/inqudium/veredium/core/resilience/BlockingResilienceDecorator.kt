@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.core.resilience
 
+import eu.inqudium.veredium.core.CallerMdc
 import io.github.resilience4j.bulkhead.Bulkhead
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.bulkhead.BulkheadRegistry
@@ -31,8 +32,8 @@ import java.util.concurrent.atomic.AtomicReference
  * call, the three instances) and a `() -> T`, and the call runs guarded. `veredium-restclient` is its one
  * consumer in this repository; a host that has a blocking call of its own to bound - a JDBC lookup, a legacy
  * SDK, a file system - decorates it the same way. There is no Spring annotation on the class: a host that wants
- * it as a bean declares one (the blocking client does, in `RestClientConfiguration`), which is also where
- * the worker-thread name of that host is chosen.
+ * it as a bean declares one (the blocking client does, in its auto-configuration
+ * `VerediumRestClientAutoConfiguration`), which is also where the worker-thread name of that host is chosen.
  *
  * ## Why THIS order - it is Resilience4j's own
  *
@@ -292,23 +293,22 @@ class BlockingResilienceDecorator(
      * time, which is the moment `decorate` runs - the same moment a reactive `contextCapture()` would read the
      * subscriber's thread-locals.
      *
-     * Restoration is unconditional and in `finally`: the virtual workers of this class are never reused, but the
-     * wrapper must not depend on that - a thread that runs it twice must not carry one caller's keys or scope
-     * into the next call. `internal` so `BlockingResilienceDecoratorTest` can prove exactly that on a REUSED
+     * Restoration is unconditional and in `finally` ([CallerMdc.with] for the MDC): the virtual workers of this class
+     * are never reused, but the wrapper must not depend on that - a thread that runs it twice must not carry one
+     * caller's keys or scope into the next call. `internal` so `BlockingResilienceDecoratorTest` can prove exactly that on a REUSED
      * thread of its own, which the decorator's fresh-thread executor never offers.
      */
     internal fun <T : Any> propagate(call: () -> T): Callable<T> {
         val callerMdc: Map<String, String>? = MDC.getCopyOfContextMap()
         val callerObservation = observationRegistry?.currentObservation
         return Callable {
-            val workerMdc: Map<String, String>? = MDC.getCopyOfContextMap()
-            if (callerMdc != null) MDC.setContextMap(callerMdc) else MDC.clear()
-            val scope = callerObservation?.openScope()
-            try {
-                call()
-            } finally {
-                scope?.close()
-                if (workerMdc != null) MDC.setContextMap(workerMdc) else MDC.clear()
+            CallerMdc.with(callerMdc) {
+                val scope = callerObservation?.openScope()
+                try {
+                    call()
+                } finally {
+                    scope?.close()
+                }
             }
         }
     }

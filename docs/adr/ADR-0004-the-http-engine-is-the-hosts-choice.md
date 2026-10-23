@@ -66,14 +66,23 @@ decision:
 
 We accept the cost the review measured as the price of the feature. We
 reduce that cost by sharing more code, never by cutting engines. What
-is the same for both stacks moves to `veredium-core` (`core/engine`)
-under ADR-0001's rule. Each stack keeps only its engine-specific
-factories. These parts move:
+is the same for both stacks lives in `veredium-core` (`core/engine`)
+under ADR-0001's rule:
 
-- the lifecycle of the engine transports (creation, closed state,
-  draining shutdown);
-- the start rules, including the JDK `Host`-header check;
-- the startup lines.
+- the start rules both stacks apply (`EngineSelection`: unknown
+  override keys, missing engine libraries);
+- the lifecycle of the engine transports (`EngineSet`: created with the
+  factory, refused after its shutdown, released against one deadline);
+- the draining shutdown and its line (`EngineDrain`).
+
+What differs between the stacks because Spring's adapters differ stays
+with the stack. The JDK `Host`-header rule is one such case: the
+blocking adapter drops a restricted `Host` header silently, so the
+blocking stack refuses `jdk` only for a backend whose `Host` differs from
+its base URL's authority; the reactive adapter hands the header to the
+JDK, which refuses it, so the reactive stack refuses `jdk` unless the
+JVM lifts the restriction ([HTTP engine behaviour](../engine-behaviour.md),
+"Request headers").
 
 ## Consequences
 
@@ -92,10 +101,11 @@ factories. These parts move:
   running the engine-matrix tests.
 - Each cross-cutting concern (draining, cancellation, meters) has to be
   solved per engine and per stack.
-- The two stacks have already drifted apart. Their engine layers have
-  different shapes, and they check the JDK `Host` header differently
-  (the review's finding 3). Until that layer moves to the core, the
-  same configuration can start on one stack and fail on the other.
+- The same `jdk` selection can start on the blocking stack and fail on
+  the reactive one, because the two Spring adapters treat a restricted
+  `Host` header differently (see above). That is the adapters'
+  behaviour, stated in each stack's start failure, not a drift between
+  the stacks.
 
 **Neutral:**
 

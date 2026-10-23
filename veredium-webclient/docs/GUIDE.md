@@ -41,6 +41,13 @@ body (204, empty 200) fails with `EmptyResponseBodyException` rather than comple
 </dependency>
 ```
 
+The dependency is all the wiring there is: the module registers a Spring Boot auto-configuration,
+`VerediumWebClientAutoConfiguration`, which brings the client factory, the mesh wiring of `veredium-core` and the startup
+lines. Its beans back off for a host's own bean of the same type. A host that has `veredium-restclient` on its classpath
+too excludes one of the two auto-configurations (for example
+`@SpringBootApplication(exclude = [VerediumRestClientAutoConfiguration::class])`): the two stacks cannot share a context yet
+([ADR-0003](../../docs/adr/ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md)).
+
 The non-default engines need their library on the host's classpath - the module declares them `optional`,
 versions from the Spring Boot BOM. Only the one selected is required:
 

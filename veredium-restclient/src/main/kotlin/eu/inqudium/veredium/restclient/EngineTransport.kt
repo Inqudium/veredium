@@ -1,6 +1,6 @@
 package eu.inqudium.veredium.restclient
 
-import eu.inqudium.veredium.core.engine.EngineDrain
+import eu.inqudium.veredium.core.engine.EngineResources
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.micrometer.core.instrument.MeterRegistry
@@ -36,7 +36,9 @@ import java.time.Duration
  */
 internal abstract class EngineTransport(
     val engine: RestClientEngine,
-) {
+) : EngineResources {
+    override val key: String get() = engine.key
+
     /**
      * The request factory of one backend: the engine's shared client with [endpoint]'s response timeout. Called
      * once per backend, when the factory builds its client.
@@ -61,27 +63,12 @@ internal abstract class EngineTransport(
     /** What an interrupted worker does to the exchange on this engine (class KDoc). */
     abstract val cancellation: String
 
-    /** Whether the engine's resources are released - read off the engine itself, not a flag of this class. */
-    abstract val isClosed: Boolean
-
     /**
      * The exchanges in flight on the engine right now - the connections it has handed out, queued requests included
      * where the engine counts them - or `null` when the engine does not expose the number: the JDK client. What a
      * draining shutdown waits on, and what a test reads to see an abandoned exchange give its connection back.
      */
     abstract fun exchangesInFlight(): Int?
-
-    /**
-     * Releases the engine's resources, waiting for in-flight exchanges to finish until [deadlineNanos] (on
-     * [nanoTime]'s clock) at the latest. An expiry is an outcome reported on [logger], never an exception: this
-     * runs from a destroy callback. [window] is the wait the deadline was derived from, for that line.
-     */
-    abstract fun shutdown(
-        deadlineNanos: Long,
-        nanoTime: () -> Long,
-        window: Duration,
-        logger: Logger,
-    )
 
     /**
      * The startup line's text for this engine: settings applied, settings not applied, meters, cancellation.
@@ -94,82 +81,17 @@ internal abstract class EngineTransport(
 
     /**
      * What every engine is built from: the mesh transport caps shared by all endpoints, the pool lifecycle of
-     * `app.restclient.pool`, and the host's registry for pool meters (`null` = no meters).
+     * `app.restclient.pool`, the host's registry for pool meters (`null` = no meters), and for the shutdown the
+     * factory's drain [window] (the wait its shutdown deadline is derived from, named in the line of an engine that
+     * did not drain) and the [logger] that line goes to.
      */
     class Settings(
         val transport: MeshProperties.Transport,
         val pool: RestClientProperties.Pool,
         val meterRegistry: MeterRegistry?,
+        val window: Duration,
+        val logger: Logger,
     )
-
-    companion object {
-        /**
-         * Waits until [inFlight] reports zero, [deadlineNanos] passes or the calling thread is interrupted, then
-         * reports an engine that did not drain - the shared shape of the pooled engines' shutdown
-         * ([EngineDrain.await], [EngineDrain.reportUndrained]). [window] is the wait the deadline was derived from,
-         * for the line. The interrupt flag is left for the caller, as an interrupt always is.
-         */
-        fun drainOrReport(
-            engine: RestClientEngine,
-            inFlight: () -> Int,
-            deadlineNanos: Long,
-            nanoTime: () -> Long,
-            window: Duration,
-            logger: Logger,
-        ) {
-            val left = EngineDrain.await(inFlight, deadlineNanos, nanoTime)
-            if (left > 0) EngineDrain.reportUndrained(logger, engine.key, "within $window", left)
-        }
-
-        /** The time left until [deadlineNanos], never negative. */
-        fun remaining(
-            deadlineNanos: Long,
-            nanoTime: () -> Long,
-        ): Duration = EngineDrain.remaining(deadlineNanos, nanoTime)
-
-        /**
-         * Shuts down every one of [transports] against the one deadline, each on its own: a shutdown that throws is
-         * reported on [logger] and does not keep the engines after it open. This runs from a destroy callback,
-         * where an exception would only end the shutdown early and leave a stack trace in place of the line.
-         */
-        fun shutdownAll(
-            transports: Collection<EngineTransport>,
-            deadlineNanos: Long,
-            nanoTime: () -> Long,
-            window: Duration,
-            logger: Logger,
-        ) {
-            transports.forEach { transport ->
-                try {
-                    transport.shutdown(deadlineNanos, nanoTime, window, logger)
-                } catch (e: Exception) {
-                    logger.warn("HTTP engine '{}' failed to release its resources", transport.engine, e)
-                }
-            }
-        }
-
-        /**
-         * One transport per engine in [engines], created in order by [create]. When a creation fails, the transports
-         * created before it are shut down at once - nothing can be in flight on them yet - and the failure is
-         * rethrown: it fails the factory's construction, so no destroy callback would ever release them, and a
-         * started Jetty client's non-daemon threads would keep the JVM of a failed start alive.
-         */
-        fun createAll(
-            engines: Collection<RestClientEngine>,
-            logger: Logger,
-            create: (RestClientEngine) -> EngineTransport,
-        ): Map<RestClientEngine, EngineTransport> {
-            val created = LinkedHashMap<RestClientEngine, EngineTransport>()
-            try {
-                engines.forEach { engine -> created[engine] = create(engine) }
-            } catch (e: Throwable) {
-                val now = System.nanoTime()
-                shutdownAll(created.values, now, { now }, Duration.ZERO, logger)
-                throw e
-            }
-            return created
-        }
-    }
 }
 
 /**

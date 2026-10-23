@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.legatium.webclient.logging.ClientRequestLoggingFilter
+import eu.inqudium.veredium.core.CallerMdc
 import eu.inqudium.veredium.core.client.ClientCallLog
 import eu.inqudium.veredium.core.client.EmptyResponseBodyException
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
@@ -47,6 +48,11 @@ import java.util.function.Consumer
  * Resilience4j decoration, like a deserialisation failure: the backend answered promptly with a success status,
  * so the breaker records a success, and the error line reports the anomaly at WARN.
  *
+ * A body that parses but lacks a property the DTO declares required and non-nullable, or carries it as an explicit
+ * `null`, fails as well and never yields a partially populated object: Jackson's `DatabindException` names the
+ * property, because nothing downstream guards a Kotlin non-null type. It too is a client-side failure, outside the
+ * decoration.
+ *
  * ## The caller's MDC on the transport lines
  *
  * The error, cancellation and closing lines are written in signal hooks that run on the engine's I/O thread - a
@@ -54,7 +60,7 @@ import java.util.function.Consumer
  * carries none of the caller's MDC. Rather than depend on the host having enabled Reactor's automatic context
  * propagation AND registered an MDC accessor, each subscription snapshots the MDC on the SUBSCRIBING thread -
  * where a coroutine's `MDCContext` or a servlet filter put the correlation keys - and writes those lines under
- * it ([ClientCallLog.withMdc]), leaving the event loop's own MDC as it found it.
+ * it ([CallerMdc.with]), leaving the event loop's own MDC as it found it.
  */
 class ResilientWebClient(
     private val webClient: WebClient,
@@ -252,7 +258,7 @@ class ResilientWebClient(
                     .switchIfEmpty(Mono.error { EmptyResponseBodyException(backendName, responseType) })
                     .map { rawBody ->
                         // The report-only validation line is written here, on the event loop, too.
-                        ClientCallLog.withMdc(callerMdc) {
+                        CallerMdc.with(callerMdc) {
                             calls.recordBodySize(rawBody)
                             calls.validate(objectMapper.readValue(rawBody, responseType))
                         }
@@ -266,11 +272,11 @@ class ResilientWebClient(
                     .doOnCancel {
                         // A cancelled scope (caller timeout, client disconnect) tears the stream down without
                         // doOnError, so this is the only hook that can report it.
-                        ClientCallLog.withMdc(callerMdc) { calls.onCancel(responseType, elapsedMillis) }
+                        CallerMdc.with(callerMdc) { calls.onCancel(responseType, elapsedMillis) }
                     }.doOnError { error ->
-                        ClientCallLog.withMdc(callerMdc) { calls.onError(responseType, error, elapsedMillis) }
+                        CallerMdc.with(callerMdc) { calls.onError(responseType, error, elapsedMillis) }
                     }.doFinally { signalType ->
-                        ClientCallLog.withMdc(callerMdc) {
+                        CallerMdc.with(callerMdc) {
                             calls.log(Level.DEBUG, "On signalType={} for backend '{}'", signalType, backendName)
                         }
                     }
@@ -295,7 +301,7 @@ class ResilientWebClient(
                             Consumer<Throwable> { dropped ->
                                 when {
                                     exchangeCancelled.get() -> {
-                                        ClientCallLog.withMdc(callerMdc) {
+                                        CallerMdc.with(callerMdc) {
                                             calls.log(
                                                 Level.DEBUG,
                                                 "Exchange of backend '{}' ended after cancellation: {}",

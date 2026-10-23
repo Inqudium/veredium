@@ -32,9 +32,10 @@ slowCall        = min( healthy_ceiling, global * slowCallCapFraction )
 
 `maxRetries`, the `margins` block (which carries `globalMarginMs` — the one margin the sidecar also reads) and
 the `transport` block all default in Kotlin (`MeshProperties.Margins()` / `Transport()`), so they need not
-appear in the config — set a field only to tune it (partial overrides are field-merged, per endpoint too). The
-TimeLimiter margin is **not** a configurable field: it is a computed property of `Transport` (worst-case
-pre-response phases + a fixed headroom), so it can never be set below the ladder invariant.
+appear in the config — set a field only to tune it. The margins are one policy under `defaults` for every
+endpoint; an endpoint is tuned through its anchor and its `max-retries`. The TimeLimiter margin is **not** a
+configurable field: it is a computed property of `Transport` (worst-case pre-response phases + a fixed headroom),
+so it can never be set below the ladder invariant.
 
 The `responseTimeout` rung is named for what it is on both stacks — the transport's bound on waiting for the
 response — rather than for a client class: Apache applies it as `RequestConfig.responseTimeout`, Reactor Netty
@@ -70,9 +71,9 @@ logical budget.
 
 ## How the R4j registration works
 
-The mesh wiring comes in two halves, and neither is scanned on its own: each stack's configuration
-(`RestClientConfiguration` / `WebClientConfiguration`) `@Import`s both, so a host that scans its stack's package
-gets the mesh wiring with it.
+The mesh wiring comes in two halves, and neither is registered on its own: each stack's auto-configuration
+(`VerediumRestClientAutoConfiguration` / `VerediumWebClientAutoConfiguration`) `@Import`s both, so a host that
+depends on its stack's module gets the mesh wiring with it.
 
 - `MeshResilienceConfiguration`, the `@Configuration` of this package, is stack-neutral: the `app.mesh` binding
   (`MeshProperties`) and `MeshLadderLogger`, the startup line below.

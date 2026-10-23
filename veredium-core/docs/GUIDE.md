@@ -88,9 +88,9 @@ the context when an alias is not declared under all three `resilience4j.<layer>.
 instance would silently run on the registry default) or when the customizer's effect is not
 observable on the instance the registry serves, and logs a WARN when the mesh bulkheads together
 admit more calls (`sum(max-concurrent-calls)`) than the shared pool has connections
-(`app.mesh.defaults.transport.max-connections`). Each stack's configuration `@Import`s
+(`app.mesh.defaults.transport.max-connections`). Each stack's auto-configuration `@Import`s
 `MeshResilienceConfiguration` (the `app.mesh` binding, the ladder logger) next to its registrar, so a host that
-scans its stack's package gets all of it.
+depends on its stack's module gets all of it.
 
 **The blocking decorator.** `BlockingResilienceDecorator` runs a `() -> T` as
 `CircuitBreaker( TimeLimiter( Bulkhead( call ) ) )` - Resilience4j's own aspect order - on a fresh
@@ -101,8 +101,8 @@ MDC and current observation are carried onto the worker for the duration of the 
 caller that is interrupted itself cancels its worker. `decorateAsync` runs the same pipeline
 with the wait on a second virtual thread and returns a `CompletableFuture` whose `cancel`
 interrupts the worker; its failures arrive on the future, unwrapped. The class carries no Spring annotation;
-`veredium-restclient` declares its bean (`RestClientConfiguration`, worker name
-`restclient-call-`), and a host with a blocking call of its own declares another or constructs
+`veredium-restclient` declares its bean (`VerediumRestClientAutoConfiguration`, worker name
+`restclient-call-`, backing off for a host's own bean), and a host with a blocking call of its own declares another or constructs
 one directly ([ADR-0002](../../docs/adr/ADR-0002-blocking-resilience-decorator-as-a-core-component.md)).
 
 **Validation and the observation report.** `ResponseValidationProperties` is the

@@ -278,11 +278,11 @@ class RestClientEngineIsolationTest {
             ).withBean(CircuitBreakerRegistry::class.java, Supplier { circuitBreakers })
             .withBean(TimeLimiterRegistry::class.java, Supplier { timeLimiters })
             .withBean(BulkheadRegistry::class.java, Supplier { bulkheads })
-            // Built here rather than through RestClientConfiguration, as in ResilientRestClientFactoryBuilderWiringTest:
+            // Built here rather than through VerediumRestClientAutoConfiguration, as in ResilientRestClientFactoryBuilderWiringTest:
             // the core's mesh wiring it imports needs Resilience4j's auto-configuration, which is not the subject.
             .withBean(
                 BlockingResilienceDecorator::class.java,
-                Supplier { BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, workerNamePrefix = RestClientConfiguration.WORKER_NAME_PREFIX) },
+                Supplier { BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, workerNamePrefix = VerediumRestClientAutoConfiguration.WORKER_NAME_PREFIX) },
             ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
             .withBean(ResilientRestClientFactory::class.java)
     }

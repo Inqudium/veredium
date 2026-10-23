@@ -6,7 +6,6 @@ import io.github.resilience4j.reactor.bulkhead.operator.BulkheadOperator
 import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator
 import io.github.resilience4j.reactor.timelimiter.TimeLimiterOperator
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
-import org.springframework.stereotype.Component
 import reactor.core.publisher.Mono
 import java.time.Duration
 
@@ -94,7 +93,6 @@ import java.time.Duration
  * budget, it parks a thread no timeout of the ladder bounds - which is why the reference configuration keeps
  * `max-wait-duration: 0`.
  */
-@Component
 class ReactiveResilienceDecorator(
     private val circuitBreakerRegistry: CircuitBreakerRegistry,
     private val timeLimiterRegistry: TimeLimiterRegistry,

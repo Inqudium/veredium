@@ -5,10 +5,14 @@ import java.time.Duration
 /**
  * The two effective per-call timeouts an adapter exposes to its callers, so upstream orchestration can
  * compose an end-to-end budget from the individual backend budgets (e.g. a resolver summing the timeouts
- * along its call chain) without reaching into the adapter's clients. One contract for both stacks: an adapter
- * over `veredium-restclient`'s `ResilientRestClient` and one over `veredium-webclient`'s `ResilientWebClient`
- * publish the same two numbers, derived from the same mesh ladder, so a host that runs both - or switches -
- * composes its budgets from one type.
+ * along its call chain) without reaching into the adapter's clients.
+ *
+ * A contract for the HOST's adapters, not for this library: veredium implements it nowhere and reads it nowhere.
+ * Each client already carries the two values (`responseTimeout`, `timeLimiterTimeout`); an adapter implements
+ * this interface to publish them under one type its callers can depend on, whichever stack it runs on: an
+ * adapter over `veredium-restclient`'s `ResilientRestClient` and one over `veredium-webclient`'s
+ * `ResilientWebClient` publish the same two numbers, derived from the same mesh ladder, so a host that runs
+ * both - or switches - composes its budgets from one type.
  *
  * If an adapter fronts more than one mesh endpoint (one client per operation), then an implementation can
  * aggregate the per-client values - typically the `maxOf` across its clients, the pessimistic ceiling for a
@@ -27,20 +31,6 @@ interface BaseAdapter {
     /**
      * The Resilience4j TimeLimiter budget for the call - the outer, hard deadline enforced by the TimeLimiter,
      * after which the caller is released.
-     *
-     * ## What an adapter call can fail with, beyond the documented non-2xx
-     *
-     * A 200 whose body does not fit the declared DTO fails the call rather than yielding a partially populated
-     * object. A property declared required and non-nullable that is missing is rejected by Jackson; one that is
-     * explicitly `null` is rejected by the null check the Kotlin compiler puts in the constructor. Both surface
-     * as a `tools.jackson.databind.DatabindException` naming the property. This matters to a caller because
-     * Kotlin's types promise the field cannot be null - nothing downstream guards against it, so a silent null
-     * would only fail much later.
-     *
-     * Such a failure is CLIENT-side: the backend answered, and with a 200. Like a parse error it is therefore
-     * kept out of the Resilience4j decoration on both stacks and does not count towards the circuit breaker.
-     * It is logged with full severity; the exchange line legatium writes for the call shows the 200 the backend
-     * answered with, because the exchange itself succeeded.
      */
     val timeLimiterTimeout: Duration
 

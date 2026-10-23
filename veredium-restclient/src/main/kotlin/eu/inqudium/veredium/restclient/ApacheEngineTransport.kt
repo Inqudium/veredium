@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.restclient
 
+import eu.inqudium.veredium.core.engine.EngineDrain
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.micrometer.core.instrument.Meter
 import io.micrometer.core.instrument.MeterRegistry
@@ -16,13 +17,11 @@ import org.apache.hc.core5.http.ClassicHttpRequest
 import org.apache.hc.core5.io.CloseMode
 import org.apache.hc.core5.util.TimeValue
 import org.apache.hc.core5.util.Timeout
-import org.slf4j.Logger
 import org.springframework.http.HttpMethod
 import org.springframework.http.client.ClientHttpRequest
 import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory
 import java.net.URI
-import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -70,6 +69,8 @@ internal class ApacheEngineTransport(
 ) : EngineTransport(RestClientEngine.APACHE) {
     private val meshTransport = settings.transport
     private val pool = settings.pool
+    private val window = settings.window
+    private val logger = settings.logger
 
     /** Name of the single shared Apache pool: the [RestClientMetrics.POOL_TAG] value on its gauges, its evictor's thread name. */
     override val name: String = RestClientMetrics.POOL_NAME
@@ -227,12 +228,10 @@ internal class ApacheEngineTransport(
     override fun shutdown(
         deadlineNanos: Long,
         nanoTime: () -> Long,
-        window: Duration,
-        logger: Logger,
     ) {
         evictor?.shutdownNow()
         httpClients.forEach { it.close(CloseMode.GRACEFUL) }
-        drainOrReport(engine, ::exchangesInFlight, deadlineNanos, nanoTime, window, logger)
+        EngineDrain.drainOrReport(logger, engine.key, ::exchangesInFlight, deadlineNanos, nanoTime, window)
         connectionManager.close(CloseMode.GRACEFUL)
         boundPoolMeters.forEach { meterRegistry?.remove(it) }
     }

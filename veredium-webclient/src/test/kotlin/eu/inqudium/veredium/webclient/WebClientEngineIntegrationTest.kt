@@ -641,13 +641,14 @@ class WebClientEngineIntegrationTest {
     inner class `Engine resources` {
         @Test
         fun `should create only the engines in use`() {
-            // What is tested: lazy creation of the engine resources.
-            // Success criteria: before any client exists, no engine has resources; after two jdk backends and one
-            //   apache backend built their clients, exactly jdk and apache have resources, and Reactor Netty's
-            //   pool, the default engine's, was never created.
-            // Why it matters: an engine nobody uses must cost nothing - no pool, no I/O reactor, no threads.
+            // What is tested: which engines the factory creates resources for.
+            // Success criteria: with two jdk backends and one apache backend, exactly jdk and apache have resources
+            //   once the factory exists - before any client is built - and Reactor Netty's pool, the default engine's,
+            //   was never created.
+            // Why it matters: an engine nobody uses must cost nothing - no pool, no I/O reactor, no threads; an engine
+            //   in use comes up with the factory, so a failing one fails the start, not the first call.
             //
-            // Given
+            // Given / When
             val factory =
                 newFactory(
                     WebClientProperties.Engine(
@@ -656,13 +657,9 @@ class WebClientEngineIntegrationTest {
                     ),
                     listOf("first", "second", "third"),
                 )
-            assertThat(factory.startedEngines()).isEmpty()
-
-            // When
-            listOf("first", "second", "third").forEach(factory::create)
 
             // Then
-            assertThat(factory.startedEngines().keys).containsExactlyInAnyOrder(WebClientEngine.JDK, WebClientEngine.APACHE)
+            assertThat(factory.engineTransports.keys).containsExactlyInAnyOrder(WebClientEngine.JDK, WebClientEngine.APACHE)
         }
 
         @ParameterizedTest(name = "{0}")
@@ -696,12 +693,12 @@ class WebClientEngineIntegrationTest {
         }
 
         @Test
-        fun `should refuse to build a client after shutdown, instead of creating an engine nothing releases`() {
+        fun `should refuse to build a client after shutdown, instead of running it on a released engine`() {
             // What is tested: create() for a backend whose client was not built before shutdown().
-            // Success criteria: it fails with an IllegalStateException saying the factory was shut down, and no
-            //   engine was created by it; a client built before shutdown is still returned from the cache.
-            // Why it matters: engines are created lazily, by the first client; one created after shutdown()
-            //   released the others would own threads and sockets that nothing releases.
+            // Success criteria: it fails with an IllegalStateException saying the factory was shut down; a client
+            //   built before shutdown is still returned from the cache.
+            // Why it matters: a client built after shutdown() released the engines would run on a pool and threads
+            //   that are gone - its first call would fail far from the cause.
             //
             // Given
             val factory =
@@ -717,7 +714,6 @@ class WebClientEngineIntegrationTest {
 
             // Then
             assertThat(failure).isInstanceOf(IllegalStateException::class.java).hasMessageContaining("shut down")
-            assertThat(factory.startedEngines().keys).containsExactly(WebClientEngine.REACTOR_NETTY)
             assertThat(factory.create("early")).isSameAs(early)
         }
 
@@ -746,7 +742,7 @@ class WebClientEngineIntegrationTest {
 
             // Then
             assertThat(threads).singleElement().asString().startsWith(ResilientWebClientFactory.POOL_NAME)
-            val transport = factory.startedEngines().getValue(WebClientEngine.REACTOR_NETTY) as ReactorNettyEngineTransport
+            val transport = factory.engineTransports.getValue(WebClientEngine.REACTOR_NETTY) as ReactorNettyEngineTransport
             val endpoint = meshFor(listOf("where"), wireMock.baseUrl()).resolveAll().values.single()
             assertThat(transport.httpClientFor(endpoint).configuration().resolver()).isSameAs(DefaultAddressResolverGroup.INSTANCE)
         }
@@ -831,7 +827,7 @@ class WebClientEngineIntegrationTest {
             wireMock.stubFor(get(urlEqualTo("/bye")).willReturn(okJson("""{"message":"bye"}""")))
             val factory = newFactory(engine, "bye")
             factory.create("bye").get(Greeting::class.java) { it.uri("/bye") }.block()
-            val transport = factory.startedEngines().getValue(engine)
+            val transport = factory.engineTransports.getValue(engine)
             assertThat(transport.isClosed).isFalse()
 
             // When
@@ -857,7 +853,7 @@ class WebClientEngineIntegrationTest {
             //   against an exchange that never ends, with a deadline 300 ms ahead and one that has already passed.
             // Success criteria: shutdown() returns within 2 s; the transport reports itself released; the held
             //   exchange's connection is closed and its CALL fails at once (not at its 30 s budget); and the
-            //   factory's logger has a WARN for the engine - "did not drain by the factory's shutdown deadline"
+            //   factory's logger has a WARN for the engine - "did not drain within"
             //   for every engine, each of which waits for the exchange up to the deadline; and no ERROR is logged,
             //   neither by Apache nor by the factory (a
             //   reactor closed hard while a worker is still shutting down reports a ClosedSelectorException, which
@@ -881,7 +877,7 @@ class WebClientEngineIntegrationTest {
                             )
                         val held = factory.create("held").get(Greeting::class.java) { it.uri("/held") }.toFuture()
                         assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
-                        val transport = factory.startedEngines().getValue(engine)
+                        val transport = factory.engineTransports.getValue(engine)
 
                         // When
                         val started = System.nanoTime()
@@ -891,7 +887,7 @@ class WebClientEngineIntegrationTest {
                         // Then
                         assertThat(elapsed).isLessThan(Duration.ofSeconds(2))
                         val warnings = lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage }
-                        val drained = "did not drain by the factory's shutdown deadline"
+                        val drained = "did not drain within"
                         assertThat(warnings).anySatisfy { assertThat(it).contains("'$engine'", drained) }
                         assertThat(transport.isClosed).isTrue()
                         assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
@@ -930,7 +926,7 @@ class WebClientEngineIntegrationTest {
                 val factory = newFactory(engine, "draining")
                 val call = factory.create("draining").get(Greeting::class.java) { it.uri("/finishing") }.toFuture()
                 assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
-                val transport = factory.startedEngines().getValue(engine)
+                val transport = factory.engineTransports.getValue(engine)
 
                 // When
                 val started = System.nanoTime()
@@ -979,7 +975,7 @@ class WebClientEngineIntegrationTest {
                 val first = client.get(Greeting::class.java) { it.uri("/queued") }.toFuture()
                 assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the first request reached the backend").isTrue()
                 val second = client.get(Greeting::class.java) { it.uri("/queued") }.toFuture()
-                val transport = factory.startedEngines().getValue(engine)
+                val transport = factory.engineTransports.getValue(engine)
 
                 // When
                 transport.shutdown(System.nanoTime() + TimeUnit.SECONDS.toNanos(5), System::nanoTime)
@@ -1020,7 +1016,7 @@ class WebClientEngineIntegrationTest {
                         )
                     val held = factory.create("held").get(Greeting::class.java) { it.uri("/held") }.toFuture()
                     assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the request reached the backend").isTrue()
-                    val transport = factory.startedEngines().getValue(engine)
+                    val transport = factory.engineTransports.getValue(engine)
 
                     // When
                     val release =

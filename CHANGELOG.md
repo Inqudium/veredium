@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bean is left untouched, because the engine is set on the module's clone of it. No process-global resource or
   system property is used. Isolation tests pin all of this against Boot's real HTTP-client auto-configuration.
 
-  Each engine is created lazily, shared by the backends that select it, and released on shutdown. The mesh
+  Each engine is created with the factory, shared by the backends that select it, and released on shutdown. The mesh
   ladder is mapped onto every engine as far as it allows. What an engine cannot apply, for example pool size
   and pending-acquire on the JDK client, is stated in a startup line and in the module guides, not silently
   ignored.
@@ -201,6 +201,25 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
 
 ### Changed
 
+- **Wiring (breaking for a host that scanned the packages):** both client modules register a Spring Boot
+  auto-configuration (`VerediumRestClientAutoConfiguration`, `VerediumWebClientAutoConfiguration`) instead of
+  relying on a component scan of `eu.inqudium.veredium.restclient` / `.webclient`. The dependency alone wires the
+  factory, the decorator, the observation report and the mesh wiring; each bean backs off for a host's own. A host
+  with both modules on its classpath excludes one auto-configuration (ADR-0003). `RestClientConfiguration` and
+  `WebClientConfiguration` are gone; `ReactiveResilienceDecorator` is a bean of the auto-configuration like the
+  blocking one.
+- **Mesh (breaking):** the margins are configured under `app.mesh.defaults.margins` only; the per-endpoint
+  `app.mesh.endpoints[].margins` override (`MeshProperties.MarginsOverride`) is removed. An endpoint is tuned
+  through its anchor and its `max-retries`.
+- Both stacks give their HTTP engines one lifecycle, `EngineSet` in `veredium-core`: every engine in use is created
+  with the factory (the reactive stack created its engines at the first client), a client built after the
+  shutdown is refused naming its backend, and an engine that did not drain is reported `within <window>` on both
+  stacks.
+- The stack-neutral part of the two client factories - endpoints, drain window, default headers, response-size
+  meter, validation - is `MeshClientPlan` in `veredium-core`; the caller's MDC is carried onto another thread by one
+  helper, `CallerMdc`, on both stacks; `WebClientMetrics.tagsOf` and the list form of `uriTag` are removed, the
+  per-endpoint `uriTagger` remains.
+- `ADR-0004` records the selectable HTTP engines as wanted functionality.
 - Docs: the guides of `veredium-core` and `veredium-restclient` follow the code again - an abandoned blocking call
   is logged as `cancelled` (legatium 1.3.0), each stack imports its own `MeshResilienceRegistrar` subclass, the
   blocking decorator's test lives in the core - and no longer use the origin project's module names, adapters and

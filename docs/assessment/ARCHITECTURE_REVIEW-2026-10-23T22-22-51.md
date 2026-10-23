@@ -225,7 +225,7 @@ Befund auftauchen.
     - Simpler alternative: pro Stack eine Engine, nämlich der heutige Default (Apache classic bzw. Reactor Netty). Die übrigen werden erst angeboten, wenn ein konkreter Host sie braucht, und dieser Bedarf wird dann als ADR festgehalten. Falls der Bedarf heute schon existiert: ADR nachtragen, mit Benennung der Engines, die er tatsächlich trägt (vermutlich nicht alle vier je Stack).
     - Reversibility: **jetzt billig, nach dem ersten Release teuer.** Unveröffentlicht heißt: Die Keys `app.*.engine` sind noch kein öffentlicher Vertrag. Der Rückbau ist überwiegend Löschen (Transportklassen, Matrix-Tests, optionale Dependencies) plus das Vereinfachen der Fabriken. Risiko gering, weil die Defaults unverändert bleiben.
 
-- [ ] 2. [Wiring-Modell, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/RestClientConfiguration.kt:38`, `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientConfiguration.kt:28`, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/ResilientRestClientFactory.kt:59`, `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/ResilientWebClientFactory.kt:59`, `./veredium-examples/src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingExampleApplication.kt:11`] {High} {Confidence: medium} {Layering & Dependencies}
+- [x] 2. [Wiring-Modell, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/RestClientConfiguration.kt:38`, `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientConfiguration.kt:28`, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/ResilientRestClientFactory.kt:59`, `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/ResilientWebClientFactory.kt:59`, `./veredium-examples/src/main/kotlin/eu/inqudium/veredium/examples/blocking/BlockingExampleApplication.kt:11`] {High} {Confidence: medium} {Layering & Dependencies}
   - Die Bibliothek wird über einen Component-Scan ihres eigenen Pakets eingebunden statt über Boots Auto-Configuration.
     - Actual structure: Es gibt keine `AutoConfiguration.imports`.
       - Ein Host muss `scanBasePackages = [..., "eu.inqudium.veredium.restclient"]` setzen. Dann findet Spring die `@Component`-Klassen (Fabrik, Observation-Report, im reaktiven Stack auch `ReactiveResilienceDecorator`) und die `@Configuration`.
@@ -245,7 +245,7 @@ Befund auftauchen.
 
 ### 🟡 Medium
 
-- [ ] 3. [Engine-Auswahl und -Lebenszyklus, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/EngineTransport.kt:37`, `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:77`, `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineChecks.kt:54`, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/JdkEngineTransport.kt:169`] {Medium} {Confidence: high} {Consistency}
+- [x] 3. [Engine-Auswahl und -Lebenszyklus, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/EngineTransport.kt:37`, `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineTransports.kt:77`, `./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/WebClientEngineChecks.kt:54`, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/JdkEngineTransport.kt:169`] {Medium} {Confidence: high} {Consistency}
   - Dasselbe Konzept, eine Engine-Transportschicht mit Startprüfungen, Startzeile, Lebenszyklus und Drain, ist in beiden Stacks in zwei verschiedenen Formen gebaut und driftet bereits.
     - Actual structure:
       - **Blockierend:** abstrakte Klasse `EngineTransport` mit `settingsLine`. Die Transporte werden **eager** in `createAll` erzeugt, mit Aufräumen bei Teilfehlschlag. Die Prüfungen laufen direkt in der Fabrik (`checkedEngineSelection`), der Shutdown-Zustand liegt als `@Volatile` Flag in der Fabrik.
@@ -259,28 +259,28 @@ Befund auftauchen.
 
 ### 🟢 Low
 
-- [ ] 4. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/ResilientWebClientFactory.kt:415`] {Low} {Confidence: high} {Premature Abstraction}
+- [x] 4. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/ResilientWebClientFactory.kt:415`] {Low} {Confidence: high} {Premature Abstraction}
   - `WebClientMetrics.tagsOf` sortiert mehrere Templates nach Präfixlänge und bricht Gleichstände nach dem Template. Der einzige Produktionsaufrufer `uriTagger` übergibt genau ein Template, weil er laut eigener KDoc die Mehr-Template-Mehrdeutigkeit bewusst vermeidet. Die Sortier- und Tie-Break-Logik und ihre Tests (`WebClientMetricsTest`) pflegen einen Fall, den der Produktionspfad ausschließt. Alternative: `uriTagger` direkt über das eine Template (Präfix bis `{`) ausdrücken, `tagsOf` entfernen. Billig.
 
-- [ ] 5. [`./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/mesh/MeshProperties.kt:248`] {Low} {Confidence: medium} {Excessive Configurability}
+- [x] 5. [`./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/mesh/MeshProperties.kt:248`] {Low} {Confidence: medium} {Excessive Configurability}
   - `MarginsOverride` spiegelt alle sechs Margins als nullable Zwilling für Overrides je Endpoint. Ebenso spiegelt `BackendToggleOverride` (Zeile 282) `BackendToggle` (Zeile 273), eine Klasse mit nur einem Boolean.
     - Weder Beispiele noch Test-YAMLs noch Guides zeigen einen Endpoint, der eine Margin überschreibt. Der Guide nennt die Möglichkeit nur („partial overrides are field-merged, per endpoint too“).
     - Kosten: Jede neue Margin braucht zwei Felder, einen Merge-Zweig und Validierung samt Quellenhinweis, und die Konfigurationsfläche wird größer.
     - Alternative: Margins nur global. Overrides je Endpoint erst dann, wenn ein gemessener Endpoint sie braucht. Die Zeitbudgets je Endpoint deckt bereits `individual-request-timeout-ms` ab.
     - Vor dem Release billig, danach ein Breaking Change der Konfiguration.
 
-- [ ] 6. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/ReactiveResilienceDecorator.kt:97`, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/RestClientConfiguration.kt:46`] {Low} {Confidence: high} {Consistency}
+- [x] 6. [`./veredium-webclient/src/main/kotlin/eu/inqudium/veredium/webclient/ReactiveResilienceDecorator.kt:97`, `./veredium-restclient/src/main/kotlin/eu/inqudium/veredium/restclient/RestClientConfiguration.kt:46`] {Low} {Confidence: high} {Consistency}
   - Die beiden Decoratoren sind verschieden verdrahtet. Der blockierende ist annotationsfrei und wird per `@Bean` in `RestClientConfiguration` deklariert (ADR-0002). Der reaktive ist ein gescanntes `@Component`.
     - Kosten: Ein Leser muss zwei Verdrahtungswege kennen. Ein Host kann den reaktiven Decorator nur über den Scan bekommen.
     - Alternative: beide als `@Bean` der Stack-Konfiguration. Das fällt mit Befund 2 automatisch an.
 
-- [ ] 7. [`./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/client/ClientCallLog.kt:282`, `./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/resilience/BlockingResilienceDecorator.kt:300`] {Low} {Confidence: medium} {Coupling & Cohesion}
+- [x] 7. [`./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/client/ClientCallLog.kt:282`, `./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/resilience/BlockingResilienceDecorator.kt:300`] {Low} {Confidence: medium} {Coupling & Cohesion}
   - Die MDC-Übergabe an einen anderen Thread ist zweimal implementiert: `ClientCallLog.withMdc` (nur vom reaktiven Client benutzt) und `BlockingResilienceDecorator.propagate` (dazu noch Observation-Scope). `withMdc` sitzt im Companion einer Logging-Klasse, obwohl es Kontextweitergabe ist.
     - Kosten: Zwei Stellen für dieselbe Restore-Semantik (`null` → `clear`), die auseinanderlaufen können.
     - Alternative: ein kleiner MDC-Helfer im Kern, den beide nutzen.
     - Billig, rein intern.
 
-- [ ] 8. [`./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/BaseAdapter.kt:26`] {Low} {Confidence: low} {Speculative Generality}
+- [x] 8. [`./veredium-core/src/main/kotlin/eu/inqudium/veredium/core/BaseAdapter.kt:26`] {Low} {Confidence: low} {Speculative Generality}
   - `BaseAdapter` ist ein öffentliches Interface mit zwei Budget-Gettern. Die Bibliothek implementiert und liest es selbst nie, nur die Host-Adapter der Beispiele implementieren es.
     - Dieselben Werte liefern `ResilientRestClient` und `ResilientWebClient` bereits als Properties.
     - Das KDoc trägt zudem Client-Verhalten (`DatabindException`, Breaker-Einordnung), das nicht zum Interface gehört.
@@ -342,3 +342,42 @@ laufen lässt.
     und gemeinsame Startregeln (inklusive JDK-Host-Prüfung) in `core/engine` sind damit der Weg, die Kosten der
     Engine-Matrix zu begrenzen.
   - Folge für Muster P1: Die Schwere bleibt Medium (die Engine-Schicht bleibt bestehen).
+- **Befund 2 (2026-10-23): behoben.** Beide Client-Module registrieren eine Boot-Auto-Configuration
+  (`VerediumRestClientAutoConfiguration`, `VerediumWebClientAutoConfiguration`, je in
+  `META-INF/spring/…AutoConfiguration.imports`). Damit verdrahtet die Dependency allein Fabrik, Decorator,
+  Observation-Report und Mesh-Verdrahtung. Decorator und Fabrik weichen per `@ConditionalOnMissingBean` einer Bean
+  des Hosts. `RestClientConfiguration`/`WebClientConfiguration` und alle `@Component`-Annotationen sind entfernt.
+  Die Beispiel-Apps scannen kein Bibliothekspaket mehr; sie schließen nur die Auto-Configuration des jeweils anderen
+  Stacks aus (ADR-0003 bleibt offen). Je Stack prüft `MeshResilienceShippedConfigTest` jetzt die Registrierung
+  (`ImportCandidates`), den Start über die echte Auto-Configuration und das Zurückweichen vor einem
+  Host-Decorator.
+- **Befund 3 (2026-10-23): behoben, mit einer Korrektur des Befundtexts.** Der gemeinsame Engine-Lebenszyklus liegt
+  als `EngineSet`/`EngineResources` in `core/engine`: Erzeugung mit der Fabrik (beide Stacks jetzt eager),
+  Aufräumen bei Teilfehlschlag, Ablehnung nach dem Shutdown mit Backend-Namen, Freigabe gegen eine gemeinsame
+  Deadline. Die Drain-Zeile kommt aus `EngineDrain` und lautet auf beiden Stacks „within <window>“. Die
+  Stack-Tests `EngineTransportLifecycleTest`/`EngineTransportsTest` sind durch einen Kerntest (`EngineSetTest`)
+  ersetzt. **Korrektur:** Die als „Drift“ bezeichnete Abweichung der JDK-Host-Prüfung ist keine Drift. Sie ist in
+  `./docs/engine-behaviour.md` („Request headers“) dokumentiert und folgt aus den Spring-Adaptern: Der blockierende
+  Adapter verwirft den Header still, der reaktive reicht ihn an das JDK weiter, das ihn ablehnt. Die Prüfung bleibt
+  deshalb je Stack; ADR-0004 hält das fest.
+- **Befund 4 (2026-10-23): behoben.** `WebClientMetrics.tagsOf` und die Listenform von `uriTag` sind entfernt;
+  `uriTagger` arbeitet direkt mit dem einen Template. Die Tests prüfen den Tagger je Endpoint.
+- **Befund 5 (2026-10-23): behoben, soweit es die Margins betrifft.** `MarginsOverride` und
+  `app.mesh.endpoints[].margins` sind entfernt; die Margins gelten nur unter `app.mesh.defaults.margins`.
+  `BackendToggleOverride` bleibt: Die Schalter für TimeLimiter und CircuitBreaker je Endpoint sind ein dokumentiertes
+  Feature (Guide-Tabelle „per-endpoint (global default + per-endpoint override)“). Ihr Wrapper ergibt die YAML-Form
+  `time-limiter.enabled`, die Resilience4j selbst verwendet.
+- **Befund 6 (2026-10-23): behoben** mit Befund 2. Beide Decoratoren sind `@Bean`s der jeweiligen
+  Auto-Configuration.
+- **Befund 7 (2026-10-23): behoben.** `CallerMdc.with` im Kern ersetzt `ClientCallLog.withMdc` und die eigene
+  MDC-Übergabe in `BlockingResilienceDecorator.propagate`; die Tests sind nach `CallerMdcTest` umgezogen.
+- **Befund 8 (2026-10-23): behoben durch Klarstellung.** `BaseAdapter` bleibt, weil Hosts damit Budgets über Adapter
+  beider Stacks zusammensetzen. Das KDoc sagt jetzt, dass es ein Vertrag für Host-Adapter ist, den die Bibliothek
+  weder implementiert noch liest. Der Abschnitt zum Deserialisierungsverhalten (`DatabindException`) ist in die
+  Antwortverträge von `ResilientRestClient` und `ResilientWebClient` umgezogen.
+- **Muster P1 (2026-10-23): behoben.** `MeshClientPlan` im Kern trägt den stack-neutralen Teil beider Fabriken:
+  Endpoints, Drain-Fenster, Default-Header, Größen-Meter, Validierung samt Startzeile und Fehlermeldung für einen
+  unbekannten Backend-Namen.
+- **Muster P2 (2026-10-23): behoben, soweit begründet.** Die gemeinsamen Startregeln und der Engine-Lebenszyklus
+  sind jetzt je einmal im Kern getestet (`EngineSetTest`, `EngineSelectionTest`). Die
+  übrigen gespiegelten Suiten bleiben, weil sie zwei verschiedene APIs prüfen (siehe Befundtext).

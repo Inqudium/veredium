@@ -1,25 +1,22 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
+import eu.inqudium.veredium.core.client.MeshClientPlan
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.engine.EngineSelection
+import eu.inqudium.veredium.core.engine.EngineSet
 import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshConnectionPools
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
-import eu.inqudium.veredium.core.validation.ResponseValidation
-import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.observation.ObservationRegistry
 import jakarta.annotation.PreDestroy
 import jakarta.validation.ValidatorFactory
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
-import org.springframework.http.HttpHeaders
-import org.springframework.http.MediaType
 import org.springframework.http.client.ClientHttpRequestFactory
-import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
 import tools.jackson.databind.ObjectMapper
 import java.time.Duration
@@ -56,7 +53,6 @@ import java.util.concurrent.ScheduledExecutorService
  * override for an alias that is not a mesh endpoint, an engine whose library is not on the classpath, the JDK
  * engine for a backend whose Host header the JDK would replace.
  */
-@Component
 class ResilientRestClientFactory(
     private val properties: RestClientProperties,
     private val meshProperties: MeshProperties,
@@ -106,8 +102,11 @@ class ResilientRestClientFactory(
 ) : MeshConnectionPools {
     private val logger: Logger = LoggerFactory.getLogger(ResilientRestClientFactory::class.java)
 
-    /** Which backends validate, with which validator, and whether a violation fails the call - see [ResponseValidation]. */
-    private val validation = ResponseValidation(properties.validation, validatorFactory)
+    /**
+     * The endpoints, the drain window, the default headers, the size meter and the validation - derived the same way
+     * as on the reactive stack ([MeshClientPlan]).
+     */
+    private val plan = MeshClientPlan(meshProperties, "app.restclient", properties.validation, validatorFactory, logger)
 
     /** Standalone HTTP observation toggle (see [RestClientProperties.Observability]) - this module's own property alone. */
     private val observationEnabled: Boolean = properties.observability.httpObservationEnabled
@@ -123,40 +122,12 @@ class ResilientRestClientFactory(
     private val baseBuilder: RestClient.Builder =
         restClientBuilder.let { if (observationEnabled) it else it.observationRegistry(ObservationRegistry.NOOP) }
 
-    init {
-        // Which backends actually validate, resolved the same way the clients resolve it. Worth a startup line
-        // because both ways this silently does nothing are invisible at runtime: a backend simply not listed,
-        // or no Bean Validation provider on the classpath at all, in which case no configuration can switch it
-        // on for anyone.
-        logger.info(
-            "Response Bean Validation: default={}, validated endpoints={} (provider {})",
-            validation.enabledByDefault,
-            validation.validatedAliases(meshProperties.resolveAll().values.map { it.alias }),
-            validation.providerVerdict,
-        )
-    }
+    private val meshByBackend: Map<String, ResolvedTimeouts> = plan.endpoints
 
-    /** The mesh-derived ladder per backend, keyed by the endpoint alias (which must equal the backend name). */
-    private val meshByBackend: Map<String, ResolvedTimeouts> = meshProperties.resolveAll().values.associateBy { it.alias }
+    private val meshTransport: MeshProperties.Transport = plan.transport
 
-    /** Global mesh transport caps (connect / pending-acquire / max-connections) shared by the pools and clients. */
-    private val meshTransport: MeshProperties.Transport = meshProperties.defaults.transport
-
-    /**
-     * How long [shutdown] waits for the pools to drain: the LONGEST response timeout any endpoint permits, plus
-     * the pre-response phases (connect + pending-acquire) and a second of slack.
-     *
-     * Derived rather than chosen, because the quantity it must exceed is knowable: no in-flight call can
-     * outlive its own `responseTimeout`, so waiting beyond the largest of them plus the phases that precede it
-     * cannot let anything finish that was not going to finish anyway. A literal here would be a second, silent
-     * timeout next to the mesh ladder - free to drift below the ladder as endpoints are retuned, and nothing
-     * would say so. One window for all engines, not one each: the drains run one after another against the
-     * same deadline.
-     */
-    private val poolDisposeTimeout: Duration =
-        (meshByBackend.values.maxOfOrNull { it.responseTimeout } ?: Duration.ZERO)
-            .plusMillis(meshTransport.connectTimeoutMs + meshTransport.pendingAcquireTimeoutMs)
-            .plusSeconds(1)
+    /** How long [shutdown] waits for the engines to drain ([MeshClientPlan.drainWindow]). */
+    private val poolDisposeTimeout: Duration = plan.drainWindow
 
     /**
      * `maxInMemorySize` in bytes: the cap on how much of a response body the client will buffer. Handed to every
@@ -169,12 +140,12 @@ class ResilientRestClientFactory(
 
     /**
      * The engines in use, one transport each, created here in a stable order (the enum's) and only for an engine
-     * some backend selects. Apache, the default, comes first: its pool and its meters come up when the factory
-     * does.
+     * some backend selects, with the lifecycle both stacks share ([EngineSet]). Apache, the default, comes first:
+     * its pool and its meters come up when the factory does.
      */
-    private val transports: Map<RestClientEngine, EngineTransport> =
-        EngineTransport.createAll(engineByBackend.values.toSortedSet(), logger) { engine ->
-            val settings = EngineTransport.Settings(meshTransport, properties.pool, meterRegistry)
+    private val transports: EngineSet<RestClientEngine, EngineTransport> =
+        EngineSet(engineByBackend.values.toSortedSet(), "ResilientRestClientFactory", logger) { engine ->
+            val settings = EngineTransport.Settings(meshTransport, properties.pool, meterRegistry, poolDisposeTimeout, logger)
             when (engine) {
                 RestClientEngine.APACHE -> ApacheEngineTransport(settings)
                 RestClientEngine.JDK -> JdkEngineTransport(settings)
@@ -182,13 +153,6 @@ class ResilientRestClientFactory(
                 RestClientEngine.REACTOR_NETTY -> ReactorNettyEngineTransport(settings)
             }
         }
-
-    /**
-     * Set by [shutdown]. A client built afterwards would run on an engine that is already closed - the engines are
-     * created with the factory and never again - so [create] refuses it with a message instead.
-     */
-    @Volatile
-    private var shutDown = false
 
     init {
         // The engine of every backend, and per engine what of the mesh ladder and the pool settings it applies.
@@ -199,7 +163,7 @@ class ResilientRestClientFactory(
             properties.engine.default,
             engineByBackend.toSortedMap().entries.joinToString(", ", "[", "]") { (alias, engine) -> "$alias=$engine" },
         )
-        transports.forEach { (engine, transport) ->
+        transports.all.forEach { (engine, transport) ->
             logger.info(transport.settingsLine(engineByBackend.filterValues { it == engine }.keys.sorted()))
         }
     }
@@ -209,7 +173,7 @@ class ResilientRestClientFactory(
      * The JDK client has no connection bound, so its pool carries none.
      */
     override fun connectionPools(): List<MeshConnectionPool> =
-        transports.map { (engine, transport) ->
+        transports.all.map { (engine, transport) ->
             MeshConnectionPool(
                 name = transport.name,
                 maxConnections = meshTransport.maxConnections.takeUnless { engine == RestClientEngine.JDK },
@@ -218,10 +182,10 @@ class ResilientRestClientFactory(
         }
 
     /** The Apache engine's background eviction, when Apache is in use - see [ApacheEngineTransport.evictor]. */
-    internal val evictor: ScheduledExecutorService? get() = (transports[RestClientEngine.APACHE] as? ApacheEngineTransport)?.evictor
+    internal val evictor: ScheduledExecutorService? get() = (transports.all[RestClientEngine.APACHE] as? ApacheEngineTransport)?.evictor
 
     /** The engine transports this factory created - for the tests that pin which engines exist and that [shutdown] closes them. */
-    internal val engineTransports: Map<RestClientEngine, EngineTransport> get() = transports
+    internal val engineTransports: Map<RestClientEngine, EngineTransport> get() = transports.all
 
     /** Caches one client per logical name so [create] is idempotent - repeated calls return the same instance. */
     private val cache = ConcurrentHashMap<String, ResilientRestClient>()
@@ -280,17 +244,9 @@ class ResilientRestClientFactory(
     fun create(backendName: String): ResilientRestClient = cache.computeIfAbsent(backendName, ::build)
 
     private fun build(backendName: String): ResilientRestClient {
-        check(!shutDown) {
-            "ResilientRestClientFactory was shut down; a client for backend '$backendName' would run on a closed HTTP engine"
-        }
-        val endpoint =
-            meshByBackend[backendName]
-                ?: error(
-                    "No mesh endpoint configured for backend '$backendName'. " +
-                        "Add an app.mesh.endpoints[] entry whose alias equals '$backendName'.",
-                )
+        val endpoint = plan.endpoint(backendName)
 
-        val requestFactory = transports.getValue(engineByBackend.getValue(backendName)).requestFactory(endpoint)
+        val requestFactory = transports.use(engineByBackend.getValue(backendName), backendName) { it.requestFactory(endpoint) }
         requestFactories[backendName] = requestFactory
 
         val restClient =
@@ -308,12 +264,10 @@ class ResilientRestClientFactory(
                 // the factory refuses at startup where it matters (checkedEngineSelection); the same goes for
                 // User-Agent: the library's token (`veredium/<version>`) or the host's own
                 // (app.restclient.user-agent) replaces the engine's default so a peer's access log names what
-                // calls it. Extra static headers are applied on top, so an endpoint can override either.
+                // calls it.
                 .defaultHeaders { headers ->
-                    headers.set(HttpHeaders.HOST, endpoint.host)
-                    headers.set(HttpHeaders.USER_AGENT, properties.effectiveUserAgent)
-                    endpoint.headers.forEach { (name, value) -> headers.set(name, value) }
-                }.defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
+                    plan.defaultHeaders(endpoint, properties.effectiveUserAgent).forEach { (name, value) -> headers.set(name, value) }
+                }
                 // The backend name as a request attribute, set ONCE per client so every request carries it.
                 // An attribute, not a header: it names the client for legatium's exchange event (adapter_name
                 // and the `name` tag of its body meters) and never goes on the wire. The key is the library's
@@ -330,36 +284,11 @@ class ResilientRestClientFactory(
             resilience,
             objectMapper,
             maxInMemoryBytes,
-            validation.validatorFor(backendName),
-            validation.failOnViolation,
-            responseBodySize(backendName),
+            plan.validation.validatorFor(backendName),
+            plan.validation.failOnViolation,
+            plan.responseBodySize(meterRegistry, RestClientMetrics.RESPONSE_BODY_SIZE, backendName),
         )
     }
-
-    /**
-     * The response-size summary for one backend, or `null` when the host wired no [MeterRegistry].
-     *
-     * **What it is for.** [RestClientProperties.maxInMemorySize] is a ceiling that has to be chosen, and without
-     * this meter there is nothing to choose it from. legatium's body capture is bounded by its own
-     * `max-body-bytes` and says nothing about this limit; the limit exception says only that the limit was
-     * passed and what the peer declared on the wire.
-     *
-     * **What it cannot tell you.** Only responses that FIT are sampled - the ones that motivated the question
-     * are absent by construction. Read it as the headroom of the population that works, and pair it with the
-     * limit named on the failure line for the ones that do not.
-     *
-     * Resolved ONCE per backend here rather than looked up per call, the same way the validator is: the hot path
-     * should hold no registry lookup and no toggle it could disagree with.
-     */
-    private fun responseBodySize(backendName: String): DistributionSummary? =
-        meterRegistry?.let { registry ->
-            DistributionSummary
-                .builder(RestClientMetrics.RESPONSE_BODY_SIZE)
-                .description("Decoded response body size in UTF-8 bytes, for sizing app.restclient.max-in-memory-size")
-                .baseUnit(ResponseBodyMetrics.BASE_UNIT)
-                .tag(ResponseBodyMetrics.ADAPTER_TAG, backendName)
-                .register(registry)
-        }
 
     /**
      * Closes every engine in use on context shutdown, each draining its exchanges in flight until one shared
@@ -376,9 +305,7 @@ class ResilientRestClientFactory(
      */
     @PreDestroy
     fun shutdown() {
-        shutDown = true
-        val deadline = nanoTime() + poolDisposeTimeout.toNanos()
-        EngineTransport.shutdownAll(transports.values, deadline, nanoTime, poolDisposeTimeout, logger)
+        transports.shutdown(nanoTime() + poolDisposeTimeout.toNanos(), nanoTime)
     }
 }
 
