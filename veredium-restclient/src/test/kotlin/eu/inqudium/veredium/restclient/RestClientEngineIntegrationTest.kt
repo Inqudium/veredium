@@ -6,7 +6,6 @@ import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.aResponse
-import com.github.tomakehurst.wiremock.client.WireMock.equalTo
 import com.github.tomakehurst.wiremock.client.WireMock.equalToJson
 import com.github.tomakehurst.wiremock.client.WireMock.get
 import com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor
@@ -16,9 +15,21 @@ import com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.veredium.core.Veredium
+import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
+import eu.inqudium.veredium.testsupport.AnsweringBackend
+import eu.inqudium.veredium.testsupport.CapturingAppender
+import eu.inqudium.veredium.testsupport.DrippingBackend
+import eu.inqudium.veredium.testsupport.Greeting
+import eu.inqudium.veredium.testsupport.LookupRequest
+import eu.inqudium.veredium.testsupport.UnansweredConnectBackend
+import eu.inqudium.veredium.testsupport.WireMockArrivals
+import eu.inqudium.veredium.testsupport.causeChain
+import eu.inqudium.veredium.testsupport.causeNames
+import eu.inqudium.veredium.testsupport.eventually
+import eu.inqudium.veredium.testsupport.leapingClock
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
@@ -32,6 +43,7 @@ import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.assertj.core.api.Assertions.catchThrowable
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
@@ -51,32 +63,22 @@ import reactor.core.publisher.Mono
 import reactor.netty.http.HttpResources
 import tools.jackson.databind.json.JsonMapper
 import java.io.IOException
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.http.HttpTimeoutException
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.locks.LockSupport
-import kotlin.concurrent.thread
 
 /**
  * The selectable HTTP engines (`app.restclient.engine`), each driven end to end against a real (WireMock) backend
  * through [ResilientRestClientFactory] and the real [BlockingResilienceDecorator].
  *
- * Every behaviour the module promised before the engine became selectable is run once per engine - the happy
- * paths, the status mapping, the response timeout, the buffer limit, the Host header - and so is the decorator's
+ * Every behaviour the module promises independently of the engine is run once per engine - the happy paths, the
+ * status mapping, the response timeout, the buffer limit, the Host header - and so is the decorator's
  * contract that an abandoned call releases its worker and its connection promptly, which each engine reaches by
  * a different route. Then what is specific to the selection: per-backend overrides, engines created only when
  * selected and shared by their backends, closed on shutdown, the fail-fast checks and the startup lines.
@@ -89,15 +91,8 @@ class RestClientEngineIntegrationTest {
     companion object {
         private lateinit var wireMock: WireMockServer
 
-        /**
-         * What a request to a URL triggers once it reached WireMock, per test ([arrivalOf]) - behind ONE listener for
-         * the class, registered with the server: `resetAll()` does not remove a request listener, so one added per
-         * test would pile up and fire for a later test's request to the same URL. Cleared before every test.
-         */
-        private val arrivals = ConcurrentHashMap<String, () -> Unit>()
-
-        /** A latch that opens once a request to [url] reached WireMock in the current test. */
-        private fun arrivalOf(url: String): CountDownLatch = CountDownLatch(1).also { latch -> arrivals[url] = latch::countDown }
+        /** What a request to a URL triggers once it reached WireMock, per test - the class's one listener on the server. */
+        private val arrivals = WireMockArrivals()
 
         /** The generous budget of every case that is not about timing - see `ResilientRestClientIntegrationTest`. */
         private val GENEROUS_BUDGET: TimeLimiterConfig = TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(30)).build()
@@ -114,7 +109,7 @@ class RestClientEngineIntegrationTest {
 
         /**
          * Asynchronous responses: a delayed answer waits on WireMock's scheduler instead of a container thread. The
-         * abandoned-exchange cases leave delays of several seconds behind them that no client waits for any more -
+         * abandoned-exchange cases leave delays of several seconds behind them that no client waits for -
          * on container threads they would pile up across the class and slow every later request down.
          */
         @JvmStatic
@@ -127,7 +122,7 @@ class RestClientEngineIntegrationTest {
                         .asynchronousResponseEnabled(true)
                         .asynchronousResponseThreads(16),
                 ).apply { start() }
-                    .also { server -> server.addMockServiceRequestListener { request, _ -> arrivals[request.url]?.invoke() } }
+                    .also { server -> server.addMockServiceRequestListener(arrivals) }
         }
 
         @JvmStatic
@@ -271,7 +266,7 @@ class RestClientEngineIntegrationTest {
                     RestClientEngine.JETTY -> TimeoutException::class.java
                     RestClientEngine.REACTOR_NETTY -> ReadTimeoutException::class.java
                 }
-            assertThat(generateSequence(failure) { it.cause }.toList()).anyMatch { timeoutType.isInstance(it) }
+            assertThat(causeChain(failure)).anyMatch { timeoutType.isInstance(it) }
         }
 
         @ParameterizedTest
@@ -485,7 +480,7 @@ class RestClientEngineIntegrationTest {
             wireMock.stubFor(get(urlEqualTo("/never")).willReturn(okJson("{}").withFixedDelay(10_000)))
             wireMock.stubFor(get(urlEqualTo("/warm")).willReturn(okJson("""{"message":"warm"}""")))
             val arrivedNanos = AtomicLong()
-            arrivals["/never"] = { arrivedNanos.compareAndSet(0, System.nanoTime()) }
+            arrivals.onArrival("/never") { arrivedNanos.compareAndSet(0, System.nanoTime()) }
             val bulkheads = BulkheadRegistry.ofDefaults()
             val factory =
                 newFactory(
@@ -572,7 +567,7 @@ class RestClientEngineIntegrationTest {
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/never")).willReturn(okJson("{}").withFixedDelay(10_000)))
-            val inFlight = arrivalOf("/never")
+            val inFlight = arrivals.arrivalOf("/never")
             val bulkheads = BulkheadRegistry.ofDefaults()
             val factory =
                 newFactory(
@@ -609,7 +604,7 @@ class RestClientEngineIntegrationTest {
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/never")).willReturn(okJson("{}").withFixedDelay(10_000)))
-            val inFlight = arrivalOf("/never")
+            val inFlight = arrivals.arrivalOf("/never")
             val bulkheads = BulkheadRegistry.ofDefaults()
             val factory =
                 newFactory(
@@ -648,7 +643,7 @@ class RestClientEngineIntegrationTest {
             // Given
             wireMock.stubFor(get(urlEqualTo("/held")).willReturn(okJson("{}").withFixedDelay(3_000)))
             wireMock.stubFor(get(urlEqualTo("/second")).willReturn(okJson("""{"message":"second"}""")))
-            val held = arrivalOf("/held")
+            val held = arrivals.arrivalOf("/held")
             val mesh =
                 MeshProperties(
                     defaults =
@@ -683,7 +678,7 @@ class RestClientEngineIntegrationTest {
                         else -> "TimeoutException"
                     }
                 assertThat(failure).`as`("the second call must wait for the one connection and give up").isInstanceOf(ResourceAccessException::class.java)
-                assertThat(generateSequence(failure) { it.cause.takeIf { cause -> cause !== it } }.map { it.javaClass.simpleName }.toList())
+                assertThat(causeNames(failure))
                     .`as`("the %s engine's bound on the wait for a connection", engine)
                     .contains(bound)
                 wireMock.verify(0, getRequestedFor(urlEqualTo("/second")))
@@ -698,17 +693,24 @@ class RestClientEngineIntegrationTest {
             //   is full, where the kernel drops further connection attempts instead of answering them.
             // Success criteria: with the default 100 ms connect timeout, a 30 s budget and an 8.4 s response
             //   timeout, the call fails within 2 s but not before the 100 ms, with the engine's own connect-timeout
-            //   exception in its cause chain - a refused connect would fail at once and prove nothing.
+            //   exception in its cause chain - a refused connect would fail at once and prove nothing; on CI the
+            //   case may not skip itself.
             // Why it matters: the TimeLimiter's margin over the response timeout is computed from this timeout;
             //   an engine on its own default (seconds to minutes) would hold the worker in the connect far past
             //   the margin, and the mesh ladder would be wrong for that engine.
             //
             // Given
-            BlackholeBackend.open().use { blackhole ->
+            UnansweredConnectBackend().use { backend ->
+                // Skipped where the kernel refuses instead of dropping - but never silently on CI, where the case
+                // must run: a skip there would leave the connect timeout of every engine unchecked.
+                if (System.getenv("CI") == "true") {
+                    assertThat(backend.saturated).`as`("the CI runner must be able to hold a connect open").isTrue()
+                }
+                assumeTrue(backend.saturated, "the kernel answered every connect to the full backlog - no way to hold a connect open here")
                 val factory =
                     newFactory(
                         RestClientProperties.Engine(default = engine),
-                        mesh = meshAt(blackhole.authority, "unreachable", individualRequestTimeoutMs = 8_000),
+                        mesh = meshAt(backend.authority, "unreachable", individualRequestTimeoutMs = 8_000),
                     )
                 val client = factory.create("unreachable")
 
@@ -730,14 +732,14 @@ class RestClientEngineIntegrationTest {
         fun `should let an in-flight exchange finish before closing the engine`(engine: RestClientEngine) {
             // What is tested: the drain of shutdown() on each engine, on a real clock.
             // Success criteria: a call whose backend answers 500 ms after shutdown() was entered SUCCEEDS with the
-            //   backend's value; shutdown() waited at least 100 ms; no "did not drain" / "did not terminate" WARN.
+            //   backend's value; shutdown() waited at least 100 ms; no "did not drain" WARN.
             // Why it matters: closing an engine cuts its in-flight exchanges; without the wait a graceful shutdown
             //   would fail every call still on the wire. Apache's drain has its own cases; the other three engines
             //   drain by other routes (Jetty's and Reactor Netty's counters, the JDK's awaitTermination).
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/finishing")).willReturn(okJson("""{"message":"finished"}""").withFixedDelay(500)))
-            val arrived = arrivalOf("/finishing")
+            val arrived = arrivals.arrivalOf("/finishing")
             val factory = newFactory(RestClientProperties.Engine(default = engine))
             val client = factory.create("greet")
             val inFlight = callers.submit<Greeting> { client.get(Greeting::class.java) { it.uri("/finishing") } }
@@ -763,15 +765,14 @@ class RestClientEngineIntegrationTest {
             //   call of the same backend waiting for it (on the JDK client, whose pool is unbounded, on a
             //   connection of its own).
             // Success criteria: BOTH calls succeed with the backend's answer; shutdown() raises nothing; no
-            //   "did not drain" / "did not terminate" WARN.
+            //   "did not drain" WARN.
             // Why it matters: a call queued for a connection is in flight for its caller as much as one on the
             //   wire. A drain that counts only the connections handed out could close the pool in the moment the
-            //   first call gives its connection back, before the waiting one has taken it - the reactive engines
-            //   failed such a call before their release waited for it.
+            //   first call gives its connection back, before the waiting one has taken it, and fail that call.
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/queued")).willReturn(okJson("""{"message":"served"}""").withFixedDelay(500)))
-            val arrived = arrivalOf("/queued")
+            val arrived = arrivals.arrivalOf("/queued")
             val bulkheads = BulkheadRegistry.ofDefaults()
             val mesh =
                 MeshProperties(
@@ -793,9 +794,9 @@ class RestClientEngineIntegrationTest {
             assertThat(arrived.await(5, TimeUnit.SECONDS)).`as`("the first request reached the backend").isTrue()
             val second = callers.submit<Greeting> { client.get(Greeting::class.java) { it.uri("/queued") } }
             val bulkhead = bulkheads.bulkhead("queued")
-            awaitCondition("the second call must have started its exchange") {
-                bulkhead.metrics.availableConcurrentCalls == bulkhead.bulkheadConfig.maxConcurrentCalls - 2
-            }
+            assertThat(
+                eventually(PROMPTLY) { bulkhead.metrics.availableConcurrentCalls == bulkhead.bulkheadConfig.maxConcurrentCalls - 2 },
+            ).`as`("the second call must have started its exchange within %s", PROMPTLY).isTrue()
 
             capturingFactoryWarnings { warnings ->
                 // When
@@ -815,13 +816,13 @@ class RestClientEngineIntegrationTest {
             // What is tested: the deadline branch of each engine's shutdown, on a clock that is past the deadline
             //   at its next read.
             // Success criteria: with an exchange in flight, shutdown() returns without an exception, writes one WARN
-            //   naming the engine's pool or client and the window, and the engine reports itself closed within 2 s.
+            //   naming the engine and the window, and the engine reports itself closed within 2 s.
             // Why it matters: the line is the only trace of a shutdown that cut calls off; it is unreachable on a
             //   real clock short of a call longer than every response timeout.
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("{}").withFixedDelay(3_000)))
-            val arrived = arrivalOf("/slow")
+            val arrived = arrivals.arrivalOf("/slow")
             val factory =
                 newFactory(
                     RestClientProperties.Engine(default = engine),
@@ -839,9 +840,11 @@ class RestClientEngineIntegrationTest {
 
                 // Then
                 assertThat(outcome).isNull()
-                assertThat(warnings().single()).contains(engineResourceName(engine), "within ")
+                assertThat(warnings().single()).contains("'${engine.key}'", "within ")
                 // The JDK client terminates its own threads after shutdownNow() returned.
-                awaitCondition("the $engine engine must report itself closed") { transport.isClosed }
+                assertThat(eventually(PROMPTLY) { transport.isClosed })
+                    .`as`("the %s engine must report itself closed within %s", engine, PROMPTLY)
+                    .isTrue()
             }
             inFlight.get(10, TimeUnit.SECONDS)
         }
@@ -858,7 +861,7 @@ class RestClientEngineIntegrationTest {
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("{}").withFixedDelay(3_000)))
-            val arrived = arrivalOf("/slow")
+            val arrived = arrivals.arrivalOf("/slow")
             val factory = newFactory(RestClientProperties.Engine(default = engine), mesh = mesh("greet", individualRequestTimeoutMs = 8_000))
             val client = factory.create("greet")
             val inFlight = callers.submit<Throwable?> { catchThrowable { client.get(Greeting::class.java) { it.uri("/slow") } } }
@@ -875,7 +878,7 @@ class RestClientEngineIntegrationTest {
 
                 // Then
                 assertThat(shutdown.get(PROMPTLY.toMillis(), TimeUnit.MILLISECONDS)).`as`("the interrupt flag must survive").isTrue()
-                assertThat(warnings().single()).contains(engineResourceName(engine), "because the shutdown thread was interrupted")
+                assertThat(warnings().single()).contains("'${engine.key}'", "because the shutdown thread was interrupted")
             }
             inFlight.get(10, TimeUnit.SECONDS)
         }
@@ -955,8 +958,9 @@ class RestClientEngineIntegrationTest {
         @Test
         fun `should refuse the JDK engine for a backend whose Host the JDK would replace, naming the key`() {
             // What is tested: the fail-fast check of the JDK engine against its restricted Host header.
-            // Success criteria: constructing the factory fails with IllegalStateException naming the override
-            //   key, the Host the JDK would send instead, and the three ways out.
+            // Success criteria: in a JVM whose JDK client refuses the header, constructing the factory fails with
+            //   IllegalArgumentException naming the override key, the Host the JDK would send instead, and the three
+            //   ways out.
             // Why it matters: the JDK client silently sends the base URL's authority (`localhost:<port>`) instead;
             //   behind a sidecar every call would be routed by the wrong host. Only a failed start makes that a
             //   configuration error instead of a production incident.
@@ -965,8 +969,8 @@ class RestClientEngineIntegrationTest {
             val engines = RestClientProperties.Engine(endpoints = mapOf("hosted" to RestClientEngine.JDK))
 
             // When / Then
-            assertThatThrownBy { newFactory(engines, mesh = mesh("hosted", host = "api.example.com")) }
-                .isInstanceOf(IllegalStateException::class.java)
+            assertThatThrownBy { newFactory(engines, mesh = mesh("hosted", host = "api.example.com"), jdkAllowsHostHeader = { false }) }
+                .isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContainingAll(
                     "app.restclient.engine.endpoints.hosted",
                     "instead of 'api.example.com'",
@@ -977,8 +981,9 @@ class RestClientEngineIntegrationTest {
 
         @Test
         fun `should see no conflict when the JVM allows the Host header or the base URL already names the host`() {
-            // What is tested: the two ways the JDK conflict check lets a backend pass - the JVM-wide property set
-            //   by the host, and a base URL whose authority IS the Host (default port omitted, as the JDK does).
+            // What is tested: the two ways the JDK conflict check lets a backend pass - a JDK client that accepts the
+            //   header (the JVM-wide property set by the host), and a base URL whose authority IS the Host (default
+            //   port omitted, as the JDK does).
             // Success criteria: hostHeaderConflict is null for both, and names the JDK's Host for the plain
             //   sidecar case.
             // Why it matters: a check that refused these would push a host off the JDK engine for no reason; one
@@ -989,9 +994,9 @@ class RestClientEngineIntegrationTest {
             val direct = behindSidecar.copy(baseUrl = "http://API.example.com")
 
             // When / Then
-            assertThat(JdkEngineTransport.hostHeaderConflict(behindSidecar, null)).contains("'${localAuthority()}'")
-            assertThat(JdkEngineTransport.hostHeaderConflict(behindSidecar, "connection, host")).isNull()
-            assertThat(JdkEngineTransport.hostHeaderConflict(direct, null)).isNull()
+            assertThat(JdkEngineTransport.hostHeaderConflict(behindSidecar, hostAllowed = false)).contains("'${localAuthority()}'")
+            assertThat(JdkEngineTransport.hostHeaderConflict(behindSidecar, hostAllowed = true)).isNull()
+            assertThat(JdkEngineTransport.hostHeaderConflict(direct, hostAllowed = false)).isNull()
         }
     }
 
@@ -1046,7 +1051,7 @@ class RestClientEngineIntegrationTest {
         @Test
         fun `should refuse an override for an alias that is no mesh endpoint, naming the key`() {
             // What is tested: typo protection on the override keys.
-            // Success criteria: constructing the factory fails with IllegalStateException naming the full key and
+            // Success criteria: constructing the factory fails with IllegalArgumentException naming the full key and
             //   listing the known aliases.
             // Why it matters: a mistyped alias would otherwise leave the intended backend on the default engine
             //   without a word - the trial would seem to run and measure nothing.
@@ -1056,7 +1061,7 @@ class RestClientEngineIntegrationTest {
 
             // When / Then
             assertThatThrownBy { newFactory(engines, mesh = mesh("trial")) }
-                .isInstanceOf(IllegalStateException::class.java)
+                .isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContainingAll("app.restclient.engine.endpoints.tiral", "names no mesh endpoint", "[trial]")
         }
 
@@ -1075,7 +1080,7 @@ class RestClientEngineIntegrationTest {
             // When / Then
             assertThatThrownBy {
                 newFactory(RestClientProperties.Engine(default = RestClientEngine.JETTY), engineLibraryPresent = jettyMissing)
-            }.isInstanceOf(IllegalStateException::class.java)
+            }.isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContainingAll("app.restclient.engine.default", "'jetty'", "greet", "org.eclipse.jetty:jetty-client")
             assertThat(newFactory(RestClientProperties.Engine(), engineLibraryPresent = jettyMissing).engineTransports.keys)
                 .containsExactly(RestClientEngine.APACHE)
@@ -1125,7 +1130,7 @@ class RestClientEngineIntegrationTest {
             //
             // Given: a call held for a second by the backend
             wireMock.stubFor(get(urlEqualTo("/held")).willReturn(okJson("""{"message":"held"}""").withFixedDelay(1_000)))
-            val arrived = arrivalOf("/held")
+            val arrived = arrivals.arrivalOf("/held")
             val meters = SimpleMeterRegistry()
             val client = newFactory(RestClientProperties.Engine(default = RestClientEngine.REACTOR_NETTY), meterRegistry = meters).create("greet")
             val gauge = { suffix: String ->
@@ -1154,7 +1159,7 @@ class RestClientEngineIntegrationTest {
                     ".max.pending.connections" to 200,
                 ),
             )
-            assertThat(holdsWithinPromptly { gauge(".active.connections") == 0 && gauge(".idle.connections") == 1 })
+            assertThat(eventually(PROMPTLY) { gauge(".active.connections") == 0 && gauge(".idle.connections") == 1 })
                 .`as`("the connection must be back in the pool, idle")
                 .isTrue()
         }
@@ -1177,7 +1182,7 @@ class RestClientEngineIntegrationTest {
             logger.addAppender(lines)
             try {
                 // When
-                val (failure, elapsed) = timed { transport.awaitDisposal("connection pool", Mono.never(), logger, Duration.ofMillis(100)) }
+                val (failure, elapsed) = timed { transport.awaitDisposal(what = "connection pool", disposal = Mono.never(), logger = logger, wait = Duration.ofMillis(100)) }
 
                 // Then
                 assertThat(failure).isNull()
@@ -1186,7 +1191,7 @@ class RestClientEngineIntegrationTest {
                     .isEqualTo("HTTP engine 'reactor-netty': connection pool not disposed within PT0.1S - leaving it to finish on its own")
             } finally {
                 logger.detachAppender(lines)
-                transport.shutdown(System.nanoTime(), System::nanoTime, Duration.ZERO, logger)
+                transport.shutdown(deadlineNanos = System.nanoTime(), nanoTime = System::nanoTime, window = Duration.ZERO, logger = logger)
             }
         }
 
@@ -1309,7 +1314,8 @@ class RestClientEngineIntegrationTest {
         bulkheads: BulkheadRegistry = BulkheadRegistry.ofDefaults(),
         maxInMemorySize: DataSize = RestClientProperties().maxInMemorySize,
         meterRegistry: MeterRegistry? = null,
-        engineLibraryPresent: (RestClientEngine) -> Boolean = RestClientEngine::isPresent,
+        engineLibraryPresent: (RestClientEngine) -> Boolean = { it.isPresent() },
+        jdkAllowsHostHeader: () -> Boolean = EngineSelection::jdkAllowsHostHeader,
         nanoTime: () -> Long = System::nanoTime,
     ): ResilientRestClientFactory {
         val resilience =
@@ -1325,6 +1331,7 @@ class RestClientEngineIntegrationTest {
             // the factory in a context).
             restClientBuilder = RestClient.builder(),
             engineLibraryPresent = engineLibraryPresent,
+            jdkAllowsHostHeader = jdkAllowsHostHeader,
             nanoTime = nanoTime,
         ).also { factories += it }
     }
@@ -1340,12 +1347,14 @@ class RestClientEngineIntegrationTest {
         backend: String,
     ) {
         val bulkhead = bulkheads.bulkhead(backend)
-        awaitCondition("the abandoned exchange on $engine must release its bulkhead permit") {
-            bulkhead.metrics.availableConcurrentCalls == bulkhead.bulkheadConfig.maxConcurrentCalls
-        }
+        assertThat(eventually(PROMPTLY) { bulkhead.metrics.availableConcurrentCalls == bulkhead.bulkheadConfig.maxConcurrentCalls })
+            .`as`("the abandoned exchange on %s must release its bulkhead permit within %s", engine, PROMPTLY)
+            .isTrue()
         val transport = factory.engineTransports.getValue(engine)
         if (transport.connectionsInUse() != null) {
-            awaitCondition("the abandoned exchange on $engine must release its connection") { transport.connectionsInUse() == 0 }
+            assertThat(eventually(PROMPTLY) { transport.connectionsInUse() == 0 })
+                .`as`("the abandoned exchange on %s must release its connection within %s", engine, PROMPTLY)
+                .isTrue()
         }
     }
 
@@ -1365,192 +1374,18 @@ class RestClientEngineIntegrationTest {
         )
 
     /**
-     * A backend that answers every request with a 200 declaring a 1 MiB body, sends the head and the first 4 KiB
-     * at once and then one byte every 200 ms - a body that is still arriving long after any test is over, unless
-     * the client drops the connection, which [connectionDropped] reports. WireMock's dribble cannot stand in: it
-     * hands the body to its output buffer, and the head reaches the wire only once that buffer is full.
+     * Captures the factory's WARN lines for [block], which reads them through the function it is given - from any
+     * thread, as a shutdown may run on a caller thread.
      */
-    private class DrippingBackend(
-        /** Close the connection after the first 4 KiB instead of dripping on - a peer that cuts the body off. */
-        private val cutAfterFirstChunk: Boolean = false,
-    ) : AutoCloseable {
-        private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
-        val authority: String = "localhost:${server.localPort}"
-        val connectionDropped = CountDownLatch(1)
-
-        init {
-            thread(isDaemon = true, name = "dripping-backend-acceptor") {
-                try {
-                    while (true) {
-                        val socket = server.accept()
-                        thread(isDaemon = true, name = "dripping-backend-connection") { drip(socket) }
-                    }
-                } catch (_: IOException) {
-                    // The server socket was closed - the test is over.
-                }
-            }
-        }
-
-        private fun drip(socket: Socket) =
-            socket.use { connection ->
-                try {
-                    val request = connection.getInputStream().bufferedReader(Charsets.ISO_8859_1)
-                    while (request.readLine().orEmpty().isNotEmpty()) {
-                        // The request head, up to its empty line; the GET carries no body.
-                    }
-                    val out = connection.getOutputStream()
-                    out.write(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${1024 * 1024}\r\n\r\n"
-                            .toByteArray(Charsets.ISO_8859_1),
-                    )
-                    out.write(ByteArray(4096) { 'z'.code.toByte() })
-                    out.flush()
-                    if (cutAfterFirstChunk) return@use
-                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
-                    while (System.nanoTime() < deadline) {
-                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(200))
-                        out.write('z'.code)
-                        out.flush()
-                    }
-                } catch (_: IOException) {
-                    // The client went away - what the test waits for.
-                    connectionDropped.countDown()
-                }
-            }
-
-        override fun close() = server.close()
-    }
-
-    /**
-     * A backend that answers every request with a small 200, keeping the connection alive, and counts the
-     * connections it accepted - what tells one shared pool from a pool per backend. WireMock cannot say this: it
-     * reports requests, not connections. The twin of the reactive module's backend of the same name.
-     */
-    private class AnsweringBackend : AutoCloseable {
-        private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
-        val authority: String = "${server.inetAddress.hostAddress}:${server.localPort}"
-
-        /** The connections the backend accepted so far. */
-        val connections = AtomicInteger()
-
-        private val accepted = CopyOnWriteArrayList<Socket>()
-
-        init {
-            thread(isDaemon = true, name = "answering-backend-acceptor") {
-                try {
-                    while (true) {
-                        val socket = server.accept()
-                        connections.incrementAndGet()
-                        accepted += socket
-                        thread(isDaemon = true, name = "answering-backend-connection") { answer(socket) }
-                    }
-                } catch (_: IOException) {
-                    // The server socket was closed - the test is over.
-                }
-            }
-        }
-
-        private fun answer(socket: Socket) =
-            socket.use { connection ->
-                val body = """{"message":"hi"}""".toByteArray()
-                val head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\n\r\n"
-                try {
-                    val request = connection.getInputStream().bufferedReader(Charsets.ISO_8859_1)
-                    while (true) {
-                        // One request head per call, up to its empty line; the GETs carry no body.
-                        val first = request.readLine() ?: return@use
-                        if (first.isEmpty()) continue
-                        while (request.readLine().orEmpty().isNotEmpty()) {
-                            // The rest of the head.
-                        }
-                        connection.getOutputStream().apply {
-                            write(head.toByteArray(Charsets.ISO_8859_1))
-                            write(body)
-                            flush()
-                        }
-                    }
-                } catch (_: IOException) {
-                    // The client closed the connection.
-                }
-            }
-
-        override fun close() {
-            server.close()
-            accepted.forEach { it.close() }
-        }
-    }
-
-    /**
-     * A listening socket whose accept queue is full, so the kernel drops further SYNs and a connect to it hangs
-     * until the client's own connect timeout. Filled by plain connects until one of them times out itself.
-     */
-    private class BlackholeBackend private constructor(
-        private val server: ServerSocket,
-        private val fillers: List<Socket>,
-    ) : AutoCloseable {
-        /**
-         * The loopback ADDRESS the socket listens on, never `localhost`: that name may resolve to `::1` first,
-         * where nothing listens, and an engine would get a refused connect at once instead of the dropped one -
-         * the case would be green without its connect timeout ever running.
-         */
-        val authority: String = "${server.inetAddress.hostAddress}:${server.localPort}"
-
-        override fun close() {
-            fillers.forEach { it.close() }
-            server.close()
-        }
-
-        companion object {
-            fun open(): BlackholeBackend {
-                val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress())
-                val fillers = mutableListOf<Socket>()
-                repeat(64) {
-                    val socket = Socket()
-                    try {
-                        socket.connect(InetSocketAddress(server.inetAddress, server.localPort), 200)
-                        fillers += socket
-                    } catch (_: IOException) {
-                        socket.close()
-                        return BlackholeBackend(server, fillers)
-                    }
-                }
-                fillers.forEach { it.close() }
-                server.close()
-                error("the accept queue of a backlog-1 socket never filled - no blackhole on this platform")
-            }
-        }
-    }
-
-    /** The pool or client name each engine's shutdown line names. */
-    private fun engineResourceName(engine: RestClientEngine): String =
-        when (engine) {
-            RestClientEngine.APACHE -> RestClientMetrics.POOL_NAME
-            RestClientEngine.JDK -> JdkEngineTransport.CLIENT_NAME
-            RestClientEngine.JETTY -> JettyEngineTransport.POOL_NAME
-            RestClientEngine.REACTOR_NETTY -> ReactorNettyEngineTransport.POOL_NAME
-        }
-
-    /** Captures the factory's WARN lines for [block], which reads them through the function it is given. */
     private fun capturingFactoryWarnings(block: (warnings: () -> List<String>) -> Unit) {
         val logger = LoggerFactory.getLogger(ResilientRestClientFactory::class.java) as Logger
-        val lines = ListAppender<ILoggingEvent>().apply { start() }
+        val lines = CapturingAppender { it.level == Level.WARN }.apply { start() }
         logger.addAppender(lines)
         try {
-            block {
-                lines.list
-                    .toList()
-                    .filter { it.level == ch.qos.logback.classic.Level.WARN }
-                    .map { it.formattedMessage }
-            }
+            block { lines.events.map { it.formattedMessage } }
         } finally {
             logger.detachAppender(lines)
         }
-    }
-
-    /** A monotonic clock that leaps by [stepNanos] on every read, so a deadline computed from it is past by the next read. */
-    private fun leapingClock(stepNanos: Long): () -> Long {
-        val now = AtomicLong()
-        return { now.addAndGet(stepNanos) }
     }
 
     /**
@@ -1558,7 +1393,7 @@ class RestClientEngineIntegrationTest {
      * (Apache, Reactor Netty), `HttpConnectTimeoutException` (JDK), or Jetty's `SocketTimeoutException` "Connect Timeout".
      */
     private fun isConnectTimeout(failure: Throwable?): Boolean =
-        generateSequence(failure) { it.cause.takeIf { cause -> cause !== it } }.any { cause ->
+        causeChain(failure).any { cause ->
             cause.javaClass.simpleName in setOf("ConnectTimeoutException", "HttpConnectTimeoutException") ||
                 (cause is SocketTimeoutException && cause.message == "Connect Timeout")
         }
@@ -1569,36 +1404,4 @@ class RestClientEngineIntegrationTest {
         val failure = catchThrowable(call)
         return failure to Duration.ofNanos(System.nanoTime() - startNanos)
     }
-
-    /** Whether [condition] holds within [PROMPTLY], polled every 10 ms - the bounded wait for a state another thread reaches. */
-    private fun holdsWithinPromptly(condition: () -> Boolean): Boolean {
-        val deadline = System.nanoTime() + PROMPTLY.toNanos()
-        while (!condition()) {
-            if (System.nanoTime() - deadline > 0) return false
-            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10))
-        }
-        return true
-    }
-
-    /** Polls [condition] every 10 ms for at most [PROMPTLY], failing with [description] - for states only a reading exposes. */
-    private fun awaitCondition(
-        description: String,
-        condition: () -> Boolean,
-    ) {
-        val deadline = System.nanoTime() + PROMPTLY.toNanos()
-        while (!condition()) {
-            assertThat(System.nanoTime()).`as`("$description within $PROMPTLY").isLessThan(deadline)
-            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10))
-        }
-    }
-
-    /** Response DTO with a no-arg constructor: the client's Jackson mapper has no Kotlin module. */
-    class Greeting {
-        var message: String? = null
-    }
-
-    /** Request DTO, serialised through its getter. */
-    class LookupRequest(
-        val id: String,
-    )
 }

@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.core.resilience
 
+import eu.inqudium.veredium.core.resilience.TestMesh.ACCOUNTS_ALIAS
 import io.github.resilience4j.bulkhead.Bulkhead
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
@@ -23,7 +24,6 @@ import org.junit.jupiter.api.Test
 import org.slf4j.MDC
 import java.time.Duration
 import java.util.Optional
-import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
@@ -56,8 +56,6 @@ import java.util.concurrent.atomic.AtomicReference
  * production comment records it as a safety net for exactly such a change.
  */
 class BlockingResilienceDecoratorTest {
-    private val alias = "api-example-com-GET-accounts"
-
     /** Decorators built during a test; their worker executors are shut down in [tearDown]. */
     private val decorators = mutableListOf<BlockingResilienceDecorator>()
 
@@ -87,7 +85,7 @@ class BlockingResilienceDecoratorTest {
             val caller = Thread.currentThread()
 
             // When
-            val worker = decorator.decorate(alias) { Thread.currentThread() }
+            val worker = decorator.decorate(ACCOUNTS_ALIAS) { Thread.currentThread() }
 
             // Then
             assertThat(worker).isNotSameAs(caller)
@@ -106,14 +104,14 @@ class BlockingResilienceDecoratorTest {
             //
             // Given / When / Then
             val decorator = decorator(workerNamePrefix = "ledger-call-")
-            val worker = decorator.decorate(alias) { Thread.currentThread() }
+            val worker = decorator.decorate(ACCOUNTS_ALIAS) { Thread.currentThread() }
             assertThat(worker.name).startsWith("ledger-call-")
         }
 
         @Test
         fun `should hand the caller's MDC to the worker`() {
-            // What is tested: consequence 2 of the hand-off - a key the caller put in its MDC is visible on the
-            //   worker while the call runs.
+            // What is tested: the caller's context crossing the hand-off - a key the caller put in its MDC is
+            //   visible on the worker while the call runs.
             // Success criteria: the call reads the key on the worker and gets the caller's value. (That the
             //   worker's MDC is put back afterwards cannot be observed here - every worker is a fresh virtual
             //   thread; the restoration test below runs the same wrapper on a reused thread.)
@@ -126,7 +124,7 @@ class BlockingResilienceDecoratorTest {
             MDC.put("CORRELATION_ID", "Out:7cc0270abf0da42c")
             try {
                 // When
-                val seenOnWorker = decorator.decorate(alias) { MDC.get("CORRELATION_ID") }
+                val seenOnWorker = decorator.decorate(ACCOUNTS_ALIAS) { MDC.get("CORRELATION_ID") }
 
                 // Then
                 assertThat(seenOnWorker).isEqualTo("Out:7cc0270abf0da42c")
@@ -137,14 +135,14 @@ class BlockingResilienceDecoratorTest {
 
         @Test
         fun `should restore the running thread's own MDC once the call is over, on a reused thread`() {
-            // What is tested: the restoration half of consequence 2 - the context wrapper the decorator puts
+            // What is tested: the restoration half of the context hand-off - the context wrapper the decorator puts
             //   around every call (`propagate`), run on a platform thread that is REUSED and has an MDC of its
             //   own, once with a caller MDC and once with none.
             // Success criteria: during the call the thread sees exactly the caller's MDC (its own key hidden, or
             //   nothing when the caller had none); after each call the same thread has its own MDC back, and the
             //   caller's key is gone from it.
             // Why it matters: the decorator's workers are fresh virtual threads, so no end-to-end test can tell a
-            //   wrapper that restores from one that leaks - deleting the `finally` restoration stayed green. The
+            //   wrapper that restores from one that leaks - they pass with the `finally` restoration deleted. The
             //   wrapper must not rely on that executor: on any thread that runs it twice, a missing restoration
             //   hands one request's correlation id to the next request's log lines.
             //
@@ -186,13 +184,13 @@ class BlockingResilienceDecoratorTest {
             // Given / When / Then: no leakage of anything into a call made without context
             val decorator = decorator()
             MDC.clear()
-            val seenOnWorker = decorator.decorate(alias) { MDC.getCopyOfContextMap().orEmpty() }
+            val seenOnWorker = decorator.decorate(ACCOUNTS_ALIAS) { MDC.getCopyOfContextMap().orEmpty() }
             assertThat(seenOnWorker).isEmpty()
         }
 
         @Test
         fun `should reopen the caller's current observation on the worker`() {
-            // What is tested: the observation half of consequence 2 - inside the call, the registry's current
+            // What is tested: the observation half of the context hand-off - inside the call, the registry's current
             //   observation is the one the CALLER had open, so Spring's http.client.requests observation (opened
             //   on the worker) nests under it instead of starting a detached root.
             // Success criteria: the call returns the registry's current observation as seen on the worker,
@@ -201,15 +199,15 @@ class BlockingResilienceDecoratorTest {
             //   invisible in any test that does not look - the call succeeds either way - and only shows up as
             //   broken traces in a trace viewer.
             //
-            // Given: a recording registry and a parent observation open on the test thread
-            val registry = ObservationRegistry.create().apply { observationConfig().observationHandler(RecordingHandler()) }
+            // Given: a live registry and a parent observation open on the test thread
+            val registry = ObservationRegistry.create().apply { observationConfig().observationHandler(AcceptAllHandler()) }
             val decorator = decorator(observationRegistry = registry)
             val parent = Observation.start("inbound.server", registry)
 
             // When: the call runs inside the parent's scope
             val seenOnWorker =
                 parent.openScope().use {
-                    decorator.decorate(alias) { Optional.ofNullable(registry.currentObservation) }
+                    decorator.decorate(ACCOUNTS_ALIAS) { Optional.ofNullable(registry.currentObservation) }
                 }
             parent.stop()
 
@@ -229,8 +227,8 @@ class BlockingResilienceDecoratorTest {
             //   workers the leak is invisible - a second call starts on a new thread - so only a reused thread can
             //   show that the scope is closed at all.
             //
-            // Given: a recording registry, a parent observation captured on the test thread, a reused thread
-            val registry = ObservationRegistry.create().apply { observationConfig().observationHandler(RecordingHandler()) }
+            // Given: a live registry, a parent observation captured on the test thread, a reused thread
+            val registry = ObservationRegistry.create().apply { observationConfig().observationHandler(AcceptAllHandler()) }
             val decorator = decorator(observationRegistry = registry)
             val parent = Observation.start("inbound.server", registry)
             val wrapped = parent.openScope().use { decorator.propagate { Optional.ofNullable(registry.currentObservation) } }
@@ -269,11 +267,11 @@ class BlockingResilienceDecoratorTest {
             val failure = IllegalStateException("backend exploded")
 
             // When
-            val thrown = catchThrowable { decorator.decorate<String>(alias) { throw failure } }
+            val thrown = catchThrowable { decorator.decorate<String>(ACCOUNTS_ALIAS) { throw failure } }
 
             // Then: the same instance, and the breaker counted it
             assertThat(thrown).isSameAs(failure)
-            assertThat(circuitBreakers.circuitBreaker(alias).metrics.numberOfFailedCalls).isEqualTo(1)
+            assertThat(circuitBreakers.circuitBreaker(ACCOUNTS_ALIAS).metrics.numberOfFailedCalls).isEqualTo(1)
         }
 
         @Test
@@ -292,7 +290,7 @@ class BlockingResilienceDecoratorTest {
             val release = CountDownLatch(1)
             val holding =
                 callers.submit<String> {
-                    decorator.decorate(alias) {
+                    decorator.decorate(ACCOUNTS_ALIAS) {
                         entered.countDown()
                         release.await()
                         "held"
@@ -302,7 +300,7 @@ class BlockingResilienceDecoratorTest {
 
             try {
                 // When
-                val rejection = catchThrowable { decorator.decorate<String>(alias) { "second" } }
+                val rejection = catchThrowable { decorator.decorate<String>(ACCOUNTS_ALIAS) { "second" } }
 
                 // Then
                 assertThat(rejection).isInstanceOf(BulkheadFullException::class.java)
@@ -331,7 +329,7 @@ class BlockingResilienceDecoratorTest {
             // When
             val thrown =
                 catchThrowable {
-                    decorator.decorate<String>(alias) {
+                    decorator.decorate<String>(ACCOUNTS_ALIAS) {
                         try {
                             release.await()
                         } catch (e: InterruptedException) {
@@ -345,7 +343,7 @@ class BlockingResilienceDecoratorTest {
             // Then
             assertThat(thrown).isInstanceOf(TimeoutException::class.java)
             assertThat(workerInterrupted.await(5, TimeUnit.SECONDS)).`as`("the abandoned worker must be interrupted").isTrue()
-            assertThat(circuitBreakers.circuitBreaker(alias).metrics.numberOfFailedCalls).isEqualTo(1)
+            assertThat(circuitBreakers.circuitBreaker(ACCOUNTS_ALIAS).metrics.numberOfFailedCalls).isEqualTo(1)
         }
 
         @Test
@@ -369,7 +367,7 @@ class BlockingResilienceDecoratorTest {
                 callers.submit<Throwable?> {
                     callerThread.set(Thread.currentThread())
                     catchThrowable {
-                        decorator.decorate<String>(alias) {
+                        decorator.decorate<String>(ACCOUNTS_ALIAS) {
                             entered.countDown()
                             try {
                                 release.await()
@@ -404,13 +402,13 @@ class BlockingResilienceDecoratorTest {
             // Given: a breaker forced open
             val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
             val decorator = decorator(circuitBreakers = circuitBreakers)
-            circuitBreakers.circuitBreaker(alias).transitionToOpenState()
+            circuitBreakers.circuitBreaker(ACCOUNTS_ALIAS).transitionToOpenState()
             val ran = AtomicBoolean(false)
 
             // When
             val thrown =
                 catchThrowable {
-                    decorator.decorate<String>(alias) {
+                    decorator.decorate<String>(ACCOUNTS_ALIAS) {
                         ran.set(true)
                         "never"
                     }
@@ -419,7 +417,7 @@ class BlockingResilienceDecoratorTest {
             // Then
             assertThat(thrown).isInstanceOf(CallNotPermittedException::class.java)
             assertThat(ran).isFalse()
-            assertThat(circuitBreakers.circuitBreaker(alias).state).isEqualTo(CircuitBreaker.State.OPEN)
+            assertThat(circuitBreakers.circuitBreaker(ACCOUNTS_ALIAS).state).isEqualTo(CircuitBreaker.State.OPEN)
         }
 
         @Test
@@ -509,7 +507,7 @@ class BlockingResilienceDecoratorTest {
             // Given / When / Then
             val decorator = decorator()
             val error = AssertionError("invariant broken on the worker")
-            val thrown = catchThrowable { decorator.decorate<String>(alias) { throw error } }
+            val thrown = catchThrowable { decorator.decorate<String>(ACCOUNTS_ALIAS) { throw error } }
             assertThat(thrown).isSameAs(error)
         }
     }
@@ -533,7 +531,7 @@ class BlockingResilienceDecoratorTest {
 
             // When
             val future =
-                decorator.decorateAsync(alias) {
+                decorator.decorateAsync(ACCOUNTS_ALIAS) {
                     entered.countDown()
                     release.await()
                     Thread.currentThread()
@@ -565,14 +563,14 @@ class BlockingResilienceDecoratorTest {
             val failure = IllegalStateException("backend exploded")
 
             // When
-            val future = decorator.decorateAsync<String>(alias) { throw failure }
+            val future = decorator.decorateAsync<String>(ACCOUNTS_ALIAS) { throw failure }
             val seenByHandler = future.handle { _, t -> t }.get(5, TimeUnit.SECONDS)
             val thrownByGet = catchThrowable { future.get(5, TimeUnit.SECONDS) }
 
             // Then
             assertThat(seenByHandler).isSameAs(failure)
             assertThat(thrownByGet).isInstanceOf(ExecutionException::class.java).hasCause(failure)
-            assertThat(circuitBreakers.circuitBreaker(alias).metrics.numberOfFailedCalls).isEqualTo(1)
+            assertThat(circuitBreakers.circuitBreaker(ACCOUNTS_ALIAS).metrics.numberOfFailedCalls).isEqualTo(1)
         }
 
         @Test
@@ -581,15 +579,15 @@ class BlockingResilienceDecoratorTest {
             //   visible inside the call on the worker.
             // Success criteria: the call reads "Out:7cc0270abf0da42c" from the worker's MDC.
             // Why it matters: the context is captured on the thread that calls decorateAsync, not on the waiter -
-            // a waiter starts with an empty MDC, and capturing there would lose the correlation id of every
-            // asynchronous call while the blocking form keeps it.
+            //   a waiter starts with an empty MDC, and capturing there would lose the correlation id of every
+            //   asynchronous call while the blocking form keeps it.
             //
             // Given
             val decorator = decorator()
             MDC.put("CORRELATION_ID", "Out:7cc0270abf0da42c")
             try {
                 // When / Then
-                val seenOnWorker = decorator.decorateAsync(alias) { MDC.get("CORRELATION_ID") }.get(5, TimeUnit.SECONDS)
+                val seenOnWorker = decorator.decorateAsync(ACCOUNTS_ALIAS) { MDC.get("CORRELATION_ID") }.get(5, TimeUnit.SECONDS)
                 assertThat(seenOnWorker).isEqualTo("Out:7cc0270abf0da42c")
             } finally {
                 MDC.clear()
@@ -613,7 +611,7 @@ class BlockingResilienceDecoratorTest {
 
             // When
             val future =
-                decorator.decorateAsync(alias) {
+                decorator.decorateAsync(ACCOUNTS_ALIAS) {
                     try {
                         release.await()
                     } catch (e: InterruptedException) {
@@ -639,7 +637,7 @@ class BlockingResilienceDecoratorTest {
             //   failures, counted nothing.
             // Why it matters: a plain CompletableFuture's cancel() does not interrupt anything by specification,
             //   so a cancelled call would otherwise hold its permit and its connection until the budget - the
-            //   very leak the blocking form's hand-off was designed to avoid.
+            //   very leak the blocking form's hand-off avoids.
             //
             // Given: a single-permit bulkhead, a breaker ignoring the pipeline's own failures, a parked call
             val breaker =
@@ -696,7 +694,7 @@ class BlockingResilienceDecoratorTest {
             val decorator = decorator()
             val release = CountDownLatch(1)
             val future =
-                decorator.decorateAsync(alias) {
+                decorator.decorateAsync(ACCOUNTS_ALIAS) {
                     release.await()
                     "value"
                 }
@@ -718,17 +716,17 @@ class BlockingResilienceDecoratorTest {
             // Success criteria: the future's outcome is CallNotPermittedException and the call lambda never ran.
             // Why it matters: an asynchronous caller reads every outcome off the future; an open breaker that
             //   threw from decorateAsync, or still ran the call, would break that contract or the load shedding.
-
+            //
             // Given: a breaker forced open
             val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
             val decorator = decorator(circuitBreakers = circuitBreakers)
-            circuitBreakers.circuitBreaker(alias).transitionToOpenState()
+            circuitBreakers.circuitBreaker(ACCOUNTS_ALIAS).transitionToOpenState()
             val ran = AtomicBoolean(false)
 
             // When
             val outcome =
                 decorator
-                    .decorateAsync(alias) {
+                    .decorateAsync(ACCOUNTS_ALIAS) {
                         ran.set(true)
                         "never"
                     }.handle { _, t -> t }
@@ -745,14 +743,14 @@ class BlockingResilienceDecoratorTest {
             // Success criteria: decorateAsync returns a future that is already completed exceptionally with a
             //   RejectedExecutionException, instead of throwing it.
             // Why it matters: an asynchronous caller reads every outcome off the future; a refusal thrown out of
-            // decorateAsync itself would be the one failure it has to handle in a second place.
+            //   decorateAsync itself would be the one failure it has to handle in a second place.
             //
             // Given
             val decorator = decorator()
             decorator.shutdown()
 
             // When
-            val future = decorator.decorateAsync(alias) { "too late" }
+            val future = decorator.decorateAsync(ACCOUNTS_ALIAS) { "too late" }
 
             // Then
             assertThat(future.isCompletedExceptionally).isTrue()
@@ -801,7 +799,7 @@ class BlockingResilienceDecoratorTest {
         )
 
     /** Accepts every context and records nothing: its presence is what makes a registry count as live. */
-    private class RecordingHandler : ObservationHandler<Observation.Context> {
+    private class AcceptAllHandler : ObservationHandler<Observation.Context> {
         override fun supportsContext(context: Observation.Context): Boolean = true
     }
 }

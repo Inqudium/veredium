@@ -87,7 +87,7 @@ jobs:
         # `package` before the goal: a bare `dokka:dokka` runs no lifecycle, so the
         # reactor has no veredium-core jar to hand the client modules, and a fresh
         # runner has none in its local repository either.
-        run: mvn --batch-mode --no-transfer-progress -pl veredium-core,veredium-restclient,veredium-webclient -DskipTests -Djacoco.skip=true package dokka:dokka
+        run: mvn --batch-mode --no-transfer-progress -pl veredium-core,veredium-test-support,veredium-restclient,veredium-webclient -DskipTests -Djacoco.skip=true package dokka:dokka
 
       - name: Add API references to site
         run: |

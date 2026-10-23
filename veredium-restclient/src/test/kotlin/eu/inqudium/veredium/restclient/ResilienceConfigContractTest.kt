@@ -1,8 +1,9 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
-import eu.inqudium.veredium.restclient.ConfigurationFiles.FIXTURE
-import eu.inqudium.veredium.restclient.ConfigurationFiles.REFERENCE
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
+import eu.inqudium.veredium.testsupport.ConfigurationFiles.FIXTURE
+import eu.inqudium.veredium.testsupport.ConfigurationFiles.REFERENCE
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.params.ParameterizedTest

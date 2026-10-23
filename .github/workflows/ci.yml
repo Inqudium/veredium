@@ -44,8 +44,9 @@ jobs:
       - name: Check the KDoc references (Dokka, failOnWarning)
         # `package` before the goal: a bare `dokka:dokka` runs no lifecycle, so the
         # reactor has no veredium-core jar to hand the client modules, and a fresh
-        # runner has none in its local repository either.
-        run: mvn --batch-mode --no-transfer-progress -pl veredium-core,veredium-restclient,veredium-webclient -DskipTests -Djacoco.skip=true package dokka:dokka
+        # runner has none in its local repository either; veredium-test-support is
+        # listed because the client modules compile their tests against it.
+        run: mvn --batch-mode --no-transfer-progress -pl veredium-core,veredium-test-support,veredium-restclient,veredium-webclient -DskipTests -Djacoco.skip=true package dokka:dokka
 
       # Dokka reads KDoc only: a `[Symbol]` link in a `//` line comment looks
       # checked and is not - a rename leaves it standing with the authority of
@@ -53,7 +54,7 @@ jobs:
       # into the enclosing declaration's KDoc, where Dokka sees it.
       - name: Check that no line comment carries a KDoc-style [Symbol] link
         run: |
-          if grep -rnE '^\s*//.*\[[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)?\]' --include='*.kt' veredium-*/src/main; then
+          if grep -rnE '^\s*//.*\[[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)?\]' --include='*.kt' veredium-*/src/main veredium-*/src/test; then
             echo '::error::[Symbol] links in // line comments are not checked by Dokka - use backticks, or move the sentence into KDoc'
             exit 1
           fi
@@ -61,10 +62,11 @@ jobs:
       # A guide section cited by NUMBER drifts the moment a heading is inserted,
       # and nothing turns red. Cite the heading instead - it is the Markdown
       # anchor, and a rename shows up in a grep. RFC section numbers are stable
-      # and stay.
-      - name: Check that no production comment cites a guide section by number
+      # and stay. Test comments and the reference configurations count too: the
+      # rationale blocks are published on the test-evidence page.
+      - name: Check that no comment cites a guide section by number
         run: |
-          if grep -rnE '§[0-9]|\bsection [0-9]' --include='*.kt' veredium-*/src/main | grep -v 'RFC '; then
+          if grep -rnE '§[0-9]|\bsection [0-9]' --include='*.kt' --include='*.yml' veredium-*/src/main veredium-*/src/test | grep -v 'RFC '; then
             echo '::error::cite the guide section by its heading, not its number - headings are the anchors, numbers move'
             exit 1
           fi
@@ -74,12 +76,24 @@ jobs:
       # A report path or a finding number in a comment is proof-keeping that
       # ages with the next round. A bare date as a blame anchor is fine and
       # passes.
-      - name: Check that no production comment cites an assessment report
+      - name: Check that no comment cites an assessment report
         run: |
-          if grep -rnE 'docs/assessment/|(analysis|review|audit|report) of 20[0-9]{2}-|\bfinding [0-9]' --include='*.kt' veredium-*/src/main; then
+          if grep -rnE 'docs/assessment/|(analysis|review|audit|report) of 20[0-9]{2}-|\bfinding [0-9]' --include='*.kt' veredium-*/src/main veredium-*/src/test; then
             echo '::error::cite the ADR (or keep only the date), not the assessment report or its finding number'
             exit 1
           fi
+
+      # ktlint 1.8 and the Kotlin compiler leave unused imports alone; one whose
+      # name survives only in a `//` comment looks like use.
+      - name: Check that no Kotlin source has an unused import
+        run: python3 .github/scripts/check-unused-imports.py
+
+      # The rationale block of every test is published on the test-evidence page;
+      # the generator reads exactly the three labels, in order, up to a bare `//`
+      # line. A fourth label or a missing separator would publish a garbled entry
+      # after the merge - this fails the pull request instead.
+      - name: Check the shape of the test rationale blocks
+        run: python3 .github/scripts/generate-test-catalog.py --check
 
       # Repo-local script instead of a third-party reporting action (this
       # workflow pins actions to SHAs; a summary needs no new supply-chain

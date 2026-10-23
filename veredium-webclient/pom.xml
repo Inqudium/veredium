@@ -114,6 +114,15 @@
             <version>${legatium.version}</version>
         </dependency>
 
+        <!-- The test helpers both client modules share (socket backends, log capture, bounded waits, the
+             WireMock arrival listener, configuration binding, payloads, customized registries) - a build-only
+             module, never published, at test scope only. -->
+        <dependency>
+            <groupId>eu.inqudium</groupId>
+            <artifactId>veredium-test-support</artifactId>
+            <version>${revision}</version>
+            <scope>test</scope>
+        </dependency>
         <!-- JUnit 5, AssertJ and the Boot test support, like the sibling projects. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

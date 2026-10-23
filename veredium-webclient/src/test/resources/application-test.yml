@@ -25,8 +25,8 @@ logging:
         veredium: DEBUG
     # The exchange stream: one event per outbound HTTP exchange, written by legatium-webclient-logging (see the
     # adapter-logging block below). INFO = every call; WARN = only failures, timeouts, cancellations, slow
-    # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Unlike the module's former exchange diary, raising this level FILTERS
-    # the stream instead of switching it off - severity and semantics are decoupled, dashboards key on
+    # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Raising this level FILTERS the
+    # stream instead of switching it off - severity and semantics are decoupled, dashboards key on
     # adapter_outcome. Both names are pinned by LoggingLevelContractTest.
     adapter-http-exchange: INFO
     # The library's own logger: the immediate WARN breadcrumb when a call throws, and errors of the logging
@@ -46,24 +46,22 @@ adapter-logging:
   # The library's default logger name, kept so its documentation applies verbatim.
   logger-name: adapter-http-exchange
   request-headers:
-    # The former diary logged every request header; the runbook reads them (the Host header, the token's
-    # fingerprint). Everything selected is MASKED by default (masked: ["*"]); plaintext is an allowlist.
+    # Every request header is logged; the runbook reads them (the Host header, the token's fingerprint). Everything selected is MASKED by default (masked: ["*"]); plaintext is an allowlist.
     includes: ["*"]
     # Plaintext only for headers that carry no secret. Host is the second view of the backend next to
     # adapter_name. Everything else - X-Access-Token, Authorization, cookies, the unknown - stays a
-    # fingerprint (<length>:<8 bytes SHA-256 hex>), which is stricter than the diary's prefix-only masking.
+    # fingerprint (<length>:<8 bytes SHA-256 hex>).
     unmasked: ["Host", "Accept", "Content-Type", "Content-Length", "User-Agent", "traceparent", "tracestate"]
   response-headers:
     includes: ["*"]
     # Same rule. Which correlation headers the sidecar returns is not documented in this repository; they show
     # up masked first and are added here after being seen.
     unmasked: ["Content-Type", "Content-Length", "Date", "Cache-Control"]
-  # Bodies on every outcome but success (a failure, a rejected 4xx, a cancel): the diary logged every request
-  # body of a POST and every response body - customer data on every line. The error body is what the runbook
-  # needs.
+  # Bodies on every outcome but success (a failure, a rejected 4xx, a cancel): every body of every call would
+  # be customer data on every line. The error body is what the runbook needs.
   log-request-body: on-failure
   log-response-body: on-failure
-  # The default, explicit because it replaces the diary's 256 KB (which was derived from the codec limit):
+  # The default, explicit so the cap is a visible decision, independent of the codec limit:
   # 16 KB is plenty for the backends' JSON error answers. Raise it here, never via the codec limit.
   max-body-bytes: 16384
   # The adapters build their paths from templates; no token ever travels in the query.
@@ -167,12 +165,12 @@ resilience4j:
   # `instances.<name>` listed here, and the mesh customizer (veredium-core, MeshResilienceCustomizers) sets the
   # derived budget on every endpoint whose time-limiter toggle is on (the default) WHILE that instance is built.
   # An alias an endpoint uses but this block does not declare still gets an instance (Resilience4j creates one
-  # for the customizer) - on the registry default, not on lap-backend, silently; MeshResilienceStartupGuard
+  # for the customizer) - on the registry default, not on mesh-backend, silently; MeshResilienceStartupGuard
   # therefore fails the start and names the missing key. This file once declared a single instance here;
   # MeshResilienceShippedConfigTest boots the auto-configuration against it.
   timelimiter:
     configs:
-      lap-backend:
+      mesh-backend:
         # A fallback only: the mesh customizer sets every enabled instance to the derived timeout (see
         # veredium-core/docs/mesh-timeout.md), so 3s is only the fallback for an endpoint whose time-limiter
         # toggle is switched off. cancel-running-future is the Resilience4j default, written out so the budget
@@ -181,20 +179,20 @@ resilience4j:
         cancel-running-future: true
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       api-example-com-GET-v5-access-profiles-by-involved-party:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-POST-v5-involved-parties-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-GET-v6-involved-parties:
-        base-config: lap-backend
+        base-config: mesh-backend
 
   # The values below are the Resilience4j defaults, written out DELIBERATELY: making them visible and
   # reviewable is the point, and pinning them here means a library upgrade cannot change this application's
   # behaviour behind its back. Tune them against real traffic - the notes say what each one costs.
   bulkhead:
     configs:
-      lap-backend:
+      mesh-backend:
         # Bound by the SHARED connection pool, not chosen per backend: every endpoint talks to the same local
         # sidecar through one Reactor-Netty pool of app.mesh.defaults.transport.max-connections (100). With
         # four backends, 4 x 25 = 100 - the bulkheads shed load exactly as the pool runs out, rather than
@@ -212,17 +210,17 @@ resilience4j:
         max-wait-duration: 0
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       api-example-com-GET-v5-access-profiles-by-involved-party:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-POST-v5-involved-parties-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-GET-v6-involved-parties:
-        base-config: lap-backend
+        base-config: mesh-backend
 
   circuitbreaker:
     configs:
-      lap-backend:
+      mesh-backend:
         # NOTE: a bulkhead rejection is NOT counted as a backend failure - see WebClientVerdicts, whose
         # client-side-failure verdict the mesh customizer installs on every instance below while Resilience4j
         # builds it. That invariant lives in code on purpose, so it cannot be lost by an edit to this block.
@@ -245,10 +243,10 @@ resilience4j:
         slow-call-duration-threshold: 60s
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       api-example-com-GET-v5-access-profiles-by-involved-party:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-POST-v5-involved-parties-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-GET-v6-involved-parties:
-        base-config: lap-backend
+        base-config: mesh-backend

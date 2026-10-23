@@ -27,22 +27,19 @@ import java.util.function.Supplier
 /**
  * Boots Resilience4j's own Boot auto-configuration on the `resilience4j.*` and `app.mesh.*` blocks of the test
  * fixture, with the shared mesh wiring the way a client stack imports it (`TestVerdictsConfig`: the verdicts
- * bean plus `MeshTimeoutConfig` - the per-alias customizer beans, the startup guard, the ladder logger) - and
+ * bean plus `MeshResilienceConfiguration` - the per-alias customizer beans, the startup guard, the ladder logger) - and
  * pins both directions of the guard.
  *
- * 1. What is tested: that every instance the fixture declares is built WITH the mesh customizer's effect (the
- *    derived budget on each TimeLimiter, the two breaker verdicts on each CircuitBreaker), and that a
- *    configuration which does not declare an instance - or a registry the auto-configuration did not build -
- *    does not start.
- * 2. How it is deemed successful: the healthy context starts and every endpoint's instances show the
- *    customizer's effect; the two broken contexts fail with the guard's message naming the key respectively
- *    the unreached instance.
- * 3. Why it matters: a `*ConfigCustomizer` is consulted ONLY while Resilience4j's Boot configuration builds an
- *    `instances.<name>` entry. The reactive stack's configuration once declared a single TimeLimiter instance
- *    while mesh derives four; under the customizer mechanism three endpoints would then have run on the
- *    library default without a word. Only a real context shows that the keys, the derived aliases, the
- *    customizer names and the guard agree - and that the guard fails the start when they do not. Each client
- *    module boots its own fixture the same way (`MeshResilienceShippedConfigTest`), with its real verdicts.
+ * Every instance the fixture declares is built WITH the mesh customizer's effect (the derived budget on each
+ * TimeLimiter, the two breaker verdicts on each CircuitBreaker), and a configuration which does not declare an
+ * instance - or a registry the auto-configuration did not build - does not start: the guard's message names the
+ * missing key or the unreached instance.
+ *
+ * A `*ConfigCustomizer` is consulted ONLY while Resilience4j's Boot configuration builds an `instances.<name>`
+ * entry. A configuration that declares fewer TimeLimiter instances than mesh derives endpoints leaves the
+ * undeclared ones on the library default without a word. Only a real context shows that the keys, the derived
+ * aliases, the customizer names and the guard agree - and that the guard fails the start when they do not. Each
+ * client module boots its own fixture the same way (`MeshResilienceShippedConfigTest`), with its real verdicts.
  *
  * Determinism: a real context, no I/O beyond the classpath, no HTTP stack - nothing is called, only configured.
  */
@@ -57,7 +54,7 @@ class MeshResilienceContextTest {
         //   keeps the YAML's failure-rate threshold of 50.
         // Why it matters: the unit tests prove each customizer in isolation; only a real context shows that
         //   Resilience4j actually consults them by bean name and that the YAML's own policy survives them.
-
+        //
         // Given / When: the context starts on the fixture's resilience4j + app.mesh blocks
         fixtureContext().run { context ->
             assertThat(context).hasNotFailed()
@@ -87,7 +84,7 @@ class MeshResilienceContextTest {
                     .isEqualTo(endpoint.timeLimiterTimeout)
                 assertThat(timeLimiter.shouldCancelRunningFuture()).`as`("cancelRunningFuture of %s", endpoint.alias).isTrue()
 
-                // ... each CircuitBreaker carries both verdicts on top of the YAML's lap-backend policy
+                // ... each CircuitBreaker carries both verdicts on top of the YAML's mesh-backend policy
                 val circuitBreaker = circuitBreakers.circuitBreaker(endpoint.alias).circuitBreakerConfig
                 assertThat(circuitBreaker.ignoreExceptionPredicate.test(TestBufferLimitException()))
                     .`as`("CircuitBreaker of %s must ignore a client-side failure", endpoint.alias)
@@ -96,7 +93,7 @@ class MeshResilienceContextTest {
                 assertThat(circuitBreaker.recordExceptionPredicate.test(TestResponseException(404)))
                     .`as`("CircuitBreaker of %s must not record a benign 4xx", endpoint.alias)
                     .isFalse()
-                assertThat(circuitBreaker.failureRateThreshold).`as`("lap-backend policy of %s survives", endpoint.alias).isEqualTo(50f)
+                assertThat(circuitBreaker.failureRateThreshold).`as`("mesh-backend policy of %s survives", endpoint.alias).isEqualTo(50f)
             }
         }
     }
@@ -110,9 +107,10 @@ class MeshResilienceContextTest {
         //   record the benign 404, does record a listed 503, and does not record an IOException - which the
         //   registry default would, so that assertion is also the proof the list reached the instance.
         // Why it matters: Resilience4j's Boot configuration sets the list on the builder and its build() OR-s it
-        //   back in past any predicate a customizer sets. Before the customizer cleared the list, this exact
-        //   configuration failed the start with a diagnosis blaming a hand-built registry - only a real context
-        //   shows that the property binding, the customizer and build() now compose the way the KDoc says.
+        //   back in past any predicate a customizer sets, so the customizer has to clear the list; left in place,
+        //   this exact configuration would fail the start with a diagnosis blaming a hand-built registry. Only a
+        //   real context shows that the property binding, the customizer and build() compose the way the KDoc
+        //   says.
         //
         // Given: the fixture, one breaker instance carrying a record-exceptions list
         val alias = firstAlias()
@@ -133,11 +131,11 @@ class MeshResilienceContextTest {
     @Test
     fun `should refuse to start when an endpoint's time limiter is not declared`() {
         // What is tested: the silent case the guard exists for, in the real wiring - the fixture minus one
-        //   TimeLimiter instance, as the reactive stack's configuration once shipped. Resilience4j still creates
-        //   the instance for the customizer (on the registry default, not on lap-backend), so nothing else
+        //   TimeLimiter instance, the drift an edited host configuration produces. Resilience4j still creates
+        //   the instance for the customizer (on the registry default, not on mesh-backend), so nothing else
         //   would notice.
         // Success criteria: the context fails, and the failure names the key that is missing - and only it.
-        // Why it matters: an undeclared instance runs on the registry default instead of the lap-backend policy,
+        // Why it matters: an undeclared instance runs on the registry default instead of the mesh-backend policy,
         //   with no error anywhere; refusing the start is the only point at which that drift is visible.
         //
         // Given: the fixture properties without one endpoint's time-limiter instance
@@ -243,7 +241,7 @@ class MeshResilienceContextTest {
             .map { it.alias }
     }
 
-    /** The alias of the first endpoint, the one the negative test strips. */
+    /** The alias of the first endpoint - the instance a test reconfigures or strips. */
     private fun firstAlias(): String = fixtureAliases().first()
 
     /** The innermost cause - the guard's own exception, however Spring wrapped it on the way out of refresh. */

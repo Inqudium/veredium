@@ -1,6 +1,11 @@
 package eu.inqudium.veredium.core.resilience
 
-import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.resilience.TestMesh.ACCOUNTS_ALIAS
+import eu.inqudium.veredium.core.resilience.TestMesh.ACCOUNTS_TRIPLET
+import eu.inqudium.veredium.core.resilience.TestMesh.PAYMENTS_ALIAS
+import eu.inqudium.veredium.core.resilience.TestMesh.PAYMENTS_TRIPLET
+import eu.inqudium.veredium.core.resilience.TestMesh.ignores
+import eu.inqudium.veredium.core.resilience.TestMesh.propsFor
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import org.assertj.core.api.Assertions.assertThat
@@ -25,11 +30,8 @@ import java.util.concurrent.TimeoutException
  * configuration applies it while building each instance.
  */
 class ClientSideFailurePolicyTest {
-    private val alias = "api-example-com-GET-accounts"
-    private val triplet = "/endpoint/api.example.com/GET/accounts/{accountId}"
-
     @Nested
-    inner class Policy {
+    inner class `The policy` {
         @Test
         fun `should require the buffer-limit type to be one of the client-side failures`() {
             // What is tested: the one consistency rule the policy's constructor enforces - the type asked for by
@@ -67,7 +69,7 @@ class ClientSideFailurePolicyTest {
     }
 
     @Nested
-    inner class Customization {
+    inner class `The customized breaker` {
         @Test
         fun `should install the ignore even when the mesh circuit-breaker toggle is off`() {
             // What is tested: that the verdict is NOT gated on ResolvedTimeouts.circuitBreakerEnabled.
@@ -76,17 +78,17 @@ class ClientSideFailurePolicyTest {
             // Why it matters: the toggle governs only whether mesh DERIVES the slow-call knobs, while the breaker
             //   is in the call path unconditionally. Gating this on the toggle would leave the invariant unmet in
             //   exactly the default configuration - the one that actually ships.
-
+            //
             // Given: mesh defaults, i.e. the circuit-breaker toggle off
             val registry = CircuitBreakerRegistry.ofDefaults()
             val props = propsFor()
-            assertThat(props.resolveAll().getValue(triplet).circuitBreakerEnabled).isFalse()
+            assertThat(props.resolveAll().getValue(ACCOUNTS_TRIPLET).circuitBreakerEnabled).isFalse()
 
             // When
             CustomizedRegistries.circuitBreakers(registry, props)
 
             // Then
-            assertThat(ignores(registry, alias, TestVerdicts.bulkheadRejection())).isTrue()
+            assertThat(ignores(registry, TestVerdicts.bulkheadRejection())).isTrue()
         }
 
         @Test
@@ -98,20 +100,20 @@ class ClientSideFailurePolicyTest {
             // Success criteria: after the customizer the config ignores BOTH the operator's exception and
             //   the bulkhead rejection, and still records an unrelated one.
             // Why it matters: the customizer shapes a config it does not own. Clobbering an operator's ignore
-            //   list would silently re-arm the breaker against errors they had deliberately excluded - a
-            //   regression they would only notice as unexplained open circuits.
-
+            //   list would silently re-arm the breaker against errors they deliberately excluded - visible to
+            //   them only as unexplained open circuits.
+            //
             // Given: what YAML produced already ignores an exception of the operator's choosing
             val registry = CircuitBreakerRegistry.ofDefaults()
-            registry.circuitBreaker(alias, CircuitBreakerConfig.custom().ignoreExceptions(IllegalStateException::class.java).build())
+            registry.circuitBreaker(ACCOUNTS_ALIAS, CircuitBreakerConfig.custom().ignoreExceptions(IllegalStateException::class.java).build())
 
             // When
             CustomizedRegistries.circuitBreakers(registry, propsFor())
 
             // Then: both are ignored and an unrelated exception is still recorded
-            assertThat(ignores(registry, alias, IllegalStateException("operator's choice"))).isTrue()
-            assertThat(ignores(registry, alias, TestVerdicts.bulkheadRejection())).isTrue()
-            assertThat(ignores(registry, alias, TimeoutException("budget blown"))).isFalse()
+            assertThat(ignores(registry, IllegalStateException("operator's choice"))).isTrue()
+            assertThat(ignores(registry, TestVerdicts.bulkheadRejection())).isTrue()
+            assertThat(ignores(registry, TimeoutException("budget blown"))).isFalse()
         }
 
         @Test
@@ -121,22 +123,23 @@ class ClientSideFailurePolicyTest {
             // Success criteria: the customized breaker ignores both the bare TestBufferLimitException and the
             //   same instance two causes deep behind an IllegalStateException.
             // Why it matters: both stacks wrap - the blocking client every IOException of an exchange, the
-            //   reactive client a codec failure into a response exception reporting 200 - and the reactive stack
-            //   saw exactly such a wrapping turn a class-based ignore into a silent no-op. Resilience4j's
-            //   ignoreExceptions(Class...) matches the THROWN type only; only walking the cause chain survives a
-            //   wrapper.
+            //   reactive client a codec failure into a response exception reporting 200 - and such a wrapping
+            //   turns a class-based ignore into a silent no-op: Resilience4j's ignoreExceptions(Class...) matches
+            //   the THROWN type only; only walking the cause chain survives a wrapper.
             //
-            // Given
+            // Given: the customized breaker, and the failure bare and behind a wrapper
             val registry = CircuitBreakerRegistry.ofDefaults()
             CustomizedRegistries.circuitBreakers(registry, propsFor())
-
-            // When: the failure bare, and behind a wrapper
             val bare = TestBufferLimitException()
             val wrapped = IllegalStateException("I/O error on GET request", RuntimeException("body too large", bare))
 
+            // When
+            val ignoresBare = ignores(registry, bare)
+            val ignoresWrapped = ignores(registry, wrapped)
+
             // Then
-            assertThat(ignores(registry, alias, bare)).isTrue()
-            assertThat(ignores(registry, alias, wrapped)).isTrue()
+            assertThat(ignoresBare).isTrue()
+            assertThat(ignoresWrapped).isTrue()
         }
 
         @Test
@@ -146,25 +149,17 @@ class ClientSideFailurePolicyTest {
             // Success criteria: with two endpoints, the breaker of each derived alias ignores a bulkhead rejection.
             // Why it matters: one customizer is registered per alias; a loop that stopped early would leave a
             //   backend whose breaker charges its own bulkhead's rejections to the backend and opens under load.
-
+            //
             // Given: two endpoints, so there is one customizer per alias rather than a single one
             val registry = CircuitBreakerRegistry.ofDefaults()
-            val props =
-                MeshProperties(
-                    defaults = MeshProperties.Defaults(individualRequestTimeoutMs = 1000),
-                    endpoints =
-                        listOf(
-                            MeshProperties.EndpointConfig(triplet),
-                            MeshProperties.EndpointConfig("/endpoint/api.example.com/POST/payments"),
-                        ),
-                )
+            val props = propsFor(PAYMENTS_TRIPLET)
 
             // When
             CustomizedRegistries.circuitBreakers(registry, props)
 
             // Then: every derived alias carries the ignore
-            assertThat(ignores(registry, alias, TestVerdicts.bulkheadRejection())).isTrue()
-            assertThat(ignores(registry, "api-example-com-POST-payments", TestVerdicts.bulkheadRejection())).isTrue()
+            assertThat(ignores(registry, TestVerdicts.bulkheadRejection())).isTrue()
+            assertThat(ignores(registry, TestVerdicts.bulkheadRejection(), alias = PAYMENTS_ALIAS)).isTrue()
         }
 
         @Test
@@ -175,10 +170,9 @@ class ClientSideFailurePolicyTest {
             // Success criteria: with the circuit-breaker derivation enabled, the config carries the derived
             //   duration (800ms at individual 1000, maxRetries 0), the 100% pin of the inversion case, AND the
             //   ignore.
-            // Why it matters: the former two-registrar design of the reactive stack needed order-independence
-            //   tests for exactly this; with one customizer the property holds by construction, and this test is
-            //   what says so.
-
+            // Why it matters: two customizers on one instance would need an order in which neither undoes the
+            //   other; with one customizer the property holds by construction, and this test is what says so.
+            //
             // Given: circuit-breaker derivation enabled
             val registry = CircuitBreakerRegistry.ofDefaults()
 
@@ -186,7 +180,7 @@ class ClientSideFailurePolicyTest {
             CustomizedRegistries.circuitBreakers(registry, propsFor(circuitBreakerEnabled = true))
 
             // Then
-            val config = registry.circuitBreaker(alias).circuitBreakerConfig
+            val config = registry.circuitBreaker(ACCOUNTS_ALIAS).circuitBreakerConfig
             assertThat(config.slowCallDurationThreshold).isEqualTo(Duration.ofMillis(800))
             assertThat(config.slowCallRateThreshold).isEqualTo(100f)
             assertThat(config.ignoreExceptionPredicate.test(TestVerdicts.bulkheadRejection())).isTrue()
@@ -194,10 +188,10 @@ class ClientSideFailurePolicyTest {
     }
 
     @Nested
-    inner class CauseChainBoundary {
+    inner class `The bound of the cause walk` {
         // The cause walk in ClientSideFailurePolicy is bounded by MAX_CAUSE_DEPTH "so a pathological cause
         // chain cannot spin". Both ends of that bound are asserted here, through the customized instance's
-        // predicate rather than the policy function, so these stay statements about the shipped behaviour.
+        // predicate rather than the policy function, so these stay statements about the customizer's behaviour.
 
         @Test
         fun `should still discount a client-side failure at the deepest position the walk reaches`() {
@@ -207,15 +201,16 @@ class ClientSideFailurePolicyTest {
             // Why it matters: a root cause at exactly that last position must still be found - otherwise the
             //   effective depth is one less than the constant says, and nobody would notice.
             //
-            // Given
+            // Given: the customized breaker, and the failure behind MAX_CAUSE_DEPTH - 1 wrappers
             val registry = CircuitBreakerRegistry.ofDefaults()
             CustomizedRegistries.circuitBreakers(registry, propsFor())
-
-            // When
             val atLimit = nested(ClientSideFailurePolicy.MAX_CAUSE_DEPTH - 1, TestBufferLimitException())
 
+            // When
+            val ignored = ignores(registry, atLimit)
+
             // Then
-            assertThat(ignores(registry, alias, atLimit)).isTrue()
+            assertThat(ignored).isTrue()
         }
 
         @Test
@@ -229,15 +224,16 @@ class ClientSideFailurePolicyTest {
             //   early, whereas an unbounded walk on a cyclic chain would hang the predicate inside the
             //   breaker's error hook, on a request-serving thread.
             //
-            // Given
+            // Given: the customized breaker, and the failure behind MAX_CAUSE_DEPTH wrappers
             val registry = CircuitBreakerRegistry.ofDefaults()
             CustomizedRegistries.circuitBreakers(registry, propsFor())
-
-            // When
             val beyondLimit = nested(ClientSideFailurePolicy.MAX_CAUSE_DEPTH, TestBufferLimitException())
 
+            // When
+            val ignored = ignores(registry, beyondLimit)
+
             // Then
-            assertThat(ignores(registry, alias, beyondLimit)).isFalse()
+            assertThat(ignored).isFalse()
         }
 
         @Test
@@ -245,7 +241,7 @@ class ClientSideFailurePolicyTest {
         fun `should terminate on a cyclic cause chain`() {
             // What is tested: that a cause chain which loops back on itself does not spin the walk.
             // Success criteria: the predicate returns a verdict at all (false - no client-side failure
-            //   is in the cycle). A regression here would not fail the assertion but spin forever; the @Timeout
+            //   is in the cycle). A walk without a bound would not fail the assertion but spin forever; the @Timeout
             //   turns that spin into a test failure instead of a hung build.
             // Why it matters: the walk's own guard (`takeIf { it !== candidate }`) only catches a throwable
             //   that is its OWN cause; a two-element A -> B -> A cycle passes straight through it and is
@@ -253,17 +249,17 @@ class ClientSideFailurePolicyTest {
             //   hook on a request-serving thread, a spin there would not be a slow test - it would wedge the
             //   caller.
             //
+            // Given: the customized breaker, and A -> B -> A, built the only way the JDK allows (initCause on a
+            // cause-less throwable)
             val registry = CircuitBreakerRegistry.ofDefaults()
             CustomizedRegistries.circuitBreakers(registry, propsFor())
-
-            // Given: A -> B -> A, built the only way the JDK allows (initCause on a cause-less throwable)
             val first = IllegalStateException("first")
             val second = IllegalStateException("second")
             first.initCause(second)
             second.initCause(first)
 
             // When / Then
-            assertThat(ignores(registry, alias, first)).isFalse()
+            assertThat(ignores(registry, first)).isFalse()
         }
 
         /** A chain of [layers] wrappers around [root]; the returned throwable is the outermost one. */
@@ -276,30 +272,4 @@ class ClientSideFailurePolicyTest {
             return current
         }
     }
-
-    // ---------------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------------
-
-    /** Whether the registered instance's config classifies [error] as ignorable (not a backend failure). */
-    private fun ignores(
-        registry: CircuitBreakerRegistry,
-        alias: String,
-        error: Throwable,
-    ): Boolean =
-        registry
-            .circuitBreaker(alias)
-            .circuitBreakerConfig.ignoreExceptionPredicate
-            .test(error)
-
-    /** Props for the single accounts endpoint; individual=1000 at maxRetries=0 derives slowCall=800ms. */
-    private fun propsFor(circuitBreakerEnabled: Boolean = false): MeshProperties =
-        MeshProperties(
-            defaults =
-                MeshProperties.Defaults(
-                    individualRequestTimeoutMs = 1000,
-                    circuitBreaker = MeshProperties.BackendToggle(enabled = circuitBreakerEnabled),
-                ),
-            endpoints = listOf(MeshProperties.EndpointConfig(triplet)),
-        )
 }

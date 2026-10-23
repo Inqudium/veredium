@@ -2,6 +2,7 @@ package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.MeshResilienceStartupGuard
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.springboot.bulkhead.autoconfigure.BulkheadAutoConfiguration
 import io.github.resilience4j.springboot.circuitbreaker.autoconfigure.CircuitBreakerAutoConfiguration
@@ -10,11 +11,8 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.springframework.boot.autoconfigure.AutoConfigurations
-import org.springframework.boot.env.YamlPropertySourceLoader
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
-import org.springframework.core.env.EnumerablePropertySource
 import org.springframework.core.env.MapPropertySource
-import org.springframework.core.io.ClassPathResource
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.web.client.HttpClientErrorException
@@ -24,8 +22,8 @@ import org.springframework.web.client.HttpClientErrorException
  * module's REFERENCE configuration (`src/test/resources/application.yml`, [ConfigurationFiles.REFERENCE] - a
  * test resource no consumer receives) with THIS stack's wiring ([RestClientConfiguration], which imports the
  * core's mesh configuration) - the one proof that the documented blocks, the derived aliases, the blocking
- * stack's verdicts and the core's guard agree. (The class keeps its historical "Shipped" name: the core's
- * tests and ADR-0001 refer to it, in both stacks, by that name.)
+ * stack's verdicts and the core's guard agree. (The "Shipped" in the name is the one the core's tests and
+ * ADR-0001 refer to it by, in both stacks.)
  *
  * What is tested: that the context starts, and that every instance the file declares shows the customizer's
  * effect with the verdicts this module ships: a 404 in the shape `RestClient` throws it is not recorded, this
@@ -81,7 +79,7 @@ class MeshResilienceShippedConfigTest {
     private fun referenceContext(): ApplicationContextRunner =
         ApplicationContextRunner()
             .withInitializer { context ->
-                context.environment.propertySources.addFirst(MapPropertySource("reference-application-yml", referenceProperties()))
+                context.environment.propertySources.addFirst(MapPropertySource("reference-application-yml", referenceProperties("resilience4j.", "app.mesh.")))
             }.withConfiguration(
                 AutoConfigurations.of(
                     TimeLimiterAutoConfiguration::class.java,
@@ -89,18 +87,6 @@ class MeshResilienceShippedConfigTest {
                     BulkheadAutoConfiguration::class.java,
                 ),
             ).withUserConfiguration(RestClientConfiguration::class.java)
-
-    /** The `resilience4j.*` and `app.mesh.*` keys of the reference file, flattened the way Boot would load them. */
-    private fun referenceProperties(): Map<String, Any> =
-        YamlPropertySourceLoader()
-            .load(ConfigurationFiles.REFERENCE, ClassPathResource(ConfigurationFiles.REFERENCE))
-            .filterIsInstance<EnumerablePropertySource<*>>()
-            .flatMap { source ->
-                source.propertyNames
-                    .filter { name -> name.startsWith("resilience4j.") || name.startsWith("app.mesh.") }
-                    .map { it to source.getProperty(it)!! }
-            }.toMap()
-            .also { loaded -> assertThat(loaded.keys).anyMatch { it.startsWith("resilience4j.") }.anyMatch { it.startsWith("app.mesh.") } }
 
     private fun notFound(): HttpClientErrorException = HttpClientErrorException.create(HttpStatus.NOT_FOUND, "Not Found", HttpHeaders(), ByteArray(0), null)
 }

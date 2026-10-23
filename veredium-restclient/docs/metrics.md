@@ -74,9 +74,9 @@ the names are Apache's shape under this module's prefix rather than Micrometer's
 
 | Metric | Type | Tags | Meaning | Suggested alert |
 |---|---|---|---|---|
-| `restclient.pool.leased` | gauge | `pool=restclient-pool` | Connections currently handed out to in-flight exchanges. | Pinned at `max-connections` → the pool is the bottleneck; see below before raising it. |
-| `restclient.pool.available` | gauge | `pool=restclient-pool` | Idle keep-alive connections ready for reuse. | — |
-| `restclient.pool.pending` | gauge | `pool=restclient-pool` | Callers waiting for a connection. | Sustained `> 0` → saturation; each waiter burns its budget doing nothing and fails after `pending-acquire-timeout-ms` (200 ms). |
+| `restclient.pool.leased` | gauge | `pool=restclient-apache` | Connections currently handed out to in-flight exchanges. | Pinned at `max-connections` → the pool is the bottleneck; see below before raising it. |
+| `restclient.pool.available` | gauge | `pool=restclient-apache` | Idle keep-alive connections ready for reuse. | — |
+| `restclient.pool.pending` | gauge | `pool=restclient-apache` | Callers waiting for a connection. | Sustained `> 0` → saturation; each waiter burns its budget doing nothing and fails after `pending-acquire-timeout-ms` (200 ms). |
 
 **How to read `pending` next to the bulkheads.** The bulkheads (§4) are sized so that
 `sum(max-concurrent-calls) <= app.mesh.defaults.transport.max-connections` — `ResilienceConfigContractTest`
@@ -91,8 +91,8 @@ Reactor Netty's `pending-acquire-max-count`, and the twin's property was dropped
 pool also has **no per-request meters** of its own here (no `connect.time`, no `data.received`): the
 per-request view is §3.
 
-**The `pool` tag is the constant `restclient-pool`** (`RestClientMetrics.POOL_NAME`). It also names the
-evictor thread (`restclient-pool-evictor`) and the pool in the shutdown line. One factory, one pool: no
+**The `pool` tag is the constant `restclient-apache`** (`RestClientMetrics.POOL_NAME`). It also names the
+evictor thread (`restclient-apache-evictor`) and the pool in the shutdown line. One factory, one pool: no
 deployment runs two in one registry, so the name is not a property.
 
 **`max` is not a gauge.** The pool's capacity is configuration (`app.mesh.defaults.transport.max-connections`,
@@ -107,7 +107,7 @@ Micrometer's global one; with no registry, none:
 
 | Engine | Pool meters |
 |---|---|
-| `apache` | `restclient.pool.{leased,available,pending}{pool=restclient-pool}` — registered only when a backend runs on Apache |
+| `apache` | `restclient.pool.{leased,available,pending}{pool=restclient-apache}` — registered only when a backend runs on Apache |
 | `jdk` | **none** — the JDK client exposes no pool statistics |
 | `jetty` | **none** — Jetty has no Micrometer binder |
 | `reactor-netty` | Reactor Netty's own family under its own names and tags: `reactor.netty.connection.provider.{total,active,idle,pending,max,max.pending}.connections`, tagged `name=restclient-reactor-netty`, `id`, `remote.address` — registered by the engine's registrar per remote address, removed when the pool is disposed |
@@ -214,7 +214,7 @@ handful of real faults are its whole content — which is why it is a *success*,
 **`state` reflects the customized instance.** The customizers run while Resilience4j's Boot configuration
 builds each instance from its `instances.<alias>` entry, so the binder binds to the final instance and nothing
 is rebuilt later. `MeshResilienceStartupGuard` fails the context when an alias is undeclared in
-`resilience4j.<layer>.instances` (the instance then exists, but on the registry default instead of `lap-backend`)
+`resilience4j.<layer>.instances` (the instance then exists, but on the registry default instead of `mesh-backend`)
 or a customizer's effect is not observable on the instance the registry serves
 — a breaker whose meters look like the defaults therefore means the context did not start, and the failure
 message names the key to add.
@@ -256,7 +256,7 @@ the startup guard's two policy lines naming the aliases the verdicts were instal
 | web-client | rest-client | Why |
 |---|---|---|
 | `reactor.netty.http.client.*` per-request transport meters, URI-templated by `WebClientMetrics.uriTagger` | **none** | Apache records no per-request meter here; `http.client.requests` (§3) carries the template from the stamped attribute, so a second cardinality guard would guard nothing. |
-| `reactor.netty.connection.provider.*{name=lap-webclient}` (`total`, `active`, `idle`, `pending`, `max`, `max.pending`) | `restclient.pool.{leased,available,pending}{pool=restclient-pool}` | Apache's three live counts; no `max` gauge, no `max.pending` (unbounded in count). |
+| `reactor.netty.connection.provider.*{name=webclient-reactor-netty}` (`total`, `active`, `idle`, `pending`, `max`, `max.pending`) | `restclient.pool.{leased,available,pending}{pool=restclient-apache}` | Apache's three live counts; no `max` gauge, no `max.pending` (unbounded in count). |
 | `webclient.response.body.size{adapter}` | `restclient.response.body.size{adapter}` | Same meaning, same unit, this module's bounded reader instead of the codec. |
 | `resilience4j.timelimiter.calls{kind=timeout}` = the reactive operator cancelled the chain | same name; = the caller was released and the worker interrupted | The blocking TimeLimiter needs a thread hand-off; the worker's exchange then ends as `Closed by interrupt` (§3). |
 | exchange event `adapter_outcome=cancelled` | `adapter_outcome=failure` | No `cancelled` on the blocking stack; `adapter.logging.events{outcome}` counts accordingly (§5). |

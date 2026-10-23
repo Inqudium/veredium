@@ -10,6 +10,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.veredium.core.Veredium
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.testsupport.Greeting
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
@@ -22,7 +23,6 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
 import org.junit.jupiter.params.provider.EnumSource
 import org.springframework.boot.autoconfigure.AutoConfigurations
-import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.http.client.autoconfigure.HttpClientAutoConfiguration
 import org.springframework.boot.http.client.autoconfigure.reactive.ReactiveHttpClientAutoConfiguration
 import org.springframework.boot.http.client.reactive.ClientHttpConnectorBuilder
@@ -131,7 +131,7 @@ class WebClientEngineIsolationTest {
         //
         // Given: Boot's HTTP-client auto-configuration and the module's factory on the selected engine
         hostContext()
-            .withPropertyValues("app.webclient.engine.default=${engine.propertyValue}")
+            .withPropertyValues("app.webclient.engine.default=${engine.key}")
             .run { context ->
                 // When: the module's client and a host client built from Boot's builder each make a call
                 val factory = context.getBean(ResilientWebClientFactory::class.java)
@@ -186,7 +186,7 @@ class WebClientEngineIsolationTest {
                 wireMock.verify(
                     getRequestedFor(urlEqualTo("/host")).withHeader("User-Agent", matching(ENGINE_USER_AGENT.getValue(bootConnector))),
                 )
-                val engine = WebClientEngine.entries.single { it.propertyValue == moduleEngine }
+                val engine = WebClientEngine.entries.single { it.key == moduleEngine }
                 assertThat(responseThreads(context, "/$BACKEND")).isNotEmpty().allMatch { it.matches(Regex(MODULE_ENGINE_THREAD.getValue(engine))) }
                 val expected =
                     if (engine == WebClientEngine.JDK) JdkClientHttpConnector::class.java else ReactorClientHttpConnector::class.java
@@ -285,8 +285,4 @@ class WebClientEngineIsolationTest {
             }
         }
     }
-
-    /** The `app.webclient` binding alone, as in `LegatiumExchangeLoggingIntegrationTest`. */
-    @EnableConfigurationProperties(WebClientProperties::class)
-    class BoundWebClientProperties
 }

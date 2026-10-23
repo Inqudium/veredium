@@ -56,11 +56,9 @@ class HttpExchangeErrorPolicy(
      * The startup line naming the backends this policy was applied to - the only evidence an operator has that
      * the verdict is in force, and for WHICH aliases.
      *
-     * The message carries ONE placeholder and therefore exactly one argument. The reactive stack once added
-     * two, the first being [ClientSideFailurePolicy.clientSideFailures] copied from the sibling policy: SLF4J
-     * filled the single slot with that list and silently dropped [name], so the line named neither the right
-     * backends nor the right policy, and a placeholder/argument mismatch neither fails nor warns. Pinned by
-     * `MeshResilienceStartupGuardTest`.
+     * The message carries ONE placeholder and therefore exactly one argument: a second one placed before [name]
+     * would fill the slot instead, and the line would name neither the right backends nor the right policy -
+     * SLF4J neither fails nor warns on a placeholder/argument mismatch. Pinned by `MeshResilienceStartupGuardTest`.
      */
     fun logPolicy(
         logBuilder: LoggingEventBuilder,
@@ -140,6 +138,7 @@ class ClientSideFailurePolicy(
      */
     fun isBufferLimitFailure(error: Throwable): Boolean = causeChain(error).any(bufferLimitFailure::isInstance)
 
+    /** The startup line naming the backends this policy was applied to, with the exception types it ignores; one argument per placeholder. */
     fun logPolicy(
         logBuilder: LoggingEventBuilder,
         name: String,
@@ -170,7 +169,7 @@ class ClientSideFailurePolicy(
 /**
  * What a client stack tells the shared resilience wiring about itself: its two breaker verdicts and a probe
  * for the startup guard. One bean per host, declared by the stack's configuration (`RestClientConfiguration`,
- * `WebClientConfiguration`) next to the `@Import` of [eu.inqudium.veredium.core.mesh.MeshTimeoutConfig].
+ * `WebClientConfiguration`) next to the `@Import` of [eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration].
  *
  * @property httpExchangeError The benign-4xx rule, with this stack's reading of a response exception.
  * @property clientSideFailure The client-side-failure rule, with this stack's exception types.

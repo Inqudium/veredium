@@ -42,7 +42,13 @@ class EngineTransportLifecycleTest {
         val last = RecordingTransport(RestClientEngine.REACTOR_NETTY)
 
         // When
-        EngineTransport.shutdownAll(listOf(first, failing, last), 42L, { 0L }, Duration.ofSeconds(1), logger)
+        EngineTransport.shutdownAll(
+            listOf(first, failing, last),
+            deadlineNanos = 42L,
+            nanoTime = { 0L },
+            window = Duration.ofSeconds(1),
+            logger = logger,
+        )
 
         // Then
         assertThat(listOf(first, failing, last).map { it.shutdownDeadline }).containsExactly(42L, 42L, 42L)

@@ -12,7 +12,7 @@ import reactor.core.scheduler.Schedulers
 import java.time.Duration
 
 /**
- * Tests for [WebClientReactorContextPropagationConfig], the one place this module changes JVM-wide state:
+ * Tests for [WebClientReactorContextPropagationConfiguration], the one place this module changes JVM-wide state:
  * Reactor's automatic context propagation, switched on with the HTTP observation toggle and only then.
  *
  * The hook is process-global, so every test here saves Reactor's state before it runs and puts it back after
@@ -20,7 +20,7 @@ import java.time.Duration
  * the round-trip uses is registered for the duration of one test and removed again, so nothing of this class
  * reaches another test class in the same JVM.
  */
-class WebClientReactorContextPropagationConfigTest {
+class WebClientReactorContextPropagationConfigurationTest {
     private var propagationBefore = false
 
     @BeforeEach
@@ -51,7 +51,7 @@ class WebClientReactorContextPropagationConfigTest {
         val properties = WebClientProperties(observability = WebClientProperties.Observability(httpObservationEnabled = true))
 
         // When
-        WebClientReactorContextPropagationConfig(properties)
+        WebClientReactorContextPropagationConfiguration(properties)
 
         // Then
         assertThat(Hooks.isAutomaticContextPropagationEnabled()).isTrue()
@@ -73,7 +73,7 @@ class WebClientReactorContextPropagationConfigTest {
         val properties = WebClientProperties()
 
         // When
-        WebClientReactorContextPropagationConfig(properties)
+        WebClientReactorContextPropagationConfiguration(properties)
 
         // Then
         assertThat(Hooks.isAutomaticContextPropagationEnabled()).isFalse()

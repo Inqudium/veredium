@@ -1,5 +1,7 @@
 package eu.inqudium.veredium.restclient
 
+import eu.inqudium.veredium.core.engine.EngineDrain
+import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import org.slf4j.Logger
 import org.springframework.http.HttpHeaders
@@ -43,8 +45,8 @@ import java.util.concurrent.Executors
  * ## The Host header
  *
  * `Host` is a RESTRICTED header of the JDK client: Spring's request drops it and the JDK sends the authority of
- * the request URI instead, unless the JVM was started with `-Djdk.httpclient.allowRestrictedHeaders=host` (read
- * once, by the JDK and by Spring). Behind the sidecar that would route every call by `localhost:<port>` - so the
+ * the request URI instead, unless the JVM was started with `-Djdk.httpclient.allowRestrictedHeaders=host`
+ * ([EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS], read once, by the JDK and by Spring). Behind the sidecar that would route every call by `localhost:<port>` - so the
  * factory refuses to start with this engine for a backend whose Host header differs from the authority of its
  * base URL ([hostHeaderConflict]). The system property is the host's decision, never this module's: it changes
  * every `java.net.http` client of the JVM.
@@ -126,11 +128,7 @@ internal class JdkEngineTransport(
                 false
             }
         if (!terminated) {
-            logger.warn(
-                "HTTP client '{}' did not terminate {} - aborting the exchanges still in flight",
-                CLIENT_NAME,
-                if (Thread.currentThread().isInterrupted) "because the shutdown thread was interrupted" else "within $window",
-            )
+            EngineDrain.reportUndrained(logger, engine.key, "within $window", left = null)
             httpClient.shutdownNow()
         }
         executor.shutdownNow()
@@ -157,26 +155,19 @@ internal class JdkEngineTransport(
         /** The client's name on the shutdown line and its threads' name prefix. */
         const val CLIENT_NAME: String = "restclient-jdk"
 
-        /** The JVM-wide property that lifts the JDK's restriction on the Host header. */
-        const val ALLOW_RESTRICTED_HEADERS: String = "jdk.httpclient.allowRestrictedHeaders"
-
         /**
          * Why the JDK engine cannot carry [endpoint]'s Host header, or `null` when it can: the header the factory
          * puts on the backend's requests (the triplet's host, or an endpoint `headers` entry named Host) against
          * the authority the JDK sends instead - the base URL's host, with its port unless it is the scheme's
          * default, exactly as `java.net.http` renders it. Compared case-insensitively, host names being so.
          *
-         * [allowRestrictedHeaders] is the value of [ALLOW_RESTRICTED_HEADERS] the JVM runs with; when it lists
-         * `host` both the JDK and Spring send the header as given, and there is no conflict.
+         * [hostAllowed] says whether the JVM's JDK client accepts the header as given
+         * ([EngineSelection.jdkAllowsHostHeader]); then both the JDK and Spring send it, and there is no conflict.
          */
         fun hostHeaderConflict(
             endpoint: ResolvedTimeouts,
-            allowRestrictedHeaders: String?,
+            hostAllowed: Boolean,
         ): String? {
-            val hostAllowed =
-                allowRestrictedHeaders
-                    ?.split(',')
-                    ?.any { it.trim().equals(HttpHeaders.HOST, ignoreCase = true) } == true
             if (hostAllowed) return null
             val wanted =
                 endpoint.headers.entries

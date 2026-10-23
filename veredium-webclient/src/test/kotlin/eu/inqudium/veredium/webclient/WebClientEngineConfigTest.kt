@@ -1,7 +1,9 @@
 package eu.inqudium.veredium.webclient
 
+import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
@@ -20,7 +22,6 @@ import org.springframework.boot.context.properties.source.MapConfigurationProper
 import org.springframework.boot.env.YamlPropertySourceLoader
 import org.springframework.boot.test.context.FilteredClassLoader
 import org.springframework.core.io.ByteArrayResource
-import org.springframework.core.io.ClassPathResource
 import org.springframework.core.io.DefaultResourceLoader
 import org.springframework.web.reactive.function.client.WebClient
 import tools.jackson.databind.json.JsonMapper
@@ -36,7 +37,7 @@ import tools.jackson.databind.json.JsonMapper
  */
 class WebClientEngineConfigTest {
     @Nested
-    inner class Binding {
+    inner class `Binding of app-webclient-engine` {
         @ParameterizedTest(name = "{0} -> {1}")
         @CsvSource("reactor-netty, REACTOR_NETTY", "jdk, JDK", "jetty, JETTY", "apache, APACHE", "REACTOR_NETTY, REACTOR_NETTY")
         fun `should bind the documented YAML value onto the engine`(
@@ -49,7 +50,7 @@ class WebClientEngineConfigTest {
             // Why it matters: the dashed form is the one the guide and the startup line print; were it not
             //   bindable, the documented default could not be written down explicitly.
             //
-            // Given/When/Then
+            // Given / When / Then
             assertThat(bind(mapOf("app.webclient.engine.default" to value)).engine.default).isEqualTo(expected)
         }
 
@@ -59,7 +60,7 @@ class WebClientEngineConfigTest {
             // Success criteria: binding fails with a BindException naming app.webclient.engine.default.
             // Why it matters: falling back to the default would leave the operator believing a choice was made.
             //
-            // Given/When/Then
+            // Given / When / Then
             assertThatThrownBy { bind(mapOf("app.webclient.engine.default" to "netty")) }
                 .isInstanceOf(BindException::class.java)
                 .hasMessageContaining("app.webclient.engine.default")
@@ -101,14 +102,14 @@ class WebClientEngineConfigTest {
             // What is tested: the code default of the engine and the value the reference configuration shows.
             // Success criteria: a bare WebClientProperties and the binding of the reference application.yml both
             //   select reactor-netty, with no override.
-            // Why it matters: the switch was introduced with the promise that a host which does not set it keeps
-            //   exactly the wiring it had.
+            // Why it matters: a host that does not set the switch runs on Reactor Netty, Spring's own reactive
+            //   connector - adopting the module never changes the engine underneath a host by itself.
             //
             // Given
-            val sources = YamlPropertySourceLoader().load("application.yml", ClassPathResource("application.yml"))
+            val file = ConfigurationFiles.REFERENCE
 
             // When
-            val reference = Binder(ConfigurationPropertySources.from(sources)).bind("app.webclient", Bindable.of(WebClientProperties::class.java)).get()
+            val reference = ConfigurationFiles.bind(file, "app.webclient", WebClientProperties::class.java)
 
             // Then
             assertThat(WebClientProperties().engine).isEqualTo(WebClientProperties.Engine(WebClientEngine.REACTOR_NETTY, emptyMap()))
@@ -124,18 +125,18 @@ class WebClientEngineConfigTest {
         @Test
         fun `should refuse an override key that names no mesh alias, naming the key and the known aliases`() {
             // What is tested: typo protection for app.webclient.engine.endpoints.
-            // Success criteria: construction fails with an IllegalArgumentException naming
-            //   app.webclient.engine.endpoints, the unknown key, and the aliases that do exist.
+            // Success criteria: construction fails with an IllegalArgumentException naming the unknown key in full
+            //   and the aliases that do exist.
             // Why it matters: a misspelt key would otherwise leave its backend on the default engine without a
             //   word - the very backend someone meant to move.
             //
             // Given
             val engine = WebClientProperties.Engine(endpoints = mapOf("orderz" to WebClientEngine.JETTY))
 
-            // When/Then
+            // When / Then
             assertThatThrownBy { factory(engine, aliases = listOf("orders", "payments")) }
                 .isInstanceOf(IllegalArgumentException::class.java)
-                .hasMessageContainingAll("app.webclient.engine.endpoints", "[orderz]", "[orders, payments]")
+                .hasMessageContainingAll("app.webclient.engine.endpoints.orderz", "names no mesh endpoint", "[orders, payments]")
         }
 
         @ParameterizedTest(name = "{0} without {1}")
@@ -151,8 +152,8 @@ class WebClientEngineConfigTest {
             // What is tested: the classpath check, against a class loader that hides ONLY the reactive adapter
             //   of an engine whose client library stays visible (jetty-client without jetty-reactive-httpclient,
             //   httpclient5 without httpcore5-reactive).
-            // Success criteria: construction fails naming app.webclient.engine, the engine, the backend and the
-            //   adapter's Maven coordinates.
+            // Success criteria: construction fails naming the selecting key app.webclient.engine.default, the
+            //   engine, the backend and the adapter's Maven coordinates.
             // Why it matters: the half-present engine is the likely real mistake - the client library often
             //   arrives transitively, the adapter never does - and a check satisfied by ANY one of the required
             //   classes would pass it, leaving a NoClassDefFoundError at the first client.
@@ -160,10 +161,10 @@ class WebClientEngineConfigTest {
             // Given
             val hidden = DefaultResourceLoader(FilteredClassLoader(hiddenPackage))
 
-            // When/Then
+            // When / Then
             assertThatThrownBy { factory(WebClientProperties.Engine(default = engine), resourceLoader = hidden) }
                 .isInstanceOf(IllegalArgumentException::class.java)
-                .hasMessageContainingAll("app.webclient.engine selects '$engine' for [orders]", coordinates)
+                .hasMessageContainingAll("app.webclient.engine.default selects the HTTP engine '$engine' for [orders]", coordinates)
         }
 
         @Test
@@ -178,7 +179,7 @@ class WebClientEngineConfigTest {
             val hidden = DefaultResourceLoader(FilteredClassLoader("org.apache.hc"))
             val engine = WebClientProperties.Engine(endpoints = mapOf("payments" to WebClientEngine.JDK))
 
-            // When/Then
+            // When / Then
             assertThatCode { factory(engine, aliases = listOf("orders", "payments"), resourceLoader = hidden) }.doesNotThrowAnyException()
         }
 
@@ -194,7 +195,7 @@ class WebClientEngineConfigTest {
             // Given
             val pool = WebClientProperties.Pool(pendingAcquireMaxCount = 0)
 
-            // When/Then
+            // When / Then
             assertThatThrownBy { factory(WebClientProperties.Engine(default = WebClientEngine.JETTY), pool = pool) }
                 .isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContainingAll("app.webclient.pool.pending-acquire-max-count=0", "app.webclient.engine", "[orders]")
@@ -215,7 +216,7 @@ class WebClientEngineConfigTest {
             //   alone would reject a burst on a cold pool at half the concurrency Reactor Netty accepts for the
             //   same settings, and the sum must not wrap to a negative capacity.
             //
-            // Given/When/Then
+            // Given / When / Then
             assertThat(JettyTransport.jettyQueueCapacity(maxConnections, pendingAcquireMaxCount)).isEqualTo(expected)
         }
 
@@ -232,7 +233,7 @@ class WebClientEngineConfigTest {
             // Given
             val engines = mapOf("orders" to WebClientEngine.JDK, "payments" to WebClientEngine.REACTOR_NETTY)
 
-            // When/Then
+            // When / Then
             assertThatThrownBy { WebClientEngineChecks.requireJdkHostHeader(engines) { false } }
                 .isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContainingAll("app.webclient.engine selects 'jdk' for [orders]", "-Djdk.httpclient.allowRestrictedHeaders=host")
@@ -250,9 +251,9 @@ class WebClientEngineConfigTest {
             // Why it matters: should the POM setting ever get lost, every jdk case would fail with the startup
             //   message; this test says why in one line.
             //
-            // Given/When/Then
-            assertThat(System.getProperty(WebClientEngineChecks.JDK_RESTRICTED_HEADERS_PROPERTY)).isEqualTo("host")
-            assertThat(WebClientEngineChecks.jdkAllowsHostHeader()).isTrue()
+            // Given / When / Then
+            assertThat(System.getProperty(EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS)).isEqualTo("host")
+            assertThat(EngineSelection.jdkAllowsHostHeader()).isTrue()
         }
 
         @Test

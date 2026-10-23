@@ -2,6 +2,7 @@ package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.MeshResilienceStartupGuard
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.springboot.bulkhead.autoconfigure.BulkheadAutoConfiguration
 import io.github.resilience4j.springboot.circuitbreaker.autoconfigure.CircuitBreakerAutoConfiguration
@@ -10,21 +11,18 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.springframework.boot.autoconfigure.AutoConfigurations
-import org.springframework.boot.env.YamlPropertySourceLoader
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
-import org.springframework.core.env.EnumerablePropertySource
 import org.springframework.core.env.MapPropertySource
-import org.springframework.core.io.ClassPathResource
 import org.springframework.core.io.buffer.DataBufferLimitException
 import org.springframework.web.reactive.function.client.WebClientResponseException
 
 /**
  * Boots Resilience4j's own Boot auto-configuration on the `resilience4j.*` and `app.mesh.*` blocks of this
- * module's reference configuration (`src/test/resources/application.yml`) with THIS stack's wiring
+ * module's reference configuration ([ConfigurationFiles.REFERENCE]) with THIS stack's wiring
  * ([WebClientConfiguration], which imports the core's mesh configuration) - the one proof that the reference
  * blocks, the derived aliases, the reactive stack's verdicts and the core's guard agree. The file is a test
- * resource, not shipped (a library ships no `application.yml`); the class keeps its historical name because
- * veredium-core, the ADRs and the blocking twin refer to it by that name.
+ * resource, not shipped (a library ships no `application.yml`). Compatibility: the class is named "Shipped"
+ * all the same, because veredium-core, the ADRs and the blocking twin refer to it by that name.
  *
  * What is tested: that the context starts, and that every instance the file declares shows the customizer's
  * effect with the verdicts this module ships: a 404 in the shape `WebClient` throws it is not recorded, the
@@ -32,9 +30,9 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
  * TimeLimiter.
  * Success criteria: the context has not failed and every endpoint's instances pass the probes.
  * Why it matters: the mechanism - customizer beans, the guard, both directions of failure - is pinned once in
- * the core (`MeshResilienceContextTest`) with a stand-in stack. This file once declared a single TimeLimiter
- * instance while mesh derives four; under the customizer mechanism three endpoints would then have run on the
- * library default without a word, and it is the guard in this context that now refuses that.
+ * the core (`MeshResilienceContextTest`) with a stand-in stack. A file that declared a single TimeLimiter
+ * instance while mesh derives four would leave three endpoints on the library default without a word; the
+ * guard in this context refuses that.
  *
  * Determinism: a real context, no I/O beyond the classpath, no WireMock - nothing is called, only configured.
  */
@@ -92,22 +90,11 @@ class MeshResilienceShippedConfigTest {
 
     /** The `resilience4j.*` and `app.mesh.*` keys of the reference file, flattened the way Boot would load them. */
     private fun referenceProperties(): Map<String, Any> =
-        YamlPropertySourceLoader()
-            .load(REFERENCE, ClassPathResource(REFERENCE))
-            .filterIsInstance<EnumerablePropertySource<*>>()
-            .flatMap { source ->
-                source.propertyNames
-                    .filter { name -> name.startsWith("resilience4j.") || name.startsWith("app.mesh.") }
-                    .map { it to source.getProperty(it)!! }
-            }.toMap()
+        (ConfigurationFiles.flatten(ConfigurationFiles.REFERENCE, "resilience4j.") + ConfigurationFiles.flatten(ConfigurationFiles.REFERENCE, "app.mesh."))
             .also { loaded -> assertThat(loaded.keys).anyMatch { it.startsWith("resilience4j.") }.anyMatch { it.startsWith("app.mesh.") } }
 
     /** The codec failure in the exact shape the client produces it: a 200-reporting response exception with the limit beneath. */
     private fun wrappedBufferLimit(): Throwable =
         WebClientResponseException(200, "OK", null, null, null)
             .initCause(DataBufferLimitException("Exceeded limit on max bytes to buffer : 8192"))
-
-    private companion object {
-        const val REFERENCE = "application.yml"
-    }
 }

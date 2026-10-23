@@ -3,8 +3,6 @@ package eu.inqudium.veredium.webclient
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.ValueSource
 
 /**
  * Tests for [WebClientMetrics], the URI→tag mapper that protects the metric backend from a cardinality
@@ -24,7 +22,7 @@ class WebClientMetricsTest {
         WebClientMetrics.tagsOf(listOf(productAgreements, involvedPartiesLookup, involvedPartyGet, accessProfiles))
 
     @Nested
-    inner class KnownPathsMapToTheirTemplate {
+    inner class `Known paths map to their template` {
         @Test
         fun `should map the product-agreements lookup path to its template`() {
             // What is tested: a variable-free template - the path IS the template.
@@ -76,7 +74,7 @@ class WebClientMetricsTest {
     }
 
     @Nested
-    inner class PerEndpointScoping {
+    inner class `Per-endpoint scoping` {
         @Test
         fun `should tag a call with the endpoint's own template`() {
             // What is tested: uriTagger - the per-endpoint mapper an endpoint's HttpClient receives.
@@ -95,10 +93,10 @@ class WebClientMetricsTest {
             // What is tested: that a per-endpoint mapper cannot attribute a request to a DIFFERENT endpoint.
             // Success criteria: asked about another endpoint's path, the mapper answers UNKNOWN rather
             //   than that endpoint's template.
-            // Why it matters: every endpoint gets its own HttpClient, but the mapper used to be built from the
-            //   templates of ALL of them, so a request could match a foreign template first and be counted
-            //   under another endpoint's series - two backends' latencies in one number, silently. Scoping the
-            //   mapper to the single template its client can actually call removes that by construction.
+            // Why it matters: every endpoint gets its own HttpClient; a mapper built from the templates of ALL
+            //   of them would let a request match a foreign template first and be counted under another
+            //   endpoint's series - two backends' latencies in one number, silently. Scoping the mapper to the
+            //   single template its client can actually call rules that out by construction.
             //
             // Given: the mapper belonging to the access-profiles endpoint
             val tagger = WebClientMetrics.uriTagger(accessProfiles)
@@ -116,9 +114,9 @@ class WebClientMetricsTest {
             // Success criteria: `/a/{id}` and `/a/{id}/details` both reduce to `/a/`, and tagsOf returns
             //   them in the same order regardless of the order they went in.
             // Why it matters: with a length-only sort the two are tied, so which one a URI is labelled with
-            //   depended on the iteration order of the input - a mislabelling that would differ between runs
-            //   and never reproduce. Production no longer passes more than one template, but the function is
-            //   public and this removes the ambiguity at its source rather than only at the call site.
+            //   depends on the iteration order of the input - a mislabelling that would differ between runs
+            //   and never reproduce. Production passes one template per endpoint, but the function is public
+            //   and this removes the ambiguity at its source rather than only at the call site.
             //
             // Given: the same two templates in both input orders
             val forwards = WebClientMetrics.tagsOf(listOf("/a/{id}", "/a/{id}/details"))
@@ -130,7 +128,7 @@ class WebClientMetricsTest {
     }
 
     @Nested
-    inner class CardinalityGuards {
+    inner class `Cardinality guards` {
         @Test
         fun `should ignore a trailing query string when matching the prefix`() {
             // What is tested: a query string on a templated path.

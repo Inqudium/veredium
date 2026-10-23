@@ -25,7 +25,7 @@ import java.io.InputStream
  */
 class BoundedBodyReaderTest {
     @Nested
-    inner class SuccessBodies {
+    inner class `The success bodies` {
         @Test
         fun `should return a body that fits, including one that is exactly at the limit`() {
             // What is tested: the inclusive end of the limit - a body of exactly `limit` bytes FITS.
@@ -199,7 +199,7 @@ class BoundedBodyReaderTest {
     }
 
     @Nested
-    inner class ErrorBodies {
+    inner class `The error bodies` {
         @Test
         fun `should cut an error body at the limit rather than reject it`() {
             // What is tested: the other reading of the same limit - a diagnostic body is truncated, never

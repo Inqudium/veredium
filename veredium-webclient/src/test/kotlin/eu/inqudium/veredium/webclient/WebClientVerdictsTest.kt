@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.testsupport.CustomizedRegistries
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.bulkhead.BulkheadRegistry
@@ -38,7 +39,7 @@ class WebClientVerdictsTest {
     private val triplet = "/endpoint/api.example.com/GET/accounts/{accountId}"
 
     @Nested
-    inner class ClientSideFailure {
+    inner class `Client-side failures` {
         @Test
         fun `should not count a bulkhead rejection as a circuit-breaker failure`() {
             // What is tested: end to end through the real decorator - when the bulkhead rejects a call because
@@ -49,11 +50,11 @@ class WebClientVerdictsTest {
             // Why it matters: this is the escalation path. Counting the rejection means a transient concurrency
             //   peak opens the breaker and takes the backend down for waitDurationInOpenState - the load
             //   shedding meant to absorb the peak amplifies it into an outage instead.
-
+            //
             // Given: a single-permit bulkhead that rejects immediately, and the customizer has run
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(circuitBreakerRegistry, singlePermitBulkheads())
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), WebClientVerdicts.breakerVerdicts)
             val circuitBreaker = circuitBreakerRegistry.circuitBreaker(alias)
 
             // And: the only permit is held by a call that has not completed
@@ -82,11 +83,11 @@ class WebClientVerdictsTest {
             //   failed-call counter to exactly one.
             // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
             //   it disables the protection silently - would satisfy the zero-failure assertion above.
-
+            //
             // Given: the same wiring, with the customizer applied
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(circuitBreakerRegistry, singlePermitBulkheads())
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), WebClientVerdicts.breakerVerdicts)
             val circuitBreaker = circuitBreakerRegistry.circuitBreaker(alias)
 
             // When: a call fails for a real reason
@@ -113,7 +114,7 @@ class WebClientVerdictsTest {
             //
             // Given
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), WebClientVerdicts.breakerVerdicts)
 
             // When: the failure in the exact shape the client produces it
             val wrapped =
@@ -142,7 +143,7 @@ class WebClientVerdictsTest {
             //
             // Given
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), WebClientVerdicts.breakerVerdicts)
 
             // When / Then: a server error stays a server error
             val serverError = WebClientResponseException(500, "Internal Server Error", null, ByteArray(64 * 1024), null)
@@ -152,7 +153,7 @@ class WebClientVerdictsTest {
     }
 
     @Nested
-    inner class ExpectedClientError {
+    inner class `Expected client errors` {
         @Test
         fun `should read a WebClientResponseException as the client error it reports`() {
             // What is tested: the one thing this stack supplies to the shared rule - the status reader - against
@@ -185,11 +186,10 @@ class WebClientVerdictsTest {
             //   to the config, so this is what proves the verdict reaches the instance the decorator actually
             //   uses - not merely a predicate that would be right if it were installed.
             //
-
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(registry, BulkheadRegistry.ofDefaults())
-            CustomizedRegistries.circuitBreakers(registry, propsFor())
+            CustomizedRegistries.circuitBreakers(registry, propsFor(), WebClientVerdicts.breakerVerdicts)
 
             // When: the backend answers "not found"
             val failure = catchThrowable { decorator.decorate(alias, Mono.error<String>(response(404))).block() }
@@ -207,11 +207,10 @@ class WebClientVerdictsTest {
             // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
             //   it disables the protection silently - would satisfy the zero-failure assertion above.
             //
-
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(registry, BulkheadRegistry.ofDefaults())
-            CustomizedRegistries.circuitBreakers(registry, propsFor())
+            CustomizedRegistries.circuitBreakers(registry, propsFor(), WebClientVerdicts.breakerVerdicts)
 
             // When
             val failure = catchThrowable { decorator.decorate(alias, Mono.error<String>(response(500))).block() }

@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.Veredium
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatCode
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -13,7 +14,6 @@ import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.boot.context.properties.source.ConfigurationPropertySources
 import org.springframework.boot.env.YamlPropertySourceLoader
 import org.springframework.core.io.ByteArrayResource
-import org.springframework.core.io.ClassPathResource
 import org.springframework.util.unit.DataSize
 import java.time.Duration
 
@@ -26,7 +26,7 @@ import java.time.Duration
  */
 class RestClientPropertiesTest {
     @Nested
-    inner class MaxInMemorySize {
+    inner class `The buffer limit` {
         @Test
         fun `should reject a limit of zero, which would fail every call as a client-side refusal`() {
             // What is tested: the lower bound of the buffer limit.
@@ -78,12 +78,12 @@ class RestClientPropertiesTest {
         fun `should default to 256 KB, the twin's ceiling and the size one oversized access-profile response needed`() {
             // What is tested: the code default of the buffer limit, as a value in its own right rather than
             //   as a by-product of the range check above.
-            // Success criteria: the default is 256 KB and NOT the 8 KB the reactive module once shipped.
+            // Success criteria: the default is 256 KB and NOT 8 KB.
             // Why it matters: the two modules front the SAME backends, and a response that fits one
-            //   client's buffer and not the other's would be a difference nobody expects from a twin. 8 KB was
-            //   measured to be too small on 2026-08-07; the limit applies per concurrently buffered response and
-            //   the shared pool is bounded at 100 connections, so this default also bounds the worst case at
-            //   ~25 MB of response buffers - the reason it is not simply raised further.
+            //   client's buffer and not the other's would be a difference nobody expects from a twin. 8 KB is
+            //   too small for a real access-profile response; the limit applies per concurrently buffered
+            //   response and the shared pool is bounded at 100 connections, so this default also bounds the
+            //   worst case at ~25 MB of response buffers - the reason it is not simply raised further.
             //
             // Given / When / Then
             assertThat(RestClientProperties().maxInMemorySize)
@@ -99,14 +99,8 @@ class RestClientPropertiesTest {
             // Why it matters: the reference file is what hosts copy; a ceiling there that differed from the code
             //   default would make "configured as documented" and "not configured" two different clients.
             //
-            // Given
-            val sources = YamlPropertySourceLoader().load(ConfigurationFiles.REFERENCE, ClassPathResource(ConfigurationFiles.REFERENCE))
-
-            // When
-            val bound =
-                Binder(ConfigurationPropertySources.from(sources))
-                    .bind("app.restclient", Bindable.of(RestClientProperties::class.java))
-                    .orElseThrow { AssertionError("app.restclient did not bind from the reference application.yml") }
+            // Given / When
+            val bound = ConfigurationFiles.bind(ConfigurationFiles.REFERENCE, "app.restclient", RestClientProperties::class.java)
 
             // Then
             assertThat(bound.maxInMemorySize).isEqualTo(DataSize.ofKilobytes(256))
@@ -114,7 +108,7 @@ class RestClientPropertiesTest {
     }
 
     @Nested
-    inner class PoolSettings {
+    inner class `The pool settings` {
         @Test
         fun `should reject a negative lifecycle duration on every pool knob, and a zero idle time`() {
             // What is tested: all three durations, because each is passed on to Apache's pool, which accepts a
@@ -159,7 +153,7 @@ class RestClientPropertiesTest {
     }
 
     @Nested
-    inner class UserAgent {
+    inner class `The User-Agent` {
         @Test
         fun `should send the library's token by default`() {
             // What is tested: the User-Agent of a host that configures none.
@@ -199,33 +193,17 @@ class RestClientPropertiesTest {
     }
 
     @Nested
-    inner class EngineSelection {
-        /**
-         * Binds `app.restclient` from [yaml] the way Boot binds an application.yml. A YAML that binds nothing fails
-         * here instead of falling back to the defaults, which would let a case for the default value pass on a
-         * binding that never happened.
-         */
-        private fun bind(yaml: String): RestClientProperties {
-            val sources = YamlPropertySourceLoader().load("engine", ByteArrayResource(yaml.trimIndent().toByteArray()))
-            return Binder(ConfigurationPropertySources.from(sources))
-                .bind("app.restclient", Bindable.of(RestClientProperties::class.java))
-                .orElseThrow { AssertionError("nothing bound under app.restclient from: $yaml") }
-        }
-
+    inner class `The engine selection` {
         @Test
         fun `should default to the Apache engine for every backend`() {
             // What is tested: the code default of `app.restclient.engine` and of the reference configuration.
             // Success criteria: an unset block and the reference application.yml both resolve every alias to
             //   APACHE, with no override.
-            // Why it matters: the default IS the module's wiring before the property existed; a host that does not
-            //   set the property must get exactly that, not a different engine.
+            // Why it matters: the default IS the module's established wiring; a host that does not set the
+            //   property must get exactly that, not a different engine.
             //
             // Given
-            val sources = YamlPropertySourceLoader().load(ConfigurationFiles.REFERENCE, ClassPathResource(ConfigurationFiles.REFERENCE))
-            val reference =
-                Binder(ConfigurationPropertySources.from(sources))
-                    .bind("app.restclient", Bindable.of(RestClientProperties::class.java))
-                    .orElseThrow { AssertionError("app.restclient did not bind from the reference application.yml") }
+            val reference = ConfigurationFiles.bind(ConfigurationFiles.REFERENCE, "app.restclient", RestClientProperties::class.java)
 
             // When / Then
             assertThat(RestClientProperties().engine.engineFor("any")).isEqualTo(RestClientEngine.APACHE)
@@ -294,5 +272,21 @@ class RestClientPropertiesTest {
                 .isInstanceOf(BindException::class.java)
                 .hasMessageContaining("app.restclient.engine.default")
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
+    /**
+     * Binds `app.restclient` from [yaml] the way Boot binds an application.yml. A YAML that binds nothing fails
+     * here instead of falling back to the defaults, which would let a case for the default value pass on a
+     * binding that never happened.
+     */
+    private fun bind(yaml: String): RestClientProperties {
+        val sources = YamlPropertySourceLoader().load("engine", ByteArrayResource(yaml.trimIndent().toByteArray()))
+        return Binder(ConfigurationPropertySources.from(sources))
+            .bind("app.restclient", Bindable.of(RestClientProperties::class.java))
+            .orElseThrow { AssertionError("nothing bound under app.restclient from: $yaml") }
     }
 }

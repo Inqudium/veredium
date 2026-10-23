@@ -26,7 +26,7 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  * Nothing in the wiring fails on its own when `resilience4j.<layer>.instances.<alias>` is missing for an alias
  * the decorator uses. Resilience4j's Boot configuration creates an instance for every customizer name it finds
  * no declaration for - on the registry DEFAULT config, not on the named base config the operator chose
- * (`lap-backend`) - and the bulkhead, which has no customizer, is created on the first call from the default
+ * (`mesh-backend`) - and the bulkhead, which has no customizer, is created on the first call from the default
  * likewise. The call runs; the module's verdicts and the derived budget are even present on the breaker and the
  * time limiter; what is silently lost is every value the operator wrote into the shipped policy, and the only
  * trace is a meter whose values look like nobody chose them. A registry bean a host or a test built by hand is
@@ -70,8 +70,8 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  * WARN naming both numbers and every alias, not a failed start. Which aliases share a pool is the client
  * modules' knowledge - each engine of a client factory has a pool of its own - so the pools come from the
  * [MeshConnectionPools] beans the factories are; a pool without a bound (the JDK client) is not
- * checked. Without such a bean the sum runs over ALL mesh aliases against one pool, as before the engines were
- * selectable. Per engine the sum is exact for Apache's blocking pool (one total cap for every route) and
+ * checked. Without such a bean the sum runs over ALL mesh aliases against the one pool the mesh transport
+ * describes. Per engine the sum is exact for Apache's blocking pool (one total cap for every route) and
  * conservative where the cap is per remote address and an endpoint has a `base-url` of its own.
  * The values are read off the registry's instances, i.e. after base config and instance properties were
  * merged; the wiring check guarantees there is one per alias by then.
@@ -187,7 +187,7 @@ class MeshResilienceStartupGuard(
         "resilience4j.$layer.instances.$alias is not declared: the $layer of mesh endpoint '$alias' runs on the " +
             "registry default config instead of the policy the operator chose (Resilience4j creates the instance for " +
             "the mesh customizer on the default; a bulkhead has no customizer and is created on the first call). " +
-            "Declare the instance (base-config: lap-backend), or remove the endpoint from app.mesh.endpoints."
+            "Declare the instance (base-config: mesh-backend), or remove the endpoint from app.mesh.endpoints."
 
     private fun unreached(
         layer: String,

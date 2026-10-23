@@ -1,17 +1,13 @@
 package eu.inqudium.veredium.webclient
 
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import org.springframework.boot.context.properties.bind.Bindable
-import org.springframework.boot.context.properties.bind.Binder
-import org.springframework.boot.context.properties.source.ConfigurationPropertySources
-import org.springframework.boot.env.YamlPropertySourceLoader
-import org.springframework.core.io.ClassPathResource
 
 /**
- * Contract test for the logging-related blocks of the test fixture `application-test.yml` - bound instead of
- * the module's reference configuration (`src/test/resources/application.yml`, the documented example a host
+ * Contract test for the logging-related blocks of the test fixture ([ConfigurationFiles.FIXTURE]) - bound
+ * instead of the module's reference configuration ([ConfigurationFiles.REFERENCE], the documented example a host
  * copies from; a library ships no `application.yml`), so an edit to the reference cannot break it.
  *
  * 1. What is tested: that the exchange stream legatium-webclient-logging writes is switched on and audible -
@@ -36,7 +32,7 @@ class LoggingLevelContractTest {
         fun `should keep the exchange stream at a level that shows every exchange`() {
             // What is tested: the level of legatium's exchange logger, under exactly its default name.
             // Success criteria: `adapter-http-exchange` is present in logging.level at INFO, DEBUG or TRACE.
-            // Why it matters: unlike the former diary, a higher level here FILTERS (WARN keeps failures,
+            // Why it matters: a higher level here FILTERS (WARN keeps failures,
             //   timeouts, cancellations and slow calls) rather than switching the feature off - so this pins the
             //   operational choice of seeing every exchange, and a typo in the name would address nothing.
             //
@@ -72,11 +68,10 @@ class LoggingLevelContractTest {
         @Test
         fun `should address this library's own loggers under their real package`() {
             // What is tested: the "this module's own classes stay verbose" entry of the logging.level block.
-            // Success criteria: `eu.inqudium.veredium` is set to DEBUG, and the `com.ing` entry inherited from the
-            //   project this code was ported from is gone.
-            // Why it matters: a level for a package nothing lives in is silently a no-op - the comment above it
-            //   promised verbose library classes while the entry addressed the origin project's package and
-            //   changed nothing.
+            // Success criteria: `eu.inqudium.veredium` is set to DEBUG, and no entry addresses `com.ing`, the
+            //   package of the project this code was ported from.
+            // Why it matters: a level for a package nothing lives in is silently a no-op - a comment promising
+            //   verbose library classes above an entry that addresses another package changes nothing.
             //
             // Given / When / Then
             assertThat(levels).containsEntry("eu.inqudium.veredium", "DEBUG")
@@ -84,11 +79,12 @@ class LoggingLevelContractTest {
         }
 
         @Test
-        fun `should not address the former diary logger any more`() {
-            // What is tested: that the fixture carries no level for the removed diary's logger.
-            // Success criteria: `eu.inqudium.veredium.webclient.HttpExchange` is absent from logging.level.
-            // Why it matters: nothing writes to that name since the diary was replaced; an entry for it would be
-            //   a level pointing at nothing, and would suggest to a reader that the diary still exists.
+        fun `should not address the module's own HttpExchange logger name`() {
+            // What is tested: that the fixture carries no level for `eu.inqudium.veredium.webclient.HttpExchange`.
+            // Success criteria: the name is absent from logging.level.
+            // Why it matters: nothing writes to that name - the per-exchange event is legatium's, on
+            //   `adapter-http-exchange`; an entry for it would be a level pointing at nothing, and would suggest
+            //   to a reader that the module writes an exchange event of its own.
             //
             // Given / When / Then
             assertThat(levels).doesNotContainKey("eu.inqudium.veredium.webclient.HttpExchange")
@@ -129,9 +125,9 @@ class LoggingLevelContractTest {
         fun `should log bodies on failure only, capped at 16 KB`() {
             // What is tested: the body modes and the capture cap of the fixture.
             // Success criteria: `on-failure` for both directions and `max-body-bytes` 16384.
-            // Why it matters: the diary logged every body of every call - customer data on every line.
-            //   `on-failure` keeps the error body the runbook needs and drops the rest; 16384 is the library
-            //   default, written out because it replaces the diary's 256 KB.
+            // Why it matters: a body on every call is customer data on every line. `on-failure` keeps the error
+            //   body the runbook needs and drops the rest; 16384 is the library default, written out so the cap
+            //   is a visible decision rather than an inherited one.
             //
             // Given / When / Then
             assertThat(adapterLogging).containsEntry("log-request-body", "on-failure")
@@ -143,12 +139,7 @@ class LoggingLevelContractTest {
     }
 
     /** Bind one prefix of the test fixture the way Spring Boot binds a config file, flattened to strings. */
-    private fun bind(prefix: String): Map<String, String> {
-        val sources = YamlPropertySourceLoader().load("application-test.yml", ClassPathResource("application-test.yml"))
-        return Binder(ConfigurationPropertySources.from(sources))
-            .bind(prefix, Bindable.mapOf(String::class.java, String::class.java))
-            .orElseThrow { AssertionError("$prefix did not bind from application-test.yml") }
-    }
+    private fun bind(prefix: String): Map<String, String> = ConfigurationFiles.bindMap(ConfigurationFiles.FIXTURE, prefix)
 
     private companion object {
         /** legatium's default exchange logger; the module keeps the default so the library's docs apply. */

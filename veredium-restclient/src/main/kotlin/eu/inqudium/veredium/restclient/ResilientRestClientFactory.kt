@@ -2,6 +2,7 @@ package eu.inqudium.veredium.restclient
 
 import eu.inqudium.legatium.restclient.logging.ClientRequestLoggingInterceptor
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
+import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshConnectionPools
 import eu.inqudium.veredium.core.mesh.MeshProperties
@@ -94,7 +95,13 @@ class ResilientRestClientFactory(
      * the same reason as [nanoTime]: the test classpath carries every engine, and the missing-library failure
      * is reached by a test that says an engine is absent instead of one that builds a classpath without it.
      */
-    private val engineLibraryPresent: (RestClientEngine) -> Boolean = RestClientEngine::isPresent,
+    private val engineLibraryPresent: (RestClientEngine) -> Boolean = { it.isPresent() },
+    /**
+     * Whether this JVM's JDK client accepts an explicit Host header ([EngineSelection.jdkAllowsHostHeader] by
+     * default). Injectable for the same reason as [engineLibraryPresent]: whether the test JVM runs with the flag is
+     * the build's choice, and the conflict is reached by a test that says the JDK refuses the header.
+     */
+    private val jdkAllowsHostHeader: () -> Boolean = EngineSelection::jdkAllowsHostHeader,
 ) : MeshConnectionPools {
     private val logger: Logger = LoggerFactory.getLogger(ResilientRestClientFactory::class.java)
 
@@ -161,8 +168,8 @@ class ResilientRestClientFactory(
 
     /**
      * The engines in use, one transport each, created here in a stable order (the enum's) and only for an engine
-     * some backend selects. Apache first, as before the engines existed: its pool and its meters come up when
-     * the factory does.
+     * some backend selects. Apache, the default, comes first: its pool and its meters come up when the factory
+     * does.
      */
     private val transports: Map<RestClientEngine, EngineTransport> =
         EngineTransport.createAll(engineByBackend.values.toSortedSet(), logger) { engine ->
@@ -232,41 +239,29 @@ class ResilientRestClientFactory(
      * - an engine whose library is not on the classpath, naming the dependency to add - better at startup than as
      *   a `NoClassDefFoundError` at the first call;
      * - the JDK engine for a backend whose Host header the JDK would replace by the base URL's authority.
+     *
+     * Each fails with the `IllegalArgumentException` of the shared checks ([EngineSelection]), as on the reactive
+     * stack.
      */
     private fun checkedEngineSelection(): Map<String, RestClientEngine> {
         val engines = properties.engine
-        val unknown = engines.endpoints.keys - meshByBackend.keys
-        check(unknown.isEmpty()) {
-            "${unknown.sorted().joinToString { "${RestClientProperties.Engine.PREFIX}.endpoints.$it" }} " +
-                "names no mesh endpoint - the key must be the alias of an app.mesh.endpoints[] entry. " +
-                "Known aliases: ${meshByBackend.keys.sorted()}"
-        }
+        EngineSelection.requireKnownAliases(RestClientProperties.Engine.PREFIX, engines.endpoints.keys, meshByBackend.keys)
         val selected = meshByBackend.keys.associateWith(engines::engineFor)
-        selected.entries
-            .groupBy({ it.value }, { it.key })
-            .filterKeys { !engineLibraryPresent(it) }
-            .forEach { (engine, aliases) ->
-                error(
-                    "${aliases.map(engines::keyFor).distinct().sorted().joinToString()} selects the HTTP engine " +
-                        "'$engine' (for ${aliases.sorted().joinToString()}), but its library is not on the classpath " +
-                        "(${engine.markerClass} is missing). Add ${engine.dependency}, or select another engine.",
-                )
-            }
-        val allowRestricted = System.getProperty(JdkEngineTransport.ALLOW_RESTRICTED_HEADERS)
+        EngineSelection.requireLibraries(RestClientProperties.Engine.PREFIX, selected, engines.endpoints.keys, engineLibraryPresent)
+        val hostAllowed = jdkAllowsHostHeader()
         selected
             .filterValues { it == RestClientEngine.JDK }
             .keys
             .sorted()
             .forEach { alias ->
-                JdkEngineTransport.hostHeaderConflict(meshByBackend.getValue(alias), allowRestricted)?.let { conflict ->
-                    error(
-                        "${engines.keyFor(alias)} selects the HTTP engine 'jdk' for '$alias', but the JDK client " +
-                            "restricts the Host header: $conflict, so the sidecar would route the call by the wrong " +
-                            "host. Select another engine for this backend, point its base-url at a URL whose " +
-                            "authority is the Host, or start the JVM with " +
-                            "-D${JdkEngineTransport.ALLOW_RESTRICTED_HEADERS}=host - a JVM-wide setting that " +
-                            "changes every java.net.http client of the process, which is why veredium never sets it.",
-                    )
+                val conflict = JdkEngineTransport.hostHeaderConflict(meshByBackend.getValue(alias), hostAllowed)
+                require(conflict == null) {
+                    "${engines.keyFor(alias)} selects the HTTP engine 'jdk' for '$alias', but the JDK client " +
+                        "restricts the Host header: $conflict, so the sidecar would route the call by the wrong " +
+                        "host. Select another engine for this backend, point its base-url at a URL whose " +
+                        "authority is the Host, or start the JVM with " +
+                        "-D${EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS}=host - a JVM-wide setting that " +
+                        "changes every java.net.http client of the process, which is why veredium never sets it."
                 }
             }
         return selected
@@ -408,7 +403,7 @@ object RestClientMetrics {
      * The one pool's name: the [POOL_TAG] value, the evictor thread's name and the name the shutdown line
      * reports. A constant, not a property: one factory, one pool, and no deployment runs two in one registry.
      */
-    const val POOL_NAME: String = "restclient-pool"
+    const val POOL_NAME: String = "restclient-apache"
 
     /**
      * Decoded response body size per call - the input for sizing `app.restclient.max-in-memory-size`; unit, tag

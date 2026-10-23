@@ -15,8 +15,8 @@ logging:
         veredium: DEBUG
     # The exchange stream: one event per outbound HTTP exchange, written by legatium-webclient-logging (see the
     # adapter-logging block below). INFO = every call; WARN = only failures, timeouts, cancellations, slow
-    # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Unlike the module's former exchange diary, raising this level FILTERS
-    # the stream instead of switching it off - severity and semantics are decoupled, dashboards key on
+    # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Raising this level FILTERS the
+    # stream instead of switching it off - severity and semantics are decoupled, dashboards key on
     # adapter_outcome. Both names are pinned by LoggingLevelContractTest (in the fixture application-test.yml).
     adapter-http-exchange: INFO
     # The library's own logger: the immediate WARN breadcrumb when a call throws, and errors of the logging
@@ -73,12 +73,12 @@ adapter-logging:
 
 app:
   webclient:
-    # Upper bound on a buffered response body. 256 KB is Spring's own ExchangeStrategies default and replaces
-    # the former 8 KB limit, which rejected a real access-profile list. The bound applies per concurrently
-    # buffered response, so increases must still be chosen deliberately. It no longer bounds what is LOGGED of
-    # a body - that is adapter-logging.max-body-bytes above, an independent number.
+    # Upper bound on a buffered response body. 256 KB is Spring's own ExchangeStrategies default; 8 KB rejects
+    # a real access-profile list. The bound applies per concurrently buffered response, so increases must still
+    # be chosen deliberately. It does not bound what is LOGGED of a body - that is adapter-logging.max-body-bytes
+    # above, an independent number.
     # Applied to the clone of Boot's builder after Boot's codec customizer ran, so it wins over
-    # spring.http.codecs.max-in-memory-size for these clients (webclient-config-guide.md section 1.1).
+    # spring.http.codecs.max-in-memory-size for these clients (webclient-config-guide.md, "max-in-memory-size").
     #
     # A response that exceeds it fails the call with a DataBufferLimitException, wrapped by Spring into a
     # WebClientResponseException reporting 200. That is a CLIENT-side refusal - the backend answered correctly -
@@ -92,7 +92,8 @@ app:
     # spring.http.clients.reactive.connector is neither read nor changed, so the host's other WebClients keep
     # theirs. A key that names no mesh alias, or an engine whose library is missing, fails the start naming the
     # key; jdk also needs the JVM started with -Djdk.httpclient.allowRestrictedHeaders=host (the Host header).
-    # What each engine applies of the mesh transport and pool settings: webclient-config-guide.md section 1.6.
+    # What each engine applies of the mesh transport and pool settings: webclient-config-guide.md, "engine.* — the
+    # HTTP engine".
     engine:
       default: reactor-netty
       endpoints: {}
@@ -196,12 +197,12 @@ resilience4j:
   # `instances.<name>` listed here, and the mesh customizer (veredium-core, MeshResilienceCustomizers) sets the
   # derived budget on every endpoint whose time-limiter toggle is on (the default) WHILE that instance is built.
   # An alias an endpoint uses but this block does not declare still gets an instance (Resilience4j creates one
-  # for the customizer) - on the registry default, not on lap-backend, silently; MeshResilienceStartupGuard
+  # for the customizer) - on the registry default, not on mesh-backend, silently; MeshResilienceStartupGuard
   # therefore fails the start and names the missing key. This file once declared a single instance here;
   # MeshResilienceShippedConfigTest boots the auto-configuration against it.
   timelimiter:
     configs:
-      lap-backend:
+      mesh-backend:
         # A fallback only: the mesh customizer sets every enabled instance to the derived timeout (see
         # veredium-core/docs/mesh-timeout.md), so 3s is only the fallback for an endpoint whose time-limiter
         # toggle is switched off. cancel-running-future is the Resilience4j default, written out so the budget
@@ -210,20 +211,20 @@ resilience4j:
         cancel-running-future: true
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       api-example-com-GET-v5-access-profiles-by-involved-party:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-POST-v5-involved-parties-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-GET-v6-involved-parties:
-        base-config: lap-backend
+        base-config: mesh-backend
 
   # The values below are the Resilience4j defaults, written out DELIBERATELY: making them visible and
   # reviewable is the point, and pinning them here means a library upgrade cannot change this application's
   # behaviour behind its back. Tune them against real traffic - the notes say what each one costs.
   bulkhead:
     configs:
-      lap-backend:
+      mesh-backend:
         # Bound by the SHARED connection pool, not chosen per backend: every endpoint talks to the same local
         # sidecar through one Reactor-Netty pool of app.mesh.defaults.transport.max-connections (100). With
         # four backends, 4 x 25 = 100 - the bulkheads shed load exactly as the pool runs out, rather than
@@ -255,17 +256,17 @@ resilience4j:
         # raising it here without raising the pool just moves the queueing.
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       api-example-com-GET-v5-access-profiles-by-involved-party:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-POST-v5-involved-parties-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-GET-v6-involved-parties:
-        base-config: lap-backend
+        base-config: mesh-backend
 
   circuitbreaker:
     configs:
-      lap-backend:
+      mesh-backend:
         # NOTE: a bulkhead rejection is NOT counted as a backend failure - see WebClientVerdicts, whose
         # client-side-failure verdict the mesh customizer installs on every instance below while Resilience4j
         # builds it. That invariant lives in code on purpose, so it cannot be lost by an edit to this block.
@@ -293,10 +294,10 @@ resilience4j:
         slow-call-duration-threshold: 60s
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       api-example-com-GET-v5-access-profiles-by-involved-party:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-POST-v5-involved-parties-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-GET-v6-involved-parties:
-        base-config: lap-backend
+        base-config: mesh-backend

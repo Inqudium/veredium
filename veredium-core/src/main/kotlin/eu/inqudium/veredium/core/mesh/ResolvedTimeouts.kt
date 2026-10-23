@@ -11,7 +11,7 @@ import java.time.Duration
  * producing an inert slow-call threshold or an inverted timeout.
  *
  * Ported from the PoC (`eu.mesh.timeouts.poc`) and extended with the client target fields ([host], [baseUrl],
- * [headers]). [MeshTimeoutConfig] feeds the two timeout rungs into R4j ([timeLimiterTimeout],
+ * [headers]). [MeshResilienceConfiguration] feeds the two timeout rungs into R4j ([timeLimiterTimeout],
  * [slowCallDuration]); the client factory of each stack reads the rest.
  *
  * ## Worked example - anchor 1s..5s at `maxRetries = 0` (all values in ms, default margins/transport)
@@ -146,7 +146,7 @@ private const val MARGIN_SOURCES = "app.mesh.defaults.margins, overridden per en
  * read the effective budgets straight from the log instead of recomputing them. Ported from the PoC
  * (`eu.mesh.timeouts.poc`); [ladderLines] is pure (no logging) so it can be asserted directly.
  *
- * A bean of [MeshTimeoutConfig], not a scanned component: the mesh wiring is imported by each client stack's
+ * A bean of [MeshResilienceConfiguration], not a scanned component: the mesh wiring is imported by each client stack's
  * configuration, so a host that scans only its stack's package still gets this line.
  */
 class MeshLadderLogger(
@@ -154,6 +154,7 @@ class MeshLadderLogger(
 ) {
     private val log = LoggerFactory.getLogger(MeshLadderLogger::class.java)
 
+    /** Writes [ladderLines] at INFO once the application is ready - after every binding the ladder reads. */
     @EventListener(ApplicationReadyEvent::class)
     fun logResolvedLadder() = ladderLines().forEach(log::info)
 

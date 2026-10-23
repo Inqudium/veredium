@@ -3,7 +3,6 @@ package eu.inqudium.veredium.restclient
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.AppenderBase
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock
 import com.github.tomakehurst.wiremock.client.WireMock.aResponse
@@ -19,7 +18,13 @@ import eu.inqudium.legatium.common.ClientLoggingProperties
 import eu.inqudium.legatium.restclient.logging.ClientLoggingAutoConfiguration
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
-import eu.inqudium.veredium.restclient.LegatiumExchangeLoggingIntegrationTest.Companion.REFERENCE_PREFIXES
+import eu.inqudium.veredium.testsupport.CapturingAppender
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
+import eu.inqudium.veredium.testsupport.Greeting
+import eu.inqudium.veredium.testsupport.LookupRequest
+import eu.inqudium.veredium.testsupport.Unserialisable
+import eu.inqudium.veredium.testsupport.WireMockArrivals
+import eu.inqudium.veredium.testsupport.causeChain
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
@@ -29,6 +34,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.micrometer.observation.ObservationRegistry
 import io.micrometer.tracing.Tracer
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.catchThrowable
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeAll
@@ -39,26 +45,22 @@ import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.boot.autoconfigure.AutoConfigurations
 import org.springframework.boot.context.properties.EnableConfigurationProperties
-import org.springframework.boot.env.YamlPropertySourceLoader
 import org.springframework.boot.restclient.autoconfigure.RestClientAutoConfiguration
 import org.springframework.boot.restclient.autoconfigure.RestClientObservationAutoConfiguration
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
-import org.springframework.core.env.EnumerablePropertySource
 import org.springframework.core.env.MapPropertySource
-import org.springframework.core.io.ClassPathResource
 import org.springframework.http.MediaType
 import org.springframework.util.unit.DataSize
 import org.springframework.web.client.ResourceAccessException
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
 import java.util.function.Supplier
 
@@ -125,15 +127,8 @@ class LegatiumExchangeLoggingIntegrationTest {
 
         private lateinit var wireMock: WireMockServer
 
-        /**
-         * What a request to a URL triggers once it reached WireMock, per test ([arrivalOf]) - behind ONE listener for
-         * the class, registered with the server: `resetAll()` does not remove a request listener, so one added per
-         * test would pile up and fire for a later test's request to the same URL. Cleared before every test.
-         */
-        private val arrivals = ConcurrentHashMap<String, () -> Unit>()
-
-        /** A latch that opens once a request to [url] reached WireMock in the current test. */
-        private fun arrivalOf(url: String): CountDownLatch = CountDownLatch(1).also { latch -> arrivals[url] = latch::countDown }
+        /** What a request to a URL triggers once it reached WireMock, per test - the class's one listener on the server. */
+        private val arrivals = WireMockArrivals()
 
         @JvmStatic
         @BeforeAll
@@ -141,7 +136,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             wireMock =
                 WireMockServer(wireMockConfig().dynamicPort())
                     .apply { start() }
-                    .also { server -> server.addMockServiceRequestListener { request, _ -> arrivals[request.url]?.invoke() } }
+                    .also { server -> server.addMockServiceRequestListener(arrivals) }
         }
 
         @JvmStatic
@@ -173,168 +168,6 @@ class LegatiumExchangeLoggingIntegrationTest {
         exchangeLogger.level = previousExchangeLevel
     }
 
-    /**
-     * A context the way the host assembles it: Boot's RestClient auto-configuration (the builder bean and its
-     * customizers), a fully wired OBSERVATION side (a recording `ObservationRegistry` plus Boot's
-     * `ObservationRestClientCustomizer`, which is what puts the registry on the builder), the library's
-     * auto-configuration (its interceptor as a customizer), the reference `application.yml` for the
-     * `adapter-logging` and `app.restclient` blocks, and the factory with its collaborators. One mesh endpoint,
-     * `GET /things/{id}` against WireMock, carrying the token header so the masking can be observed.
-     *
-     * **Why the registry is hand-built and Boot's `MetricsAutoConfiguration` is NOT used.** It would supply the
-     * `DefaultMeterObservationHandler` for free, but it also brings `MeterRegistryPostProcessor`, which calls
-     * `Metrics.addRegistry(...)` - every context would publish its registry into the JVM-GLOBAL
-     * `Metrics.globalRegistry` and never take it out again. The handler is what makes the registry live at all:
-     * Micrometer counts a handler-less registry as noop, and a noop registry records nothing however well the
-     * rest is wired.
-     *
-     * The three Resilience4j registries are beans of their own, and [BlockingResilienceDecorator] is built over
-     * them with the context's `ObservationRegistry` and this module's worker name, as [RestClientConfiguration]
-     * builds it in the host. That configuration itself is NOT imported: it also pulls in the core's mesh
-     * wiring, whose startup guard needs Resilience4j's auto-configuration on the registries - which this
-     * hand-assembled context deliberately leaves out. [BoundRestClientProperties] stands in for its one other
-     * contribution, the `app.restclient` binding.
-     *
-     * [tracer] is the one knob that switches legatium between its two "observed" verdicts. The library decides
-     * by BEAN LOOKUP on the type `io.micrometer.tracing.Tracer`, so any bean of that type is enough; contexts
-     * that pass nothing stay in the untraced mode this class otherwise pins.
-     */
-    private fun hostContext(
-        backend: String,
-        timeLimiter: Duration = Duration.ofSeconds(30),
-        tracer: Tracer? = null,
-        maxConnections: Int = MeshProperties.Transport().maxConnections,
-    ): ApplicationContextRunner {
-        val meters = SimpleMeterRegistry()
-        val observations = ObservationRegistry.create().apply { observationConfig().observationHandler(DefaultMeterObservationHandler(meters)) }
-        val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
-        val timeLimiters = TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(timeLimiter).build())
-        val bulkheads = BulkheadRegistry.ofDefaults()
-        return ApplicationContextRunner()
-            .withInitializer { context ->
-                context.environment.propertySources.addFirst(MapPropertySource(REFERENCE_PROPERTY_SOURCE, referenceProperties()))
-            }.withConfiguration(
-                AutoConfigurations.of(
-                    RestClientAutoConfiguration::class.java,
-                    // @ConditionalOnBean(ObservationRegistry) - it contributes the customizer that places the
-                    // registry on Boot's builder, which is the step the module toggle then leaves alone.
-                    RestClientObservationAutoConfiguration::class.java,
-                    ClientLoggingAutoConfiguration::class.java,
-                ),
-            ).withBean(SimpleMeterRegistry::class.java, Supplier { meters })
-            .withBean(ObservationRegistry::class.java, Supplier { observations })
-            // The module's OWN @EnableConfigurationProperties binding, not a hand-made instance: binding from
-            // the Environment is part of what this context reproduces, so a reference `app.restclient.*` value
-            // that never arrives fails a test here instead of silently degrading to the code default.
-            .withUserConfiguration(BoundRestClientProperties::class.java)
-            .withBean(
-                MeshProperties::class.java,
-                Supplier {
-                    MeshProperties(
-                        defaults =
-                            MeshProperties.Defaults(
-                                individualRequestTimeoutMs = 1000,
-                                transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl(), maxConnections = maxConnections),
-                            ),
-                        endpoints =
-                            listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/things/{id}", alias = backend)),
-                    )
-                },
-            ).withBean(CircuitBreakerRegistry::class.java, Supplier { circuitBreakers })
-            .withBean(TimeLimiterRegistry::class.java, Supplier { timeLimiters })
-            .withBean(BulkheadRegistry::class.java, Supplier { bulkheads })
-            .withBean(
-                BlockingResilienceDecorator::class.java,
-                Supplier {
-                    BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, observations, RestClientConfiguration.WORKER_NAME_PREFIX)
-                },
-            ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
-            .withBean(ResilientRestClientFactory::class.java)
-            .withBean(RestClientObservationReport::class.java)
-            .let { runner -> tracer?.let { bean -> runner.withBean(Tracer::class.java, Supplier { bean }) } ?: runner }
-    }
-
-    /** The `app.restclient` binding alone - see [hostContext] for why not [RestClientConfiguration]. */
-    @EnableConfigurationProperties(RestClientProperties::class)
-    class BoundRestClientProperties
-
-    /**
-     * The [REFERENCE_PREFIXES] keys of the reference `src/test/resources/application.yml`, flattened the way
-     * Boot would load them. Read from the real file rather than restated here: a copy would keep passing after
-     * the reference value changed, which is the one thing these assertions exist to catch.
-     */
-    private fun referenceProperties(): Map<String, Any> =
-        YamlPropertySourceLoader()
-            .load(ConfigurationFiles.REFERENCE, ClassPathResource(ConfigurationFiles.REFERENCE))
-            .filterIsInstance<EnumerablePropertySource<*>>()
-            .flatMap { source ->
-                source.propertyNames
-                    .filter { name -> REFERENCE_PREFIXES.any(name::startsWith) }
-                    .map { it to source.getProperty(it)!! }
-            }.toMap()
-            .also { loaded ->
-                // A prefix that silently matches nothing would turn every assertion below into a tautology
-                // about code defaults - exactly the failure this whole test guards against.
-                REFERENCE_PREFIXES.forEach { prefix ->
-                    assertThat(loaded.keys)
-                        .`as`("reference application.yml must carry '$prefix*' keys")
-                        .anyMatch { it.startsWith(prefix) }
-                }
-            }
-
-    /**
-     * Attaches a recording appender to the exchange logger for the duration of [block], recording only the
-     * events of [backend] - the logger is process-wide, and a late event of an earlier test's abandoned worker
-     * must not be counted towards this one's.
-     */
-    private fun capturing(
-        backend: String,
-        expectedEvents: Int,
-        block: (RecordingAppender) -> Unit,
-    ) {
-        val appender = RecordingAppender(expectedEvents, adapterName = backend).apply { start() }
-        exchangeLogger.addAppender(appender)
-        try {
-            block(appender)
-        } finally {
-            exchangeLogger.detachAppender(appender)
-            appender.stop()
-        }
-    }
-
-    private fun AssertableApplicationContext.client(backend: String): ResilientRestClient = getBean(ResilientRestClientFactory::class.java).create(backend)
-
-    /**
-     * Runs [block] with a recorder attached to [logger], and returns whatever it returns.
-     *
-     * For lines written while the context REFRESHES - the factory's configuration summary, the library's wiring
-     * verdict - the recorder has to be in place around `run(...)` rather than inside the context consumer, where
-     * they have already been written.
-     */
-    private fun <T> recording(
-        logger: Logger,
-        block: (RecordingAppender) -> T,
-    ): T {
-        val appender = RecordingAppender(expected = 1).apply { start() }
-        // The wiring verdicts are DEBUG lines (legatium's report; the factory's summary is INFO) and
-        // logback-test.xml roots at INFO, so the logger is opened to DEBUG for the recording and restored after.
-        val previousLevel = logger.level
-        logger.level = Level.DEBUG
-        logger.addAppender(appender)
-        try {
-            return block(appender)
-        } finally {
-            logger.detachAppender(appender)
-            appender.stop()
-            logger.level = previousLevel
-        }
-    }
-
-    /** The one recorded line containing [needle], as its rendered message. */
-    private fun RecordingAppender.lineContaining(needle: String): String = events().map { it.formattedMessage }.single { it.contains(needle) }
-
-    private fun ILoggingEvent.field(name: String): Any? = keyValuePairs?.singleOrNull { it.key == name }?.value
-
     @Nested
     inner class `One event per exchange` {
         @Test
@@ -351,7 +184,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Given: a host context and a 200 answer
             wireMock.stubFor(get(urlEqualTo("/things/42")).willReturn(okJson("""{"message":"hi"}""")))
             hostContext("things").run { context ->
-                capturing(backend = "things", expectedEvents = 1) { appender ->
+                capturing(backend = "things") { appender ->
                     // When: one GET through a client of the factory
                     context.client("things").get(Greeting::class.java) { it.uri("/things/42") }
 
@@ -383,7 +216,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Given
             wireMock.stubFor(post(urlEqualTo("/things/42")).willReturn(okJson("""{"message":"ok"}""")))
             hostContext("phantom").run { context ->
-                capturing(backend = "phantom", expectedEvents = 1) { appender ->
+                capturing(backend = "phantom") { appender ->
                     val client = context.client("phantom")
 
                     // When: a call that fails during serialisation, then a well-formed one
@@ -415,7 +248,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Given
             wireMock.stubFor(get(urlEqualTo("/things/1")).willReturn(okJson("""{"message":"hi"}""")))
             hostContext("masked").run { context ->
-                capturing(backend = "masked", expectedEvents = 1) { appender ->
+                capturing(backend = "masked") { appender ->
                     // When
                     context.client("masked").get(Greeting::class.java) { it.uri("/things/1").header(TOKEN_HEADER, TOKEN_VALUE) }
 
@@ -447,7 +280,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                 get(urlEqualTo("/things/404")).willReturn(aResponse().withStatus(404).withBody("""{"error":"no such thing"}""")),
             )
             hostContext("benign").run { context ->
-                capturing(backend = "benign", expectedEvents = 1) { appender ->
+                capturing(backend = "benign") { appender ->
                     // When
                     runCatching { context.client("benign").get(Greeting::class.java) { it.uri("/things/404") } }
 
@@ -475,7 +308,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                 get(urlEqualTo("/things/throttled")).willReturn(aResponse().withStatus(429).withBody("""{"error":"slow down"}""")),
             )
             hostContext("throttled").run { context ->
-                capturing(backend = "throttled", expectedEvents = 1) { appender ->
+                capturing(backend = "throttled") { appender ->
                     // When
                     runCatching { context.client("throttled").get(Greeting::class.java) { it.uri("/things/throttled") } }
 
@@ -501,7 +334,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             wireMock.stubFor(get(urlEqualTo("/things/500")).willReturn(aResponse().withStatus(500).withBody("""{"error":"boom"}""")))
             wireMock.stubFor(get(urlEqualTo("/things/200")).willReturn(okJson("""{"message":"fine"}""")))
             hostContext("server").run { context ->
-                capturing(backend = "server", expectedEvents = 2) { appender ->
+                capturing(backend = "server") { appender ->
                     val client = context.client("server")
 
                     // When
@@ -510,7 +343,7 @@ class LegatiumExchangeLoggingIntegrationTest {
 
                     // Then: the 5xx is a WARN failure carrying its body; the 200 carries its body too, because
                     // the reference file logs bodies in `always` mode (the configuration case below pins that)
-                    val events = appender.awaitEvents()
+                    val events = appender.awaitEvents(count = 2)
                     val failure = events.single { it.field("adapter_response_status_code") == 500 }
                     assertThat(failure.level).isEqualTo(Level.WARN)
                     assertThat(failure.field("adapter_outcome")).isEqualTo("failure")
@@ -535,7 +368,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Given: a backend slower than the 1400 ms response timeout
             wireMock.stubFor(get(urlEqualTo("/things/slow")).willReturn(okJson("{}").withFixedDelay(3_000)))
             hostContext("transport-timeout").run { context ->
-                capturing(backend = "transport-timeout", expectedEvents = 1) { appender ->
+                capturing(backend = "transport-timeout") { appender ->
                     // When
                     runCatching { context.client("transport-timeout").get(Greeting::class.java) { it.uri("/things/slow") } }
 
@@ -552,30 +385,30 @@ class LegatiumExchangeLoggingIntegrationTest {
         fun `should log a pool-lease timeout as WARN timeout`() {
             // What is tested: the third pre-response guard - no pooled connection becoming free within the
             //   200 ms pending-acquire timeout. Apache raises ConnectionRequestTimeoutException, a bare
-            //   InterruptedIOException that no JDK timeout type covers; legatium 1.2.1 matches it by class name.
+            //   InterruptedIOException that no JDK timeout type covers; legatium matches it by class name.
             // Success criteria: with a pool of ONE connection held by a slow call, a second call fails within the
-            //   lease window, and its event is WARN `adapter_outcome=timeout` without a status - not the ERROR
-            //   `failure` legatium 1.2.0 wrote for it.
-            // Why it matters: pool exhaustion is a saturation signal, not a backend fault, and before 1.2.1 it
-            //   landed at the level alerting fires on (finding 16 of the 2026-10-21 defect analysis). This pins
-            //   the upgrade where veredium wires the pool, so a downgrade or a changed exception type shows up.
+            //   lease window, and its event is WARN `adapter_outcome=timeout` without a status - not an ERROR
+            //   `failure`.
+            // Why it matters: pool exhaustion is a saturation signal, not a backend fault, and must not land at
+            //   the level alerting fires on. Only the pool veredium wires produces this exception, so this is
+            //   where a legatium that does not recognise it, or a changed exception type, shows up.
             //
             // Given: a pool of one connection, held by a call to a 3 s backend that is already on the wire
             wireMock.stubFor(get(urlEqualTo("/things/hold")).willReturn(okJson("{}").withFixedDelay(3_000)))
-            val inFlight = arrivalOf("/things/hold")
+            val inFlight = arrivals.arrivalOf("/things/hold")
             hostContext("pool-lease", maxConnections = 1).run { context ->
-                capturing(backend = "pool-lease", expectedEvents = 1) { appender ->
+                capturing(backend = "pool-lease") { appender ->
                     val client = context.client("pool-lease")
-                    val holder = callers.submit<Throwable?> { runCatching { client.get(Greeting::class.java) { it.uri("/things/hold") } }.exceptionOrNull() }
+                    val holder = callers.submit<Throwable?> { catchThrowable { client.get(Greeting::class.java) { it.uri("/things/hold") } } }
                     assertThat(inFlight.await(5, TimeUnit.SECONDS)).`as`("the holding call must have the only connection").isTrue()
 
                     // When: a second call needs a connection the pool cannot lend
-                    val failure = runCatching { client.get(Greeting::class.java) { it.uri("/things/1") } }.exceptionOrNull()
+                    val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/things/1") } }
 
                     // Then: the caller sees the lease timeout, and the first event - the lease one; the holder's
                     // own event arrives only at its response timeout - is a WARN timeout
                     assertThat(failure).isInstanceOf(ResourceAccessException::class.java)
-                    assertThat(generateSequence(failure) { it.cause }.map { it.javaClass.name }.toList())
+                    assertThat(causeChain(failure).map { it.javaClass.name })
                         .contains("org.apache.hc.core5.http.ConnectionRequestTimeoutException")
                     val event = appender.awaitEvents().first()
                     assertThat(event.level).isEqualTo(Level.WARN)
@@ -604,14 +437,12 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Given: a 200 ms budget against a 3 s backend
             wireMock.stubFor(get(urlEqualTo("/things/budget")).willReturn(okJson("{}").withFixedDelay(3_000)))
             hostContext("budget", timeLimiter = Duration.ofMillis(200)).run { context ->
-                capturing(backend = "budget", expectedEvents = 1) { appender ->
+                capturing(backend = "budget") { appender ->
                     // When
-                    val failure =
-                        runCatching { context.client("budget").get(Greeting::class.java) { it.uri("/things/budget") } }
-                            .exceptionOrNull()
+                    val failure = catchThrowable { context.client("budget").get(Greeting::class.java) { it.uri("/things/budget") } }
 
                     // Then: the caller saw the budget expire ...
-                    assertThat(failure).isInstanceOf(java.util.concurrent.TimeoutException::class.java)
+                    assertThat(failure).isInstanceOf(TimeoutException::class.java)
                     // ... and the worker's exchange ended with the cancellation, promptly
                     val event = appender.awaitEvents().last()
                     assertThat(event.level).isEqualTo(Level.ERROR)
@@ -640,9 +471,9 @@ class LegatiumExchangeLoggingIntegrationTest {
             // interrupt is sent only once the request is on the wire, otherwise the worker may be cancelled
             // before it ever sent anything and there would be no exchange to log
             wireMock.stubFor(get(urlEqualTo("/things/never")).willReturn(okJson("{}").withFixedDelay(30_000)))
-            val inFlight = arrivalOf("/things/never")
+            val inFlight = arrivals.arrivalOf("/things/never")
             hostContext("walked-away").run { context ->
-                capturing(backend = "walked-away", expectedEvents = 1) { appender ->
+                capturing(backend = "walked-away") { appender ->
                     val client = context.client("walked-away")
                     val callerThread = AtomicReference<Thread>()
                     val started = CountDownLatch(1)
@@ -650,7 +481,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                         callers.submit<Throwable?> {
                             callerThread.set(Thread.currentThread())
                             started.countDown()
-                            runCatching { client.get(Greeting::class.java) { it.uri("/things/never") } }.exceptionOrNull()
+                            catchThrowable { client.get(Greeting::class.java) { it.uri("/things/never") } }
                         }
                     assertThat(started.await(5, TimeUnit.SECONDS)).isTrue()
                     assertThat(inFlight.await(5, TimeUnit.SECONDS)).`as`("the request must have reached the backend").isTrue()
@@ -687,7 +518,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             wireMock.stubFor(post(urlEqualTo("/things/42")).willReturn(aResponse().withStatus(500).withBody("{}")))
             hostContext("capped").run { context ->
                 val cap = context.getBean(ClientLoggingProperties::class.java).maxBodyBytes
-                capturing(backend = "capped", expectedEvents = 1) { appender ->
+                capturing(backend = "capped") { appender ->
                     // When
                     runCatching {
                         context
@@ -883,7 +714,7 @@ class LegatiumExchangeLoggingIntegrationTest {
         fun `should flip to the traced verdict on the mere presence of a Tracer bean, which traces nothing`() {
             // What is tested: the OTHER branch of the same verdict, and what it is - and is not - evidence of.
             //   legatium chooses it by looking up a bean of type `io.micrometer.tracing.Tracer`, so the minimal
-            //   [Tracer.NOOP] bean is enough to reach it; nothing else about the context changes.
+            //   `Tracer.NOOP` bean is enough to reach it; nothing else about the context changes.
             // Success criteria: legatium's startup line flips to "with Micrometer Tracing wired" and says no
             //   correlation header is generated - while the wire still carries the generated header and no
             //   `traceparent`, because a NOOP tracer starts no span.
@@ -926,8 +757,8 @@ class LegatiumExchangeLoggingIntegrationTest {
     /**
      * Does a value the CALLER put in its MDC reach the event that the library writes on the worker thread?
      *
-     * On the reactive stack this was a documented gap a host had to close with a `ThreadLocalAccessor` of its
-     * own. Here it is a guarantee of the module: [BlockingResilienceDecorator] copies the caller's MDC onto the
+     * On the reactive stack this is a documented gap a host closes with a `ThreadLocalAccessor` of its own.
+     * Here it is a guarantee of the module: [BlockingResilienceDecorator] copies the caller's MDC onto the
      * worker for the duration of the call, and the library's interceptor - which captures the MDC at wiring, on
      * that worker - sees it there. No accessor, no host recipe.
      */
@@ -945,7 +776,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Given: a caller carrying a correlation id in its MDC, on a thread of its own
             wireMock.stubFor(get(urlEqualTo("/things/mdc")).willReturn(okJson("""{"message":"hi"}""")))
             hostContext("mdc-join").run { context ->
-                capturing(backend = "mdc-join", expectedEvents = 1) { appender ->
+                capturing(backend = "mdc-join") { appender ->
                     // When: the call runs on a dedicated thread, under that MDC
                     callers
                         .submit {
@@ -966,40 +797,146 @@ class LegatiumExchangeLoggingIntegrationTest {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
     /**
-     * Captures events written on another thread: the library emits on the decorator's worker, and for an
-     * abandoned call that happens after the caller has already returned. Snapshots the MDC at append time,
-     * because the library's emission scope holds its keys only for the duration of the log statement, and
-     * Logback reads the MDC lazily. [awaitEvents] waits for [expected] events, so a capture is complete, not
-     * merely safe to read.
+     * A context the way the host assembles it: Boot's RestClient auto-configuration (the builder bean and its
+     * customizers), a fully wired OBSERVATION side (a recording `ObservationRegistry` plus Boot's
+     * `ObservationRestClientCustomizer`, which is what puts the registry on the builder), the library's
+     * auto-configuration (its interceptor as a customizer), the reference `application.yml` for the
+     * `adapter-logging` and `app.restclient` blocks, and the factory with its collaborators. One mesh endpoint,
+     * `GET /things/{id}` against WireMock, carrying the token header so the masking can be observed.
      *
-     * [adapterName] scopes an exchange-logger capture to one test's backend: the logger is shared by every
-     * test in the JVM, and an abandoned worker of an EARLIER test (its caller long released, its socket closed
-     * by an interrupt) may write its event while this test is capturing - counted, it would satisfy or break
-     * [expected] for the wrong reason. Backend names are unique per test. `null` records everything, for the
-     * startup-line loggers, whose lines carry no `adapter_name`.
+     * **Why the registry is hand-built and Boot's `MetricsAutoConfiguration` is NOT used.** It would supply the
+     * `DefaultMeterObservationHandler` for free, but it also brings `MeterRegistryPostProcessor`, which calls
+     * `Metrics.addRegistry(...)` - every context would publish its registry into the JVM-GLOBAL
+     * `Metrics.globalRegistry` and never take it out again. The handler is what makes the registry live at all:
+     * Micrometer counts a handler-less registry as noop, and a noop registry records nothing however well the
+     * rest is wired.
+     *
+     * The three Resilience4j registries are beans of their own, and [BlockingResilienceDecorator] is built over
+     * them with the context's `ObservationRegistry` and this module's worker name, as [RestClientConfiguration]
+     * builds it in the host. That configuration itself is NOT imported: it also pulls in the core's mesh
+     * wiring, whose startup guard needs Resilience4j's auto-configuration on the registries - which this
+     * hand-assembled context deliberately leaves out. [BoundRestClientProperties] stands in for its one other
+     * contribution, the `app.restclient` binding.
+     *
+     * [tracer] is the one knob that switches legatium between its two "observed" verdicts. The library decides
+     * by BEAN LOOKUP on the type `io.micrometer.tracing.Tracer`, so any bean of that type is enough; contexts
+     * that pass nothing stay in the untraced mode this class otherwise pins.
      */
-    private class RecordingAppender(
-        private val expected: Int,
-        private val adapterName: String? = null,
-    ) : AppenderBase<ILoggingEvent>() {
-        private val captured = CopyOnWriteArrayList<ILoggingEvent>()
-        private val arrived = CountDownLatch(expected)
-
-        override fun append(eventObject: ILoggingEvent) {
-            if (adapterName != null && eventObject.keyValuePairs.orEmpty().none { it.key == "adapter_name" && it.value == adapterName }) return
-            eventObject.prepareForDeferredProcessing()
-            captured += eventObject
-            arrived.countDown()
-        }
-
-        fun awaitEvents(): List<ILoggingEvent> {
-            assertThat(arrived.await(5, TimeUnit.SECONDS))
-                .`as`("expected $expected exchange event(s) within 5s, got ${captured.size}")
-                .isTrue()
-            return captured.toList()
-        }
-
-        fun events(): List<ILoggingEvent> = captured.toList()
+    private fun hostContext(
+        backend: String,
+        timeLimiter: Duration = Duration.ofSeconds(30),
+        tracer: Tracer? = null,
+        maxConnections: Int = MeshProperties.Transport().maxConnections,
+    ): ApplicationContextRunner {
+        val meters = SimpleMeterRegistry()
+        val observations = ObservationRegistry.create().apply { observationConfig().observationHandler(DefaultMeterObservationHandler(meters)) }
+        val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+        val timeLimiters = TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(timeLimiter).build())
+        val bulkheads = BulkheadRegistry.ofDefaults()
+        return ApplicationContextRunner()
+            .withInitializer { context ->
+                context.environment.propertySources.addFirst(MapPropertySource(REFERENCE_PROPERTY_SOURCE, referenceProperties(*REFERENCE_PREFIXES.toTypedArray())))
+            }.withConfiguration(
+                AutoConfigurations.of(
+                    RestClientAutoConfiguration::class.java,
+                    // @ConditionalOnBean(ObservationRegistry) - it contributes the customizer that places the
+                    // registry on Boot's builder, which is the step the module toggle then leaves alone.
+                    RestClientObservationAutoConfiguration::class.java,
+                    ClientLoggingAutoConfiguration::class.java,
+                ),
+            ).withBean(SimpleMeterRegistry::class.java, Supplier { meters })
+            .withBean(ObservationRegistry::class.java, Supplier { observations })
+            // The module's OWN @EnableConfigurationProperties binding, not a hand-made instance: binding from
+            // the Environment is part of what this context reproduces, so a reference `app.restclient.*` value
+            // that never arrives fails a test here instead of silently degrading to the code default.
+            .withUserConfiguration(BoundRestClientProperties::class.java)
+            .withBean(
+                MeshProperties::class.java,
+                Supplier {
+                    MeshProperties(
+                        defaults =
+                            MeshProperties.Defaults(
+                                individualRequestTimeoutMs = 1000,
+                                transport = MeshProperties.Transport(sidecarBaseUrl = wireMock.baseUrl(), maxConnections = maxConnections),
+                            ),
+                        endpoints =
+                            listOf(MeshProperties.EndpointConfig(triplet = "/endpoint/localhost/GET/things/{id}", alias = backend)),
+                    )
+                },
+            ).withBean(CircuitBreakerRegistry::class.java, Supplier { circuitBreakers })
+            .withBean(TimeLimiterRegistry::class.java, Supplier { timeLimiters })
+            .withBean(BulkheadRegistry::class.java, Supplier { bulkheads })
+            .withBean(
+                BlockingResilienceDecorator::class.java,
+                Supplier {
+                    BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, observations, RestClientConfiguration.WORKER_NAME_PREFIX)
+                },
+            ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
+            .withBean(ResilientRestClientFactory::class.java)
+            .withBean(RestClientObservationReport::class.java)
+            .let { runner -> tracer?.let { bean -> runner.withBean(Tracer::class.java, Supplier { bean }) } ?: runner }
     }
+
+    /** The `app.restclient` binding alone - see [hostContext] for why not [RestClientConfiguration]. */
+    @EnableConfigurationProperties(RestClientProperties::class)
+    class BoundRestClientProperties
+
+    /**
+     * Attaches a recording appender to the exchange logger for the duration of [block], recording only the
+     * events of [backend] - the logger is process-wide, and a late event of an earlier test's abandoned worker
+     * must not be counted towards this one's.
+     */
+    private fun capturing(
+        backend: String,
+        block: (CapturingAppender) -> Unit,
+    ) {
+        val appender =
+            CapturingAppender { event -> event.keyValuePairs.orEmpty().any { it.key == "adapter_name" && it.value == backend } }
+                .apply { start() }
+        exchangeLogger.addAppender(appender)
+        try {
+            block(appender)
+        } finally {
+            exchangeLogger.detachAppender(appender)
+            appender.stop()
+        }
+    }
+
+    private fun AssertableApplicationContext.client(backend: String): ResilientRestClient = getBean(ResilientRestClientFactory::class.java).create(backend)
+
+    /**
+     * Runs [block] with a recorder attached to [logger], and returns whatever it returns.
+     *
+     * For lines written while the context REFRESHES - the factory's configuration summary, the library's wiring
+     * verdict - the recorder has to be in place around `run(...)` rather than inside the context consumer, where
+     * they have already been written.
+     */
+    private fun <T> recording(
+        logger: Logger,
+        block: (CapturingAppender) -> T,
+    ): T {
+        val appender = CapturingAppender().apply { start() }
+        // The wiring verdicts are DEBUG lines (legatium's report; the factory's summary is INFO) and
+        // logback-test.xml roots at INFO, so the logger is opened to DEBUG for the recording and restored after.
+        val previousLevel = logger.level
+        logger.level = Level.DEBUG
+        logger.addAppender(appender)
+        try {
+            return block(appender)
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
+            logger.level = previousLevel
+        }
+    }
+
+    /** The one recorded line containing [needle], as its rendered message. */
+    private fun CapturingAppender.lineContaining(needle: String): String = events.map { it.formattedMessage }.single { it.contains(needle) }
+
+    private fun ILoggingEvent.field(name: String): Any? = keyValuePairs?.singleOrNull { it.key == name }?.value
 }

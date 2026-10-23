@@ -1,9 +1,11 @@
 package eu.inqudium.veredium.core.resilience
 
-import eu.inqudium.veredium.core.mesh.MeshTimeoutConfig
+import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration
 import io.github.resilience4j.bulkhead.Bulkhead
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Import
@@ -47,8 +49,50 @@ object TestVerdicts {
 
 /** What a stack's `*VerdictsConfig` is: the verdicts bean next to the import of the shared wiring. */
 @Configuration(proxyBeanMethods = false)
-@Import(MeshTimeoutConfig::class)
+@Import(MeshResilienceConfiguration::class)
 class TestVerdictsConfig {
     @Bean
     fun breakerVerdicts(): BreakerVerdicts = TestVerdicts.breakerVerdicts
+}
+
+/**
+ * The mesh most tests of this package are built on: the accounts endpoint, optionally next to further
+ * endpoints, with the anchor at 1000 ms - which at the default maxRetries=0 derives timeLimiter=1800ms and
+ * slowCall=800ms.
+ */
+object TestMesh {
+    const val ACCOUNTS_TRIPLET = "/endpoint/api.example.com/GET/accounts/{accountId}"
+    const val ACCOUNTS_ALIAS = "api-example-com-GET-accounts"
+    const val PAYMENTS_TRIPLET = "/endpoint/api.example.com/POST/payments"
+    const val PAYMENTS_ALIAS = "api-example-com-POST-payments"
+
+    /**
+     * Props for the accounts endpoint and any [more] triplets, with the circuit-breaker derivation set to
+     * [circuitBreakerEnabled] and a pool of [maxConnections] (default: the Kotlin default of 100).
+     */
+    fun propsFor(
+        vararg more: String,
+        circuitBreakerEnabled: Boolean = false,
+        maxConnections: Int = MeshProperties.Transport().maxConnections,
+    ): MeshProperties =
+        MeshProperties(
+            defaults =
+                MeshProperties.Defaults(
+                    individualRequestTimeoutMs = 1000,
+                    circuitBreaker = MeshProperties.BackendToggle(enabled = circuitBreakerEnabled),
+                    transport = MeshProperties.Transport(maxConnections = maxConnections),
+                ),
+            endpoints = (listOf(ACCOUNTS_TRIPLET) + more).map { MeshProperties.EndpointConfig(it) },
+        )
+
+    /** Whether the instance registered under [alias] classifies [error] as ignorable (not a backend failure). */
+    fun ignores(
+        registry: CircuitBreakerRegistry,
+        error: Throwable,
+        alias: String = ACCOUNTS_ALIAS,
+    ): Boolean =
+        registry
+            .circuitBreaker(alias)
+            .circuitBreakerConfig.ignoreExceptionPredicate
+            .test(error)
 }

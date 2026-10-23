@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.webclient
 
+import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
@@ -33,15 +34,15 @@ class JdkEngineRestrictedHostHeaderTest {
         //   would lift the restriction for every other java.net.http client of the process.
         //
         // Given
-        assertThat(System.getProperty(WebClientEngineChecks.JDK_RESTRICTED_HEADERS_PROPERTY)).isNull()
-        assertThat(WebClientEngineChecks.jdkAllowsHostHeader()).isFalse()
+        assertThat(System.getProperty(EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS)).isNull()
+        assertThat(EngineSelection.jdkAllowsHostHeader()).isFalse()
         val mixed = WebClientProperties.Engine(endpoints = mapOf("orders" to WebClientEngine.JDK))
 
-        // When/Then
+        // When / Then
         assertThatThrownBy { factory(mixed) }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContainingAll("app.webclient.engine selects 'jdk' for [orders]", "-Djdk.httpclient.allowRestrictedHeaders=host")
-        assertThat(System.getProperty(WebClientEngineChecks.JDK_RESTRICTED_HEADERS_PROPERTY)).isNull()
+        assertThat(System.getProperty(EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS)).isNull()
         assertThatCode { factory(WebClientProperties.Engine()) }.doesNotThrowAnyException()
     }
 

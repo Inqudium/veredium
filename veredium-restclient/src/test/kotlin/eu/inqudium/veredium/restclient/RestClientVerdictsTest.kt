@@ -2,6 +2,7 @@ package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
+import eu.inqudium.veredium.testsupport.CustomizedRegistries
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.bulkhead.BulkheadRegistry
@@ -59,7 +60,7 @@ class RestClientVerdictsTest {
     }
 
     @Nested
-    inner class ClientSideFailure {
+    inner class `A client-side failure` {
         @Test
         fun `should not count a bulkhead rejection as a circuit-breaker failure`() {
             // What is tested: end to end through the real decorator - when the bulkhead rejects a call because
@@ -70,11 +71,11 @@ class RestClientVerdictsTest {
             // Why it matters: this is the escalation path. Counting the rejection means a transient concurrency
             //   peak opens the breaker and takes the backend down for waitDurationInOpenState - the load
             //   shedding meant to absorb the peak amplifies it into an outage instead.
-
+            //
             // Given: a single-permit bulkhead that rejects immediately, and the customizer has run
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(circuitBreakerRegistry, singlePermitBulkheads())
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), RestClientVerdicts.breakerVerdicts)
             val circuitBreaker = circuitBreakerRegistry.circuitBreaker(alias)
 
             // And: the only permit is held by a call that has not completed
@@ -114,11 +115,11 @@ class RestClientVerdictsTest {
             // Why it matters: the submission happens INSIDE the callable the breaker wraps (so a short-circuited
             //   call submits nothing), which puts the refusal on the breaker's path like a transport fault;
             //   without this entry the breaker would charge the backend for the process shutting down.
-
+            //
             // Given: a decorator whose executor is already shut down, and the customizer applied
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(circuitBreakerRegistry, BulkheadRegistry.ofDefaults())
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), RestClientVerdicts.breakerVerdicts)
             val circuitBreaker = circuitBreakerRegistry.circuitBreaker(alias)
             decorator.shutdown()
 
@@ -144,11 +145,11 @@ class RestClientVerdictsTest {
             //   call, and `CircuitBreaker.decorateCallable` records every Exception, so a host that cancels
             //   callers routinely - a short deadline upstream, a shutting-down executor - would open the circuit
             //   against a backend that was never given the time to answer.
-
+            //
             // Given: a call parked on the worker, a caller waiting on it, and the customizer applied
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(circuitBreakerRegistry, BulkheadRegistry.ofDefaults())
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), RestClientVerdicts.breakerVerdicts)
             val entered = CountDownLatch(1)
             val release = CountDownLatch(1)
             val callerThread = AtomicReference<Thread>()
@@ -165,14 +166,17 @@ class RestClientVerdictsTest {
                 }
             assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
 
-            // When: the caller is interrupted while waiting
-            callerThread.get().interrupt()
+            try {
+                // When: the caller is interrupted while waiting
+                callerThread.get().interrupt()
 
-            // Then: the caller sees the interruption ...
-            assertThat(outcome.get(5, TimeUnit.SECONDS)).isInstanceOf(InterruptedException::class.java)
-            // ... and the breaker did not hold it against the backend
-            assertThat(circuitBreakerRegistry.circuitBreaker(alias).metrics.numberOfFailedCalls).isZero()
-            release.countDown()
+                // Then: the caller sees the interruption ...
+                assertThat(outcome.get(5, TimeUnit.SECONDS)).isInstanceOf(InterruptedException::class.java)
+                // ... and the breaker did not hold it against the backend
+                assertThat(circuitBreakerRegistry.circuitBreaker(alias).metrics.numberOfFailedCalls).isZero()
+            } finally {
+                release.countDown()
+            }
         }
 
         @Test
@@ -183,11 +187,11 @@ class RestClientVerdictsTest {
             //   failed-call counter to exactly one.
             // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
             //   it disables the protection silently - would satisfy the zero-failure assertion above.
-
+            //
             // Given: the same wiring, with the customizer applied
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(circuitBreakerRegistry, singlePermitBulkheads())
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), RestClientVerdicts.breakerVerdicts)
             val circuitBreaker = circuitBreakerRegistry.circuitBreaker(alias)
 
             // When: a call fails for a real reason
@@ -200,21 +204,21 @@ class RestClientVerdictsTest {
 
         @Test
         fun `should ignore a buffer-limit failure bare and when it arrives wrapped`() {
-            // What is tested: that the buffer-limit failure is discounted in the shape it arrives in today (thrown
-            //   bare out of the exchange function) AND in the shape a wrapper would give it.
-            // Why the second shape: Spring's blocking client wraps every IOException of an exchange into a
-            //   ResourceAccessException, and the reactive twin saw exactly such a wrapping turn a class-based
-            //   ignore into a silent no-op - present in the code, visible in review, doing nothing. Resilience4j's
-            //   ignoreExceptions(Class...) matches the THROWN type only; only walking the cause chain survives a
-            //   wrapper, so the walk is pinned here against the wrapper the client would use.
+            // What is tested: that the buffer-limit failure is discounted in the shape the exchange function
+            //   throws it (bare) AND in the shape a wrapper gives it.
             // Success criteria: the customized breaker ignores both the bare and the wrapped exception, and the
             //   policy recognises the wrapped one as a buffer-limit failure.
-            // Why it matters: an ignore that matched the bare type only would charge the backend for this
-            //   client's own refusal the moment a wrapper appeared - and nothing would show it.
+            // Why it matters: Spring's blocking client wraps every IOException of an exchange into a
+            //   ResourceAccessException, and such a wrapping turns a class-based ignore into a silent no-op -
+            //   present in the code, visible in review, doing nothing: Resilience4j's ignoreExceptions(Class...)
+            //   matches the THROWN type only. Only walking the cause chain survives a wrapper, so the walk is
+            //   pinned here against the wrapper the client uses; an ignore that matched the bare type only would
+            //   charge the backend for this client's own refusal the moment a wrapper appeared - and nothing
+            //   would show it.
             //
             // Given
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), RestClientVerdicts.breakerVerdicts)
 
             // When: the failure bare, and behind the client's own wrapper
             val bare = ResponseBodyLimitExceededException("accounts", 8192, 20_000)
@@ -239,7 +243,7 @@ class RestClientVerdictsTest {
             //
             // Given
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
-            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor())
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, propsFor(), RestClientVerdicts.breakerVerdicts)
 
             // When / Then: a server error stays a server error
             val serverError =
@@ -256,7 +260,7 @@ class RestClientVerdictsTest {
     }
 
     @Nested
-    inner class ExpectedClientError {
+    inner class `An expected client error` {
         @Test
         fun `should read Spring's status-specific subclasses as the client errors they are`() {
             // What is tested: the one thing this stack supplies to the shared rule - the status reader - against
@@ -289,11 +293,10 @@ class RestClientVerdictsTest {
             //   to the config, so this is what proves the verdict reaches the instance the decorator actually
             //   uses - a 404-heavy lookup must not open the circuit.
             //
-
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(registry, BulkheadRegistry.ofDefaults())
-            CustomizedRegistries.circuitBreakers(registry, propsFor())
+            CustomizedRegistries.circuitBreakers(registry, propsFor(), RestClientVerdicts.breakerVerdicts)
 
             // When: the backend answers "not found"
             val failure = catchThrowable { decorator.decorate<String>(alias) { throw response(404) } }
@@ -311,11 +314,10 @@ class RestClientVerdictsTest {
             // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
             //   it disables the protection silently - would satisfy the zero-failure assertion above.
             //
-
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
             val decorator = decoratorWith(registry, BulkheadRegistry.ofDefaults())
-            CustomizedRegistries.circuitBreakers(registry, propsFor())
+            CustomizedRegistries.circuitBreakers(registry, propsFor(), RestClientVerdicts.breakerVerdicts)
 
             // When
             val failure = catchThrowable { decorator.decorate<String>(alias) { throw response(500) } }

@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.restclient
 
+import eu.inqudium.veredium.core.engine.EngineDrain
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.micrometer.core.instrument.MeterRegistry
@@ -18,8 +19,6 @@ import java.io.OutputStream
 import java.net.URI
 import java.nio.channels.AsynchronousCloseException
 import java.time.Duration
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.locks.LockSupport
 
 /**
  * One HTTP engine as [ResilientRestClientFactory] owns it: the engine's shared resources (its pool, its client,
@@ -98,46 +97,29 @@ internal abstract class EngineTransport(
     )
 
     companion object {
-        /** How often a draining shutdown re-checks the pool. */
-        val DRAIN_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(50)
-
         /**
          * Waits until [inFlight] reports zero, [deadlineNanos] passes or the calling thread is interrupted, then
-         * reports a pool that did not drain - the shared shape of the pooled engines' shutdown, written for the
-         * Apache pool first.
-         *
-         * The wait also ends when the calling thread is INTERRUPTED - a container tearing the context down under
-         * a deadline of its own, a test executor's `shutdownNow`. `parkNanos` returns at once on a thread whose
-         * interrupt flag is set and leaves the flag set, so without this exit the loop would spin hot until the
-         * deadline instead of waiting. The flag is left for the caller, as an interrupt always is.
+         * reports an engine that did not drain - the shared shape of the pooled engines' shutdown
+         * ([EngineDrain.await], [EngineDrain.reportUndrained]). [window] is the wait the deadline was derived from,
+         * for the line. The interrupt flag is left for the caller, as an interrupt always is.
          */
         fun drainOrReport(
-            poolName: String,
+            engine: RestClientEngine,
             inFlight: () -> Int,
             deadlineNanos: Long,
             nanoTime: () -> Long,
             window: Duration,
             logger: Logger,
         ) {
-            while (inFlight() > 0 && nanoTime() < deadlineNanos && !Thread.currentThread().isInterrupted) {
-                LockSupport.parkNanos(DRAIN_POLL_NANOS)
-            }
-            val leased = inFlight()
-            if (leased > 0) {
-                logger.warn(
-                    "Connection pool '{}' did not drain {} - dropping it with {} connection(s) still leased",
-                    poolName,
-                    if (Thread.currentThread().isInterrupted) "because the shutdown thread was interrupted" else "within $window",
-                    leased,
-                )
-            }
+            val left = EngineDrain.await(inFlight, deadlineNanos, nanoTime)
+            if (left > 0) EngineDrain.reportUndrained(logger, engine.key, "within $window", left)
         }
 
         /** The time left until [deadlineNanos], never negative. */
         fun remaining(
             deadlineNanos: Long,
             nanoTime: () -> Long,
-        ): Duration = Duration.ofNanos(maxOf(0L, deadlineNanos - nanoTime()))
+        ): Duration = EngineDrain.remaining(deadlineNanos, nanoTime)
 
         /**
          * Shuts down every one of [transports] against the one deadline, each on its own: a shutdown that throws is

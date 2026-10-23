@@ -12,7 +12,7 @@ import org.junit.jupiter.params.provider.ValueSource
  */
 class ResponseBodyMetricsTest {
     @Nested
-    inner class Utf8SizeMatchesTheJdkEncoder {
+    inner class `Agreement with the JDK encoder` {
         @ParameterizedTest
         @ValueSource(
             strings = [
@@ -29,11 +29,11 @@ class ResponseBodyMetricsTest {
         fun `should count exactly what the JDK encoder produces`(text: String) {
             // What is tested: that the allocation-free counter and String.toByteArray(UTF_8) never disagree.
             // Success criteria: equality against the JDK encoder itself, not against numbers written out
-            //   by hand - a hand-written expectation would only pin my arithmetic, which is the thing under
-            //   test.
-            // Why it matters: this number is what the stack's `max-in-memory-size` gets sized
-            //   from, and the bounded reader respectively the codec measures the same body in the same unit. A counter that drifts
-            //   from the encoder would make the meter disagree with the limit it exists to inform - the values
+            //   by hand - a hand-written expectation would only pin the test author's arithmetic, which is the
+            //   thing under test.
+            // Why it matters: this number is what the stack's `max-in-memory-size` gets sized from, and the
+            //   bounded reader (blocking stack) or the codec (reactive stack) measures the same body in the same
+            //   unit. A counter that drifts from the encoder would make the meter disagree with the limit it exists to inform - the values
             //   span every UTF-8 width (1, 2, 3 bytes) and both surrogate halves for that reason.
             //
             // Given / When / Then
@@ -58,14 +58,17 @@ class ResponseBodyMetricsTest {
             assertThat(ResponseBodyMetrics.utf8Size(loneHigh)).isEqualTo(loneHigh.toByteArray(Charsets.UTF_8).size)
             assertThat(ResponseBodyMetrics.utf8Size(loneLow)).isEqualTo(loneLow.toByteArray(Charsets.UTF_8).size)
         }
+    }
 
+    @Nested
+    inner class `Relation to the UTF-16 length` {
         @Test
         fun `should exceed the UTF-16 length for multi-byte content, never fall below it`() {
             // What is tested: that `ResponseBodyMetrics.utf8Size` never reports less than the UTF-16 length
             //   `String.length` gives, and exceeds it by exactly the UTF-8 width for 1-, 2- and 3-byte content.
             // Success criteria: ASCII counts 1x its length, umlauts 2x and CJK characters 3x - the extreme of a
             //   BMP character.
-            // Why it matters: it states the DIRECTION that motivated the switch away from String.length.
+            // Why it matters: it states the DIRECTION in which the counter differs from String.length.
             //   Under-stating the buffered size is what silently sizes the limit too small; this pins that the
             //   counter errs the other way, and by how much at the extreme (three bytes per BMP character).
             //

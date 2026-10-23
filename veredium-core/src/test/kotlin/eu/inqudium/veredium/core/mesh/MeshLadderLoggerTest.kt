@@ -3,16 +3,20 @@ package eu.inqudium.veredium.core.mesh
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 
+/**
+ * Tests the startup log of the mesh ladder: the lines [MeshLadderLogger] builds, one per endpoint with every
+ * derived rung, so the otherwise implicit ladder is inspectable from the application log.
+ */
 class MeshLadderLoggerTest {
     @Test
-    fun `builds one derived ladder line per endpoint, sorted by alias`() {
+    fun `should build one derived ladder line per endpoint, sorted by alias`() {
         // What is tested: the startup log content - one line per endpoint carrying the fully derived ladder,
         //   built by the pure ladderLines() that the @EventListener(ApplicationReadyEvent) hook logs on startup.
         // Success criteria: two endpoints with different anchors produce exactly the two expected
         //   lines, ordered by alias (payments given first but sorted after accounts, since GET < POST).
         // Why it matters: the ladder is otherwise implicit (only the anchor is maintained); the startup log is
         //   the app-side inspectability guarantee, so its exact content is worth pinning.
-
+        //
         // Given: two endpoints with different anchors (globalMarginMs pinned to 1000; at maxRetries=0 the globals
         // derive to 1500/2750 = 1*individual + 1000)
         val props =

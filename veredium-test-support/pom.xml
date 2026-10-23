@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>eu.inqudium</groupId>
+        <artifactId>veredium</artifactId>
+        <version>${revision}</version>
+    </parent>
+    <!--
+        Build-only module: the TEST helpers both client modules share - the socket backends, the log capture, the
+        bounded waits, the WireMock arrival listener, the configuration-file binding, the test payloads and the
+        customized Resilience4j registries. Its classes are main code here so the client modules can take them at
+        TEST scope; they are no artefact of the library and are kept out of every published one, like
+        veredium-coverage: no deploy (GitHub Packages, and cyclonedx's skipNotDeployed drops it from the aggregate
+        SBOM), excluded from the Central bundle in the release profile of the parent, and no Dokka run.
+
+        veredium-core's own tests cannot use it: this module depends on veredium-core (CustomizedRegistries needs
+        the mesh customizers), and a test-scoped dependency back would be a cycle. A test-jar of veredium-core
+        would avoid that, but would be published with it.
+    -->
+    <artifactId>veredium-test-support</artifactId>
+    <name>Veredium Test Support (build-only)</name>
+    <description>Test helpers shared by the veredium client modules; not published.</description>
+
+    <properties>
+        <maven.deploy.skip>true</maven.deploy.skip>
+        <dokka.skip>true</dokka.skip>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>eu.inqudium</groupId>
+            <artifactId>veredium-core</artifactId>
+            <version>${revision}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-stdlib</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+        </dependency>
+
+        <!-- The helpers' own tests: what the suites rely on them for. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <sourceDirectory>${project.basedir}/src/main/kotlin</sourceDirectory>
+        <testSourceDirectory>${project.basedir}/src/test/kotlin</testSourceDirectory>
+        <plugins>
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <version>${kotlin.version}</version>
+                <configuration>
+                    <jvmTarget>${java.version}</jvmTarget>
+                    <javaParameters>true</javaParameters>
+                    <args>
+                        <arg>-Xjsr305=strict</arg>
+                    </args>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>compile</id>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>test-compile</id>
+                        <phase>test-compile</phase>
+                        <goals>
+                            <goal>test-compile</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Declared only to be skipped: the CI's KDoc check and the Docs workflow run dokka:dokka over a module
+                 list that includes this module (the client modules compile their tests against it), and an
+                 undeclared Dokka plugin fails a CLI run instead of skipping it. -->
+            <plugin>
+                <groupId>org.jetbrains.dokka</groupId>
+                <artifactId>dokka-maven-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

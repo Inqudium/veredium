@@ -36,7 +36,7 @@ class ApacheTransportTest {
         // Why it matters: outside a release a closed selector is a genuine fault of the reactor; taking it to DEBUG
         //   everywhere would hide the one failure Apache's own callback exists to report.
         //
-        // Given/When
+        // Given / When
         transport.onReactorException(ClosedSelectorException())
         transport.onReactorException(IOException("reactor broke"))
 

@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.restclient
 
 import eu.inqudium.veredium.core.Veredium
+import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.util.unit.DataSize
@@ -179,7 +180,7 @@ data class RestClientProperties(
         fun engineFor(alias: String): RestClientEngine = endpoints[alias] ?: default
 
         /** The property key that selects the engine of [alias] - what a failure message tells the operator to edit. */
-        fun keyFor(alias: String): String = if (alias in endpoints) "$PREFIX.endpoints.$alias" else "$PREFIX.default"
+        fun keyFor(alias: String): String = EngineSelection.keyFor(PREFIX, alias, alias in endpoints)
 
         companion object {
             /** The property prefix of this block. */

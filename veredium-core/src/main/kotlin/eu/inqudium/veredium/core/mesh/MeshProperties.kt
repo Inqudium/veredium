@@ -7,7 +7,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  * triplet is the canonical id (the sidecar key without the surrounding []), carried as a list entry because it
  * is unwieldy as a property key. Ported from the PoC (`helm-mesh-timeouts/kotlin`, package
  * `eu.mesh.timeouts.poc`) and extended with the per-endpoint client target fields (`baseUrl` / `headers`; the
- * Host header is derived from the triplet). This is the single per-endpoint tree, feeding [MeshTimeoutConfig]
+ * Host header is derived from the triplet). This is the single per-endpoint tree, feeding [MeshResilienceConfiguration]
  * and [ResolvedTimeouts], and it is the same tree for both client stacks: the blocking `veredium-restclient`
  * and the reactive `veredium-webclient` bind it from here, so one deployment's `app.mesh` block reads
  * identically whichever stack the host runs on.
@@ -186,17 +186,17 @@ data class MeshProperties(
         }
 
         /** Field-wise merge: each field from the override when present, otherwise this (the shared default). */
-        fun overriddenBy(o: MarginsOverride?): Margins =
-            if (o == null) {
+        fun overriddenBy(endpoint: MarginsOverride?): Margins =
+            if (endpoint == null) {
                 this
             } else {
                 copy(
-                    globalMarginMs = o.globalMarginMs ?: globalMarginMs,
-                    responseTimeoutMarginMs = o.responseTimeoutMarginMs ?: responseTimeoutMarginMs,
-                    p99MarginMs = o.p99MarginMs ?: p99MarginMs,
-                    healthyRetries = o.healthyRetries ?: healthyRetries,
-                    slowCallBackoffMs = o.slowCallBackoffMs ?: slowCallBackoffMs,
-                    slowCallCapFraction = o.slowCallCapFraction ?: slowCallCapFraction,
+                    globalMarginMs = endpoint.globalMarginMs ?: globalMarginMs,
+                    responseTimeoutMarginMs = endpoint.responseTimeoutMarginMs ?: responseTimeoutMarginMs,
+                    p99MarginMs = endpoint.p99MarginMs ?: p99MarginMs,
+                    healthyRetries = endpoint.healthyRetries ?: healthyRetries,
+                    slowCallBackoffMs = endpoint.slowCallBackoffMs ?: slowCallBackoffMs,
+                    slowCallCapFraction = endpoint.slowCallCapFraction ?: slowCallCapFraction,
                 )
             }
     }

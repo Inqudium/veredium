@@ -171,7 +171,7 @@ internal class ReactorNettyEngineTransport(
     ) {
         if (isClosed) return
         try {
-            drainOrReport(POOL_NAME, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
+            drainOrReport(engine, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
             if (Thread.currentThread().isInterrupted) {
                 provider.dispose()
                 loops.dispose()

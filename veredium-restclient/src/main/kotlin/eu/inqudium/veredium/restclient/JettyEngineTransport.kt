@@ -148,7 +148,7 @@ internal class JettyEngineTransport(
         logger: Logger,
     ) {
         if (httpClient.isStopped) return
-        drainOrReport(POOL_NAME, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
+        drainOrReport(engine, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
         if (Thread.currentThread().isInterrupted) {
             Thread.ofVirtual().name("$POOL_NAME-stop").start { httpClient.stop() }
         } else {
