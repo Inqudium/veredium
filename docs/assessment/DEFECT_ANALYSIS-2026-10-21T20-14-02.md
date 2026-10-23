@@ -123,6 +123,11 @@ Offen:
   rot). Offen bleibt der abgebrochene Exchange (TimeLimiter-Ablauf, unterbrochener Aufrufer: `Closed by
   interrupt`): er erscheint weiter als ERROR `failure`. Das kann nur legatium ändern; erfasst als
   [Inqudium/legatium#88](https://github.com/Inqudium/legatium/issues/88).
+- **16, Nachtrag 2026-10-23** — Erledigt mit legatium 1.3.0 (Inqudium/legatium#88). Ein abgebrochener Exchange
+  (TimeLimiter-Ablauf, unterbrochener Aufrufer) erscheint jetzt als WARN `cancelled` ohne Ursache, auf allen vier
+  Engines; der Pool-Lease-Timeout bleibt WARN `timeout`. `LegatiumExchangeLoggingIntegrationTest` pinnt beides je
+  Engine; die Fehlermatrix in `./veredium-restclient/docs/timeouts-bulkheads-threads.md` beschreibt es so. Der
+  Folgebericht `DEFECT_ANALYSIS-2026-10-22T14-01-49.md` hatte denselben Punkt als Nr. 16 bereits abgeschlossen.
 
 Nachgezogen:
 
@@ -381,7 +386,7 @@ Keine.
   - Fix strategy: Puffer mit `Content-Length` vordimensionieren bzw. direkt aus dem Byte-Array deserialisieren
     (Jackson `readValue(ByteArray)`) und den String nur für die Größenmessung vermeiden.
 
-- [ ] 16. [`./veredium-restclient/docs/timeouts-bulkheads-threads.md:401` — bis `:405`] {Low} {Confidence: high} {maintainability / logging}
+- [x] 16. [`./veredium-restclient/docs/timeouts-bulkheads-threads.md:401` — bis `:405`] {Low} {Confidence: high} {maintainability / logging}
   - Ein TimeLimiter-Ablauf, ein unterbrochener Aufrufer und ein Pool-Lease-Timeout erscheinen im
     Exchange-Strom als **ERROR** `adapter_outcome=failure`. Ursache: legatium 1.2.0 klassifiziert weder
     `Closed by interrupt` noch `ConnectionRequestTimeoutException`. Das ist dokumentiert, bedeutet aber
