@@ -18,6 +18,12 @@ code disagree, the code wins and the ADR is corrected.
 | [ADR-0002](ADR-0002-blocking-resilience-decorator-as-a-core-component.md) | The blocking resilience decorator is a core component, usable without a client | Accepted |
 | [ADR-0003](ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md) | Each mesh endpoint is owned by one client stack, so both stacks can share a context | Proposed |
 
+### HTTP engines
+
+| ADR | Title | Status |
+|-----|-------|--------|
+| [ADR-0004](ADR-0004-the-http-engine-is-the-hosts-choice.md) | The HTTP engine is the host's choice, on both stacks | Accepted |
+
 ## Superseded
 
 None yet. A fully superseded record keeps its number, gets the status

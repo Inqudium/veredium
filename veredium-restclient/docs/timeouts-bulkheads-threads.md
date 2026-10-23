@@ -20,7 +20,7 @@ number helps, an endpoint with a 1 s anchor.
 
 Every call is wrapped as `CircuitBreaker( TimeLimiter( Bulkhead( exchange ) ) )` by
 `BlockingResilienceDecorator` (a component of `veredium-core`, which this module instantiates as a bean in
-`RestClientConfiguration`), and the exchange underneath runs on Apache HttpClient 5 with its own three
+`VerediumRestClientAutoConfiguration`), and the exchange underneath runs on Apache HttpClient 5 with its own three
 timeouts. Nothing in the call is unbounded; the question is only *which* bound fires, and that is a matter of
 which phase the call is in. The picture and §2-§3 describe the default engine; with `app.restclient.engine` set
 to `jdk`, `jetty` or `reactor-netty` the decorator, the ladder and the caller's side are unchanged and only the
@@ -320,7 +320,7 @@ worker stays interruptible, which a `ThreadPoolBulkhead`'s future never is.
 ### 5.1 The worker executor
 
 `BlockingResilienceDecorator` owns `Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name(prefix, 0).factory())`
-with the prefix the host chose - `restclient-call-` here, set by `RestClientConfiguration` - one **virtual**
+with the prefix the host chose - `restclient-call-` here, set by `VerediumRestClientAutoConfiguration` - one **virtual**
 thread per call, started on submit, gone when the call ends. Consequences:
 
 - **Nothing to size.** A parked virtual thread costs a few hundred bytes of heap and no OS thread. There is no

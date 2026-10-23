@@ -41,20 +41,36 @@ object EngineDrain {
     ): Duration = Duration.ofNanos(maxOf(0L, deadlineNanos - nanoTime()))
 
     /**
+     * Waits like [await], then reports an engine that did not drain with [reportUndrained] - the shared shape of a pooled
+     * engine's shutdown. The interrupt flag is left for the caller, as an interrupt always is.
+     */
+    fun drainOrReport(
+        logger: Logger,
+        engine: String,
+        inFlight: () -> Int,
+        deadlineNanos: Long,
+        nanoTime: () -> Long,
+        window: Duration,
+    ) {
+        val left = await(inFlight, deadlineNanos, nanoTime)
+        if (left > 0) reportUndrained(logger, engine, window, left)
+    }
+
+    /**
      * The one WARN line of an engine that did not drain: [engine] by its key, why the wait ended - the interrupt when the
-     * calling thread's flag is set, [deadline] otherwise (`within <window>`, `by the factory's shutdown deadline`) - and
-     * [left], the exchanges still in flight, or `null` for an engine that does not count them (the JDK client).
+     * calling thread's flag is set, the end of [window] otherwise (the wait the factory's shutdown deadline was derived
+     * from) - and [left], the exchanges still in flight, or `null` for an engine that does not count them (the JDK client).
      */
     fun reportUndrained(
         logger: Logger,
         engine: String,
-        deadline: String,
+        window: Duration,
         left: Int?,
     ) {
         logger.warn(
             "HTTP engine '{}' did not drain {} - closing it with {} still in flight",
             engine,
-            if (Thread.currentThread().isInterrupted) "because the shutdown thread was interrupted" else deadline,
+            if (Thread.currentThread().isInterrupted) "because the shutdown thread was interrupted" else "within $window",
             left?.let { "$it exchange(s)" } ?: "the exchanges",
         )
     }

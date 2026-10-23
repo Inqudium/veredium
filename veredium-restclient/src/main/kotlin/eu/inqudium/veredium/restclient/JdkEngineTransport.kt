@@ -3,7 +3,6 @@ package eu.inqudium.veredium.restclient
 import eu.inqudium.veredium.core.engine.EngineDrain
 import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
-import org.slf4j.Logger
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
 import org.springframework.http.client.ClientHttpRequest
@@ -65,6 +64,8 @@ internal class JdkEngineTransport(
 ) : EngineTransport(RestClientEngine.JDK) {
     private val meshTransport = settings.transport
     private val pool = settings.pool
+    private val window = settings.window
+    private val logger = settings.logger
 
     override val name: String = CLIENT_NAME
 
@@ -118,19 +119,17 @@ internal class JdkEngineTransport(
     override fun shutdown(
         deadlineNanos: Long,
         nanoTime: () -> Long,
-        window: Duration,
-        logger: Logger,
     ) {
         httpClient.shutdown()
         val terminated =
             try {
-                httpClient.awaitTermination(remaining(deadlineNanos, nanoTime))
+                httpClient.awaitTermination(EngineDrain.remaining(deadlineNanos, nanoTime))
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 false
             }
         if (!terminated) {
-            EngineDrain.reportUndrained(logger, engine.key, "within $window", left = null)
+            EngineDrain.reportUndrained(logger, engine.key, window, left = null)
             httpClient.shutdownNow()
         }
         executor.shutdownNow()

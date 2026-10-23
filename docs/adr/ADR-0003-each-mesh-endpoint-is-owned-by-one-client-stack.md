@@ -10,8 +10,8 @@ this ADR makes stack-aware)
 
 ADR-0001 gave both client stacks one mesh wiring in `veredium-core`. It was
 built on an assumption it never stated: one client stack per Spring
-context. A host that scans both `eu.inqudium.veredium.restclient` and
-`eu.inqudium.veredium.webclient` does not start.
+context. A host with both client modules on its classpath - each brings
+its auto-configuration - does not start unless it excludes one of them.
 
 Until the verdicts became an object (PR #17), the first failure was the
 `breakerVerdicts` bean both stacks declared. On the current code the

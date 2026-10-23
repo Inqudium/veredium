@@ -3,6 +3,7 @@ package eu.inqudium.veredium.webclient
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.MeshResilienceStartupGuard
 import eu.inqudium.veredium.testsupport.ConfigurationFiles
+import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.springboot.bulkhead.autoconfigure.BulkheadAutoConfiguration
 import io.github.resilience4j.springboot.circuitbreaker.autoconfigure.CircuitBreakerAutoConfiguration
@@ -10,16 +11,21 @@ import io.github.resilience4j.springboot.timelimiter.autoconfigure.TimeLimiterAu
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
+import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.AutoConfigurations
+import org.springframework.boot.context.annotation.ImportCandidates
+import org.springframework.boot.jackson.autoconfigure.JacksonAutoConfiguration
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.springframework.boot.webclient.autoconfigure.WebClientAutoConfiguration
 import org.springframework.core.env.MapPropertySource
 import org.springframework.core.io.buffer.DataBufferLimitException
 import org.springframework.web.reactive.function.client.WebClientResponseException
+import java.util.function.Supplier
 
 /**
  * Boots Resilience4j's own Boot auto-configuration on the `resilience4j.*` and `app.mesh.*` blocks of this
  * module's reference configuration ([ConfigurationFiles.REFERENCE]) with THIS stack's wiring
- * ([WebClientConfiguration], which imports the core's mesh configuration) - the one proof that the reference
+ * ([VerediumWebClientAutoConfiguration], which imports the core's mesh configuration) - the one proof that the reference
  * blocks, the derived aliases, the reactive stack's verdicts and the core's guard agree. The file is a test
  * resource, not shipped (a library ships no `application.yml`). Compatibility: the class is named "Shipped"
  * all the same, because veredium-core, the ADRs and the blocking twin refer to it by that name.
@@ -73,9 +79,46 @@ class MeshResilienceShippedConfigTest {
         }
     }
 
+    @Test
+    fun `should be registered as an auto-configuration, so the dependency alone wires the module`() {
+        // What is tested: the module's AutoConfiguration.imports file.
+        // Success criteria: Boot's own loader lists VerediumWebClientAutoConfiguration among the auto-configurations.
+        // Why it matters: a host adds the dependency and nothing else; a missing or misspelt entry would leave it
+        //   without a factory and fail at its first injection point, with nothing pointing at the file.
+        //
+        // Given / When
+        val candidates = ImportCandidates.load(AutoConfiguration::class.java, javaClass.classLoader)
+
+        // Then
+        assertThat(candidates.candidates).contains(VerediumWebClientAutoConfiguration::class.java.name)
+    }
+
+    @Test
+    fun `should back off for a host's own decorator`() {
+        // What is tested: the auto-configuration in a context where the host declares its own
+        //   ReactiveResilienceDecorator.
+        // Success criteria: the context holds exactly the host's decorator, and the module's factory next to it.
+        // Why it matters: a host that wraps or replaces the decorator must not end up with a second one next to its
+        //   own, which the factory could then be wired with instead.
+        //
+        // Given
+        val hostDecorator = ReactiveResilienceDecorator(CircuitBreakerRegistry.ofDefaults(), TimeLimiterRegistry.ofDefaults(), BulkheadRegistry.ofDefaults())
+
+        // When
+        referenceContext()
+            .withBean("hostDecorator", ReactiveResilienceDecorator::class.java, Supplier { hostDecorator })
+            .run { context ->
+                // Then
+                assertThat(context).hasNotFailed()
+                assertThat(context).getBean(ReactiveResilienceDecorator::class.java).isSameAs(hostDecorator)
+                assertThat(context).hasSingleBean(ResilientWebClientFactory::class.java)
+            }
+    }
+
     /**
-     * Resilience4j's three auto-configurations on the reference keys, plus [WebClientConfiguration], which imports
-     * the core's mesh binding and [WebClientMeshRegistrar] with this stack's verdicts.
+     * Resilience4j's three auto-configurations on the reference keys, Boot's Jackson and `WebClient.Builder`, plus
+     * [VerediumWebClientAutoConfiguration] - the core's mesh binding and [WebClientMeshRegistrar] with this stack's
+     * verdicts, the decorator and the factory.
      */
     private fun referenceContext(): ApplicationContextRunner =
         ApplicationContextRunner()
@@ -88,8 +131,11 @@ class MeshResilienceShippedConfigTest {
                     TimeLimiterAutoConfiguration::class.java,
                     CircuitBreakerAutoConfiguration::class.java,
                     BulkheadAutoConfiguration::class.java,
+                    JacksonAutoConfiguration::class.java,
+                    WebClientAutoConfiguration::class.java,
+                    VerediumWebClientAutoConfiguration::class.java,
                 ),
-            ).withUserConfiguration(WebClientConfiguration::class.java)
+            )
 
     /** The codec failure in the exact shape the client produces it: a 200-reporting response exception with the limit beneath. */
     private fun wrappedBufferLimit(): Throwable =

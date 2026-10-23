@@ -81,7 +81,7 @@ import java.util.function.Supplier
  * the reference configuration ([ConfigurationFiles.REFERENCE], a test resource no consumer receives) as a property source, so the
  * configuration under test is the one the module documents - not a copy in this file. [WebClientProperties] is
  * bound from the Environment by its own `@EnableConfigurationProperties` (the binding half of
- * [WebClientConfiguration]) instead of being handed in as a code-default instance, so a key like
+ * [VerediumWebClientAutoConfiguration]) instead of being handed in as a code-default instance, so a key like
  * `app.webclient.observability.http-observation-enabled`
  * reaches [ResilientWebClientFactory] here by exactly the route it takes in the running application - the
  * difference between a default and a CONFIGURED value is visible, not papered over.
@@ -841,7 +841,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                 },
             )
             // The module's OWN @EnableConfigurationProperties binding, not a hand-made instance - see
-            // `BoundWebClientProperties` for why not `WebClientConfiguration`.
+            // `BoundWebClientProperties` for why not `VerediumWebClientAutoConfiguration`.
             .withUserConfiguration(BoundWebClientProperties::class.java)
             // The startup report on the observation toggle, as the context would scan it - the test above reads
             // its line next to legatium's.

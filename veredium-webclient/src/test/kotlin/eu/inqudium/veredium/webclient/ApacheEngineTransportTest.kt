@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.nio.channels.ClosedSelectorException
+import java.time.Duration
 
 /**
  * The I/O reactor exception callback of the Apache engine ([ApacheEngineTransport.onReactorException]), called directly -
@@ -26,7 +27,7 @@ class ApacheEngineTransportTest {
         logger.level = Level.DEBUG
     }
 
-    private val transport = ApacheEngineTransport(WebClientProperties(), MeshProperties.Transport(), logger)
+    private val transport = ApacheEngineTransport(WebClientProperties(), MeshProperties.Transport(), Duration.ZERO, logger)
 
     @AfterEach
     fun releaseAndDetach() {

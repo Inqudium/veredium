@@ -66,7 +66,6 @@ class MeshFixtureBindingTest {
             // ...and no other endpoint-level field is set in the fixture.
             assertThat(endpoint.alias).`as`("alias for %s", expected.triplet).isNull()
             assertThat(endpoint.maxRetries).`as`("max-retries for %s", expected.triplet).isNull()
-            assertThat(endpoint.margins).`as`("margins for %s", expected.triplet).isNull()
             assertThat(endpoint.baseUrl).`as`("base-url for %s", expected.triplet).isNull()
             assertThat(endpoint.headers).`as`("headers for %s", expected.triplet).isEmpty()
             assertThat(endpoint.timeLimiter).`as`("time-limiter for %s", expected.triplet).isNull()

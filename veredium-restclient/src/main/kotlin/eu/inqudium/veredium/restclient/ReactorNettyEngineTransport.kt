@@ -1,12 +1,12 @@
 package eu.inqudium.veredium.restclient
 
+import eu.inqudium.veredium.core.engine.EngineDrain
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.Meter
 import io.micrometer.core.instrument.MeterRegistry
 import io.netty.channel.ChannelOption
 import io.netty.resolver.DefaultAddressResolverGroup
-import org.slf4j.Logger
 import org.springframework.http.HttpStatusCode
 import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.http.client.ClientHttpResponse
@@ -80,6 +80,8 @@ internal class ReactorNettyEngineTransport(
 ) : EngineTransport(RestClientEngine.REACTOR_NETTY) {
     private val meshTransport = settings.transport
     private val pool = settings.pool
+    private val window = settings.window
+    private val logger = settings.logger
 
     override val name: String = POOL_NAME
 
@@ -161,27 +163,25 @@ internal class ReactorNettyEngineTransport(
      * pool's), then disposes the pool and the event loops. A shutdown thread that was interrupted does not block
      * on the disposal: it is triggered and left to complete.
      *
-     * A disposal that does not complete within [DISPOSE_WAIT] is an outcome, reported on [logger] - not the
+     * A disposal that does not complete within [DISPOSE_WAIT] is an outcome, reported on the engine's logger - not the
      * `IllegalStateException` a `block(Duration)` would throw out of the destroy callback, skipping the rest of
      * the shutdown. The offload executor is shut down whatever happens before it.
      */
     override fun shutdown(
         deadlineNanos: Long,
         nanoTime: () -> Long,
-        window: Duration,
-        logger: Logger,
     ) {
         if (isClosed) return
         try {
-            drainOrReport(engine, ::exchangesInFlight, deadlineNanos, nanoTime, window, logger)
+            EngineDrain.drainOrReport(logger, engine.key, ::exchangesInFlight, deadlineNanos, nanoTime, window)
             if (Thread.currentThread().isInterrupted) {
                 provider.dispose()
                 loops.dispose()
             } else {
-                awaitDisposal("connection pool", provider.disposeLater(), logger)
+                awaitDisposal("connection pool", provider.disposeLater())
                 // The loops' own graceful timeout is shorter than the wait, so a loop group that takes all of it
                 // still completes before the wait ends.
-                awaitDisposal("event loops", loops.disposeLater(Duration.ZERO, LOOP_SHUTDOWN_TIMEOUT), logger)
+                awaitDisposal("event loops", loops.disposeLater(Duration.ZERO, LOOP_SHUTDOWN_TIMEOUT))
             }
         } finally {
             offload.shutdownNow()
@@ -196,7 +196,6 @@ internal class ReactorNettyEngineTransport(
     internal fun awaitDisposal(
         what: String,
         disposal: Mono<Void>,
-        logger: Logger,
         wait: Duration = DISPOSE_WAIT,
     ) {
         disposal

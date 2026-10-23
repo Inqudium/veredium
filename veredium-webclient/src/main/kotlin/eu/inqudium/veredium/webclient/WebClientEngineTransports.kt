@@ -1,6 +1,8 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.engine.EngineDrain
+import eu.inqudium.veredium.core.engine.EngineResources
+import eu.inqudium.veredium.core.engine.EngineSet
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import io.netty.channel.ChannelOption
@@ -59,107 +61,26 @@ import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.locks.ReentrantLock
 import java.util.function.Function
-import kotlin.concurrent.withLock
 import java.net.http.HttpClient as JdkHttpClient
 import org.eclipse.jetty.client.HttpClient as JettyHttpClient
 import reactor.netty.http.client.HttpClient as ReactorHttpClient
 
 /**
  * The resources of ONE engine, owned by one [ResilientWebClientFactory]: the pool, client or I/O reactor every
- * backend of that engine shares, and the connector each backend gets on top of it.
+ * backend of that engine shares, and the connector each backend gets on top of it. Created with the factory, only
+ * for an engine some backend selects, and released with it ([EngineSet], the lifecycle both stacks share).
  *
- * An implementation is created only when the first client of its engine is built, which is why every class
- * that names an engine library sits behind this interface: the JVM resolves those classes when the
+ * Every class that names an engine library sits behind this interface: the JVM resolves those classes when the
  * implementation is first used, so an engine nobody selected needs no library on the classpath.
  */
-internal interface EngineTransport {
+internal interface EngineTransport : EngineResources {
     val engine: WebClientEngine
+
+    override val key: String get() = engine.key
 
     /** The connector for one backend - created once per backend, on the shared resources of this engine. */
     fun connectorFor(endpoint: ResolvedTimeouts): ClientHttpConnector
-
-    /**
-     * Releases the shared resources, waiting for in-flight exchanges no later than [deadlineNanos] on [nanoTime]'s
-     * clock - a deadline SHARED by every engine of the factory, so that releasing several engines one after
-     * another takes the drain bound once, not once per engine. Never throws for an outcome the transport can
-     * report itself.
-     */
-    fun shutdown(
-        deadlineNanos: Long,
-        nanoTime: () -> Long,
-    )
-
-    /** Whether [shutdown] has completed - for the tests that pin the lifecycle. */
-    val isClosed: Boolean
-
-    companion object {
-        /** Why a release that ran into the shared deadline stopped waiting, for its WARN line. */
-        const val DEADLINE: String = "by the factory's shutdown deadline"
-    }
-}
-
-/**
- * The engines in use by one factory, each created on first use and released together.
- *
- * Only the engines named in [enginesInUse] can ever be created; asking for another one is a programming
- * error, because the factory resolved every backend's engine at construction. Once [shutdown] ran, no engine is
- * created any more: one created then would own threads and sockets that nothing releases.
- */
-internal class EngineTransports(
-    enginesInUse: Set<WebClientEngine>,
-    private val logger: Logger,
-    create: (WebClientEngine) -> EngineTransport,
-) {
-    private val transports: Map<WebClientEngine, Lazy<EngineTransport>> = enginesInUse.associateWith { engine -> lazy { create(engine) } }
-
-    /**
-     * Guards the creation of an engine against a concurrent [shutdown]: without it, a client built while the
-     * factory shuts down could create its engine after shutdown() took its snapshot of the started ones. A lock
-     * rather than `synchronized`, because the first client may be built on a virtual thread.
-     */
-    private val lifecycle = ReentrantLock()
-
-    /** Set by [shutdown]; afterwards [connectorFor] refuses instead of creating an engine nobody would release. */
-    private var closed = false
-
-    fun connectorFor(
-        engine: WebClientEngine,
-        endpoint: ResolvedTimeouts,
-    ): ClientHttpConnector =
-        lifecycle.withLock {
-            check(!closed) {
-                "The ResilientWebClientFactory was shut down; no client can be built after it released its HTTP engines"
-            }
-            val transport = transports[engine] ?: error("Engine '$engine' was not resolved for any backend of this factory")
-            transport.value.connectorFor(endpoint)
-        }
-
-    /** The transports created so far - an engine that is in use but has not built a client yet is absent. */
-    fun started(): Map<WebClientEngine, EngineTransport> = transports.filterValues { it.isInitialized() }.mapValues { it.value.value }
-
-    /**
-     * Releases every transport created so far, each on its own against the one shared [deadlineNanos]: a failing
-     * release is logged and does not keep the others from releasing theirs. Idempotent.
-     */
-    fun shutdown(
-        deadlineNanos: Long,
-        nanoTime: () -> Long,
-    ) {
-        val toRelease =
-            lifecycle.withLock {
-                closed = true
-                started().values
-            }
-        toRelease.forEach { transport ->
-            try {
-                transport.shutdown(deadlineNanos, nanoTime)
-            } catch (e: Exception) {
-                logger.warn("HTTP engine '{}' failed to release its resources", transport.engine, e)
-            }
-        }
-    }
 }
 
 /**
@@ -279,6 +200,8 @@ internal class ReactorNettyEngineTransport(
  */
 internal class JdkEngineTransport(
     meshTransport: MeshProperties.Transport,
+    /** The factory's drain window, named in the line of an engine that did not drain. */
+    private val window: Duration,
     private val logger: Logger,
 ) : EngineTransport {
     override val engine: WebClientEngine = WebClientEngine.JDK
@@ -310,7 +233,7 @@ internal class JdkEngineTransport(
                 false
             }
         if (!terminated) {
-            EngineDrain.reportUndrained(logger, engine.key, EngineTransport.DEADLINE, left = null)
+            EngineDrain.reportUndrained(logger, engine.key, window, left = null)
             client.shutdownNow()
             // shutdownNow() aborts the exchanges and returns before the client's threads have ended; a short,
             // bounded wait makes `isClosed` true on return in the normal case without holding up a shutdown.
@@ -351,6 +274,8 @@ internal class JdkEngineTransport(
 internal class JettyEngineTransport(
     properties: WebClientProperties,
     meshTransport: MeshProperties.Transport,
+    /** The factory's drain window, named in the line of an engine that did not drain. */
+    private val window: Duration,
     private val logger: Logger,
 ) : EngineTransport {
     override val engine: WebClientEngine = WebClientEngine.JETTY
@@ -391,7 +316,7 @@ internal class JettyEngineTransport(
     ) {
         if (client.isStopped) return
         val left = EngineDrain.await(::exchangesInFlight, deadlineNanos, nanoTime)
-        if (left > 0) EngineDrain.reportUndrained(logger, engine.key, EngineTransport.DEADLINE, left)
+        if (left > 0) EngineDrain.reportUndrained(logger, engine.key, window, left)
         if (Thread.currentThread().isInterrupted) {
             Thread.ofVirtual().name("$THREAD_NAME_PREFIX-stop").start { client.stop() }
         } else {
@@ -508,6 +433,8 @@ private class AbortJettyOnBodyCancel(
 internal class ApacheEngineTransport(
     properties: WebClientProperties,
     private val meshTransport: MeshProperties.Transport,
+    /** The factory's drain window, named in the line of an engine that did not drain. */
+    private val window: Duration,
     private val logger: Logger,
 ) : EngineTransport {
     override val engine: WebClientEngine = WebClientEngine.APACHE
@@ -588,7 +515,7 @@ internal class ApacheEngineTransport(
     ) {
         shuttingDown = true
         val left = EngineDrain.await(client::inFlightCount, deadlineNanos, nanoTime)
-        if (left > 0) EngineDrain.reportUndrained(logger, engine.key, EngineTransport.DEADLINE, left)
+        if (left > 0) EngineDrain.reportUndrained(logger, engine.key, window, left)
         evictor?.let { running ->
             running.shutdown()
             try {

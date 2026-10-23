@@ -302,59 +302,15 @@ class MeshPropertiesDerivationTest {
             assertThat(t.slowCallDuration.toMillis()).`as`("slowCall").isEqualTo(slowCall)
         }
 
-        @Test
-        fun `should merge a partial per-endpoint margins override field by field onto the shared defaults`() {
-            // What is tested: MarginsOverride / Margins.overriddenBy as resolveAll applies them - an endpoint that
-            //   overrides TWO margin fields, next to one that overrides none.
-            // Success criteria: the overriding endpoint carries its two values and the shared defaults' values for
-            //   the four fields it left unset; the other endpoint carries the shared defaults unchanged; and the
-            //   override shows in the derived ladder (its slow-call is computed from the overridden fraction).
-            // Why it matters: the documented promise is "only the fields you set change". A merge that took the whole
-            //   override (resetting the unset fields to the Kotlin defaults) or ignored it would both produce a valid
-            //   ladder - one that silently differs from what the operator wrote for that one endpoint.
-            //
-            // Given: shared margins that differ from the Kotlin defaults, and an override of two fields
-            val tuned = MeshProperties.EndpointConfig(TRIPLET, margins = MeshProperties.MarginsOverride(p99MarginMs = 333, slowCallCapFraction = 0.5))
-            val untouched = MeshProperties.EndpointConfig("/endpoint/api.example.com/POST/accounts")
-            val props =
-                MeshProperties(
-                    defaults = MeshProperties.Defaults(individualRequestTimeoutMs = 1000, maxRetries = 3, margins = DISTINCT_MARGINS),
-                    endpoints = listOf(tuned, untouched),
-                )
-
-            // When
-            val resolved = props.resolveAll()
-            val tunedMargins = resolved.getValue(tuned.triplet).margins
-            val untouchedMargins = resolved.getValue(untouched.triplet).margins
-
-            // Then: the two overridden fields, the four inherited ones ...
-            assertThat(tunedMargins)
-                .isEqualTo(
-                    MeshProperties.Margins(
-                        globalMarginMs = 50,
-                        responseTimeoutMarginMs = 130,
-                        p99MarginMs = 333,
-                        healthyRetries = 2,
-                        slowCallBackoffMs = 90,
-                        slowCallCapFraction = 0.5,
-                    ),
-                )
-            // ... the endpoint without an override on the shared margins as they are ...
-            assertThat(untouchedMargins).isEqualTo(DISTINCT_MARGINS)
-            assertThat(DISTINCT_MARGINS.overriddenBy(null)).isSameAs(DISTINCT_MARGINS)
-            // ... and the ladder follows: global 4050, cap 4050 * 0.5 = 2025 < ceiling (667 * 3 + 2 * 90 = 2181)
-            assertThat(resolved.getValue(tuned.triplet).slowCallDuration.toMillis()).isEqualTo(2025)
-        }
-
         @ParameterizedTest(name = "{0}")
         @MethodSource("eu.inqudium.veredium.core.mesh.MeshPropertiesDerivationTest#ladderGuardViolations")
         fun `should reject a ladder that cannot form, naming the key, the endpoint and the value`(
             description: String,
-            endpoint: MeshProperties.EndpointConfig,
+            props: MeshProperties,
             expectedFragments: List<String>,
         ) {
             // What is tested: each init guard of ResolvedTimeouts - anchor, retries and every margin - reached the
-            //   way a configuration reaches it: bound per endpoint, resolved through resolveAll().
+            //   way a configuration reaches it: bound under app.mesh, resolved through resolveAll().
             // Success criteria: resolving throws IllegalArgumentException whose message carries the YAML key, the
             //   triplet and the offending value. The accepting side of each boundary is the next test.
             // Why it matters: these guards are the only place a broken ladder is caught before Resilience4j or the
@@ -362,8 +318,7 @@ class MeshPropertiesDerivationTest {
             //   surfaces as a keyless builder error. The messages are what an operator has to act on, so each one is
             //   rendered and checked here.
             //
-            // Given
-            val props = MeshProperties(MeshProperties.Defaults(individualRequestTimeoutMs = 1000), listOf(endpoint))
+            // Given: the props of the case
 
             // When
             val error = catchThrowable { props.resolveAll() }
@@ -383,30 +338,30 @@ class MeshPropertiesDerivationTest {
             //   alone would pass against guards that reject everything.
             //
             // Given
-            val edge =
-                MeshProperties.EndpointConfig(
-                    TRIPLET,
-                    maxRetries = 0,
-                    margins =
-                        MeshProperties.MarginsOverride(
-                            globalMarginMs = 0,
-                            responseTimeoutMarginMs = 1,
-                            p99MarginMs = 999,
-                            healthyRetries = 0,
-                            slowCallBackoffMs = 0,
-                        ),
+            val edgeMargins =
+                MeshProperties.Margins(
+                    globalMarginMs = 0,
+                    responseTimeoutMarginMs = 1,
+                    p99MarginMs = 999,
+                    healthyRetries = 0,
+                    slowCallBackoffMs = 0,
                 )
-            val p99AtZero = MeshProperties.EndpointConfig("/endpoint/api.example.com/POST/accounts", margins = MeshProperties.MarginsOverride(p99MarginMs = 0))
+            val edge = MeshProperties(MeshProperties.Defaults(individualRequestTimeoutMs = 1000, margins = edgeMargins), listOf(MeshProperties.EndpointConfig(TRIPLET, maxRetries = 0)))
+            val p99AtZero =
+                MeshProperties(
+                    MeshProperties.Defaults(individualRequestTimeoutMs = 1000, margins = MeshProperties.Margins(p99MarginMs = 0)),
+                    listOf(MeshProperties.EndpointConfig(TRIPLET)),
+                )
 
             // When
-            val resolved = MeshProperties(MeshProperties.Defaults(individualRequestTimeoutMs = 1000), listOf(edge, p99AtZero)).resolveAll()
+            val t = edge.resolveAll().getValue(TRIPLET)
+            val atZero = p99AtZero.resolveAll().getValue(TRIPLET)
 
             // Then
-            val t = resolved.getValue(TRIPLET)
             assertThat(t.sidecarGlobalMs).isEqualTo(1000)
             assertThat(t.responseTimeout.toMillis()).isEqualTo(1001)
             assertThat(t.p99SingleMs).isEqualTo(1)
-            assertThat(resolved.getValue(p99AtZero.triplet).p99SingleMs).isEqualTo(1000)
+            assertThat(atZero.p99SingleMs).isEqualTo(1000)
         }
     }
 
@@ -458,56 +413,58 @@ class MeshPropertiesDerivationTest {
         /** One violation per init guard of [ResolvedTimeouts], each with the fragments its message must carry. */
         @JvmStatic
         fun ladderGuardViolations(): Stream<Arguments> {
-            fun margins(override: MeshProperties.MarginsOverride) = MeshProperties.EndpointConfig(TRIPLET, margins = override)
+            fun endpoint(config: MeshProperties.EndpointConfig) = MeshProperties(MeshProperties.Defaults(individualRequestTimeoutMs = 1000), listOf(config))
+
+            fun margins(margins: MeshProperties.Margins) = MeshProperties(MeshProperties.Defaults(individualRequestTimeoutMs = 1000, margins = margins), listOf(MeshProperties.EndpointConfig(TRIPLET)))
             return Stream.of(
                 Arguments.of(
                     "anchor 0",
-                    MeshProperties.EndpointConfig(TRIPLET, individualRequestTimeoutMs = 0),
+                    endpoint(MeshProperties.EndpointConfig(TRIPLET, individualRequestTimeoutMs = 0)),
                     listOf("individual-request-timeout-ms must be >= 1", "but was 0"),
                 ),
                 Arguments.of(
                     "negative retries",
-                    MeshProperties.EndpointConfig(TRIPLET, maxRetries = -1),
+                    endpoint(MeshProperties.EndpointConfig(TRIPLET, maxRetries = -1)),
                     listOf("max-retries must be >= 0", "but was -1"),
                 ),
                 Arguments.of(
                     "negative global margin",
-                    margins(MeshProperties.MarginsOverride(globalMarginMs = -1)),
-                    listOf("margins.global-margin-ms must be >= 0", "but was -1", "app.mesh.endpoints[].margins"),
+                    margins(MeshProperties.Margins(globalMarginMs = -1)),
+                    listOf("margins.global-margin-ms must be >= 0", "but was -1", "app.mesh.defaults.margins"),
                 ),
                 Arguments.of(
                     "response-timeout margin 0",
-                    margins(MeshProperties.MarginsOverride(responseTimeoutMarginMs = 0)),
+                    margins(MeshProperties.Margins(responseTimeoutMarginMs = 0)),
                     listOf("margins.response-timeout-margin-ms must be >= 1", "but was 0"),
                 ),
                 Arguments.of(
                     "p99 margin equal to the anchor",
-                    margins(MeshProperties.MarginsOverride(p99MarginMs = 1000)),
+                    margins(MeshProperties.Margins(p99MarginMs = 1000)),
                     listOf("margins.p99-margin-ms must be in 0..<individual-request-timeout-ms", "but was 1000"),
                 ),
                 Arguments.of(
                     "negative p99 margin",
-                    margins(MeshProperties.MarginsOverride(p99MarginMs = -1)),
+                    margins(MeshProperties.Margins(p99MarginMs = -1)),
                     listOf("margins.p99-margin-ms", "but was -1"),
                 ),
                 Arguments.of(
                     "negative healthy retries",
-                    margins(MeshProperties.MarginsOverride(healthyRetries = -1)),
+                    margins(MeshProperties.Margins(healthyRetries = -1)),
                     listOf("margins.healthy-retries must be >= 0", "but was -1"),
                 ),
                 Arguments.of(
                     "negative slow-call backoff",
-                    margins(MeshProperties.MarginsOverride(slowCallBackoffMs = -1)),
+                    margins(MeshProperties.Margins(slowCallBackoffMs = -1)),
                     listOf("margins.slow-call-backoff-ms must be >= 0", "but was -1"),
                 ),
                 Arguments.of(
                     "cap fraction 0",
-                    margins(MeshProperties.MarginsOverride(slowCallCapFraction = 0.0)),
+                    margins(MeshProperties.Margins(slowCallCapFraction = 0.0)),
                     listOf("margins.slow-call-cap-fraction must be in (0,1)", "but was 0.0"),
                 ),
                 Arguments.of(
                     "cap fraction 1",
-                    margins(MeshProperties.MarginsOverride(slowCallCapFraction = 1.0)),
+                    margins(MeshProperties.Margins(slowCallCapFraction = 1.0)),
                     listOf("margins.slow-call-cap-fraction must be in (0,1)", "but was 1.0"),
                 ),
             )

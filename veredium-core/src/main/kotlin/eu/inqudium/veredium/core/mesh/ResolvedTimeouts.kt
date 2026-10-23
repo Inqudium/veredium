@@ -39,8 +39,7 @@ import java.time.Duration
  * @property individualRequestTimeoutMs The MEASURED anchor `p99(single attempt) + margin` - the one rung that is
  *   configured rather than derived.
  * @property maxRetries The sidecar's retry count; with the anchor it derives [sidecarGlobalMs].
- * @property margins The merged margins: the shared [MeshProperties.Defaults.margins] with this endpoint's partial
- *   override on top.
+ * @property margins The shared [MeshProperties.Defaults.margins].
  * @property transport The app->sidecar transport caps; their computed [MeshProperties.Transport.timeLimiterMargin]
  *   lifts [timeLimiterTimeout] above [responseTimeout].
  */
@@ -117,9 +116,9 @@ data class ResolvedTimeouts(
 
     init {
         // Every message names the YAML key, the endpoint and the offending value: a ladder that cannot form is
-        // reported at the first resolveAll(), far from the file the value came from. A margin is the merged
-        // value - `app.mesh.defaults.margins` with this endpoint's partial `margins` override on top - so the
-        // message names both places it can come from.
+        // reported at the first resolveAll(), far from the file the value came from. A margin comes from
+        // `app.mesh.defaults.margins`; it is checked per endpoint because its bound can depend on the endpoint's own
+        // anchor (p99-margin-ms < individual-request-timeout-ms).
         require(individualRequestTimeoutMs >= 1) {
             "[$triplet] individual-request-timeout-ms must be >= 1, but was $individualRequestTimeoutMs"
         }
@@ -158,4 +157,4 @@ data class ResolvedTimeouts(
 }
 
 /** Where a margin of [ResolvedTimeouts] comes from - named in every margin guard's message. */
-private const val MARGIN_SOURCES: String = "app.mesh.defaults.margins, overridden per endpoint by app.mesh.endpoints[].margins"
+private const val MARGIN_SOURCES: String = "app.mesh.defaults.margins"

@@ -10,6 +10,7 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatCode
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
@@ -36,6 +37,15 @@ import tools.jackson.databind.json.JsonMapper
  * failure has to edit - the convention of [WebClientProperties].
  */
 class WebClientEngineConfigTest {
+    /** Every factory a case built, released after it: a factory creates its engines - pools, threads - at once. */
+    private val factories = mutableListOf<ResilientWebClientFactory>()
+
+    @AfterEach
+    fun releaseFactories() {
+        factories.forEach { it.shutdown() }
+        factories.clear()
+    }
+
     @Nested
     inner class `Binding of app-webclient-engine` {
         @ParameterizedTest(name = "{0} -> {1}")
@@ -300,10 +310,9 @@ class WebClientEngineConfigTest {
                 ),
                 ReactiveResilienceDecorator(CircuitBreakerRegistry.ofDefaults(), TimeLimiterRegistry.ofDefaults(), BulkheadRegistry.ofDefaults()),
                 JsonMapper.builder().build(),
-                // Deliberately no Spring context: a bare builder stands in for Boot's bean. No client is built,
-                // so no engine resource is created and nothing needs shutting down.
+                // Deliberately no Spring context: a bare builder stands in for Boot's bean.
                 webClientBuilder = WebClient.builder(),
                 resourceLoader = resourceLoader,
-            )
+            ).also { factories += it }
     }
 }

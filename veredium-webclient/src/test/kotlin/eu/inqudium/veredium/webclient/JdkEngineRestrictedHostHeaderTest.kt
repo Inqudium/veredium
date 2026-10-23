@@ -43,7 +43,7 @@ class JdkEngineRestrictedHostHeaderTest {
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContainingAll("app.webclient.engine selects 'jdk' for [orders]", "-Djdk.httpclient.allowRestrictedHeaders=host")
         assertThat(System.getProperty(EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS)).isNull()
-        assertThatCode { factory(WebClientProperties.Engine()) }.doesNotThrowAnyException()
+        assertThatCode { factory(WebClientProperties.Engine()).shutdown() }.doesNotThrowAnyException()
     }
 
     private fun factory(engine: WebClientProperties.Engine) =

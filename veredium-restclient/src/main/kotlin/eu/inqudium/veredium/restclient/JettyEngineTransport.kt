@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.restclient
 
+import eu.inqudium.veredium.core.engine.EngineDrain
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import org.eclipse.jetty.client.AbstractConnectionPool
 import org.eclipse.jetty.client.ConnectionPool
@@ -8,7 +9,6 @@ import org.eclipse.jetty.client.HttpClient
 import org.eclipse.jetty.client.Request
 import org.eclipse.jetty.client.transport.HttpDestination
 import org.eclipse.jetty.http.HttpCookieStore
-import org.slf4j.Logger
 import org.springframework.http.HttpMethod
 import org.springframework.http.client.ClientHttpRequest
 import org.springframework.http.client.ClientHttpRequestFactory
@@ -67,6 +67,8 @@ internal class JettyEngineTransport(
 ) : EngineTransport(RestClientEngine.JETTY) {
     private val meshTransport = settings.transport
     private val pool = settings.pool
+    private val window = settings.window
+    private val logger = settings.logger
 
     override val name: String = POOL_NAME
 
@@ -159,11 +161,9 @@ internal class JettyEngineTransport(
     override fun shutdown(
         deadlineNanos: Long,
         nanoTime: () -> Long,
-        window: Duration,
-        logger: Logger,
     ) {
         if (httpClient.isStopped) return
-        drainOrReport(engine, ::exchangesInFlight, deadlineNanos, nanoTime, window, logger)
+        EngineDrain.drainOrReport(logger, engine.key, ::exchangesInFlight, deadlineNanos, nanoTime, window)
         if (Thread.currentThread().isInterrupted) {
             Thread.ofVirtual().name("$POOL_NAME-stop").start { httpClient.stop() }
         } else {

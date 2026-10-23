@@ -3,7 +3,6 @@ package eu.inqudium.veredium.restclient
 import eu.inqudium.veredium.core.observation.HttpObservationReport
 import io.micrometer.observation.ObservationRegistry
 import org.springframework.core.env.Environment
-import org.springframework.stereotype.Component
 
 /**
  * The blocking stack's instance of the core's [HttpObservationReport]: the two startup lines that say what
@@ -11,7 +10,6 @@ import org.springframework.stereotype.Component
  * `ObservationRestClientCustomizer` puts the host's registry on the builder, this only reads whether there was
  * one. Lines are written under this class's logger name.
  */
-@Component
 class RestClientObservationReport(
     properties: RestClientProperties,
     // Nullable ON PURPOSE: an optional dependency, so tests can construct the report directly; the Spring

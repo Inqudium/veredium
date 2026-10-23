@@ -885,7 +885,7 @@ class RestClientEngineIntegrationTest {
             assertThat(factory.create("early")).isSameAs(early)
             assertThatThrownBy { factory.create("late") }
                 .isInstanceOf(IllegalStateException::class.java)
-                .hasMessageContainingAll("shut down", "'late'", "closed HTTP engine")
+                .hasMessageContainingAll("shut down", "'late'", "released HTTP engine")
         }
 
         @ParameterizedTest
@@ -1156,12 +1156,13 @@ class RestClientEngineIntegrationTest {
             //   disposal completes in milliseconds.
             //
             // Given
-            val transport = ReactorNettyEngineTransport(EngineTransport.Settings(MeshProperties.Transport(), RestClientProperties.Pool(), null))
             val logger = LoggerFactory.getLogger("disposal-probe") as Logger
+            val transport =
+                ReactorNettyEngineTransport(EngineTransport.Settings(MeshProperties.Transport(), RestClientProperties.Pool(), null, Duration.ZERO, logger))
             try {
                 capturing(logger) { lines ->
                     // When
-                    val (failure, elapsed) = timed { transport.awaitDisposal(what = "connection pool", disposal = Mono.never(), logger = logger, wait = Duration.ofMillis(100)) }
+                    val (failure, elapsed) = timed { transport.awaitDisposal(what = "connection pool", disposal = Mono.never(), wait = Duration.ofMillis(100)) }
 
                     // Then
                     assertThat(failure).isNull()
@@ -1170,7 +1171,7 @@ class RestClientEngineIntegrationTest {
                         .isEqualTo("HTTP engine 'reactor-netty': connection pool not disposed within PT0.1S - leaving it to finish on its own")
                 }
             } finally {
-                transport.shutdown(deadlineNanos = System.nanoTime(), nanoTime = System::nanoTime, window = Duration.ZERO, logger = logger)
+                transport.shutdown(deadlineNanos = System.nanoTime(), nanoTime = System::nanoTime)
             }
         }
 

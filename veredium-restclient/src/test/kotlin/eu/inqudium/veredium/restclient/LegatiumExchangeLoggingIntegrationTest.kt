@@ -87,7 +87,7 @@ import java.util.function.Supplier
  * the reference `application.yml` ([ConfigurationFiles.REFERENCE], a test resource no consumer receives) as a
  * property source, so the configuration under test is the one the docs recommend - not a copy in this file.
  * [RestClientProperties] is bound from that property source by [BoundRestClientProperties], the binding half of
- * [RestClientConfiguration], instead of being handed in as a code-default instance, so a key like
+ * [VerediumRestClientAutoConfiguration], instead of being handed in as a code-default instance, so a key like
  * `app.restclient.observability.http-observation-enabled` reaches [ResilientRestClientFactory] here by exactly
  * the route it takes in the running application.
  *
@@ -850,8 +850,8 @@ class LegatiumExchangeLoggingIntegrationTest {
      * rest is wired.
      *
      * The three Resilience4j registries are beans of their own, and [BlockingResilienceDecorator] is built over
-     * them with the context's `ObservationRegistry` and this module's worker name, as [RestClientConfiguration]
-     * builds it in the host. That configuration itself is NOT imported: it also pulls in the core's mesh
+     * them with the context's `ObservationRegistry` and this module's worker name, as
+     * [VerediumRestClientAutoConfiguration] builds it in the host. That configuration itself is NOT imported: it also pulls in the core's mesh
      * wiring, whose startup guard needs Resilience4j's auto-configuration on the registries - which this
      * hand-assembled context deliberately leaves out. [BoundRestClientProperties] stands in for its one other
      * contribution, the `app.restclient` binding.
@@ -911,7 +911,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             .withBean(
                 BlockingResilienceDecorator::class.java,
                 Supplier {
-                    BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, observations, RestClientConfiguration.WORKER_NAME_PREFIX)
+                    BlockingResilienceDecorator(circuitBreakers, timeLimiters, bulkheads, observations, VerediumRestClientAutoConfiguration.WORKER_NAME_PREFIX)
                 },
             ).withBean(ObjectMapper::class.java, Supplier { JsonMapper.builder().build() })
             .withBean(ResilientRestClientFactory::class.java)
@@ -919,7 +919,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             .let { runner -> tracer?.let { bean -> runner.withBean(Tracer::class.java, Supplier { bean }) } ?: runner }
     }
 
-    /** The `app.restclient` binding alone - see [hostContext] for why not [RestClientConfiguration]. */
+    /** The `app.restclient` binding alone - see [hostContext] for why not [VerediumRestClientAutoConfiguration]. */
     @EnableConfigurationProperties(RestClientProperties::class)
     class BoundRestClientProperties
 
