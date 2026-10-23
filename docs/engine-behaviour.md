@@ -547,15 +547,19 @@ on shutdown".
 
 **Default (httpclient5 5.6.4, httpcore5 5.4.3).**
 - Blocking: `close` discards leased connections on the spot. There is no "dispose when drained".
-- Reactive: the graceful reactor shutdown and a hard close both close the connections of running exchanges
-  **without completing their callbacks**, so a caller's `Mono` waits for its TimeLimiter.
+- Reactive: the graceful reactor shutdown lets an exchange already on a connection finish, but opens **no new
+  connection**: a call still waiting for one (max-connections reached, a connect not yet made) fails at once with
+  an `IOReactorShutdownException`. A hard close ends the exchanges on their connections **without completing
+  their callbacks**, so a caller's `Mono` waits for its TimeLimiter.
 - Reactive: closing a reactor whose workers are still shutting down closes their selector under them. Apache logs
   that at ERROR as a `ClosedSelectorException`.
 
 **With veredium.**
 - Blocking: the module waits for the leased count to reach zero, polling every 50 ms up to the deadline, then
   closes the pool.
-- Reactive: in-flight exchanges are cancelled on release (one WARN with their number). The reactor is closed hard
+- Reactive: the module waits for its exchanges in flight (those waiting for a connection included) to reach zero,
+  polling every 50 ms up to the deadline, and only then shuts the reactor down. What is still in flight after the
+  reactor shutdown is cancelled (one WARN with their number). The reactor is closed hard
   only if it does not end by itself. The multi-core reactor reports `SHUT_DOWN` only once it is closed, so the
   module cannot tell whether every worker already ended. A worker that has not finds its selector closed and
   reports a `ClosedSelectorException`; the module's own reactor exception callback logs that one at DEBUG during
@@ -583,19 +587,25 @@ of an interrupt**.
 
 **Default (1.3.7).**
 - `disposeLater()` on a pool built without `disposeTimeout` is not a graceful shutdown: it closes the idle
-  connections and leaves in-flight calls to finish on theirs.
+  connections, leaves in-flight calls to finish on theirs, and fails every call still waiting for a connection at
+  once (`PoolShutdownException`).
+- With `disposeTimeout` it is: the pool refuses new acquires, serves the waiting ones, and completes once every
+  connection came back, or fails at the timeout, which Reactor Netty logs at ERROR.
 - Disposing the event loops closes every channel on them.
 - `block(Duration)` reports an expiry as an `IllegalStateException`.
 
 **With veredium.**
 - Blocking: waits for the acquired count to reach zero, then disposes pool and loops. An expiry is a WARN line,
   not an exception; the hand-off executor is shut down whatever happens.
-- Reactive: the loops go after the pool, once no call can still need them.
+- Reactive: the pool is built with `disposeTimeout` = the drain bound, so its disposal waits for the calls in
+  flight, those waiting for a connection included; the factory waits for it up to the shared deadline, with a WARN
+  past it. The loops go after the pool, once no call can still need them.
 
-Pinned per engine by "should let an in-flight exchange finish before closing the engine", "should report an
-engine that does not drain by the deadline and close it anyway", "should stop waiting when the shutdown thread is
-interrupted and leave the flag set" and "should refuse a client requested after shutdown" (blocking), and by the
-reactive "Release against the shutdown deadline" and "Jetty's shutdown" cases. `EngineTransportLifecycleTest`
+Pinned per engine by "should let an in-flight exchange finish before closing the engine", "should let a call still
+waiting for a connection finish before closing the engine", "should report an engine that does not drain by the
+deadline and close it anyway", "should stop waiting when the shutdown thread is interrupted and leave the flag set"
+and "should refuse a client requested after shutdown" (blocking), and by the reactive "Draining shutdown" (the same
+two cases on every engine), "Release against the shutdown deadline" and "Jetty's shutdown" cases. `EngineTransportLifecycleTest`
 and `EngineTransportsTest` pin the isolation of a failing release.
 
 ## Test infrastructure

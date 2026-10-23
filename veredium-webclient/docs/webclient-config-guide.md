@@ -343,11 +343,13 @@ or to Reactor's global handling.
 
 **Shutdown.** `shutdown()` releases each engine in use against ONE deadline (the longest response timeout of
 any endpoint + connect + pending-acquire + 1 s from the start of the shutdown), shared by the engines released
-one after another - so a factory on several engines does not take the bound once per engine: Reactor Netty's
-pool closes its idle connections and lets in-flight calls finish on theirs, and its event loops are disposed
+one after another - so a factory on several engines does not take the bound once per engine. Every engine lets
+its calls in flight finish first, those still waiting for a connection included: Reactor Netty's pool is disposed
+gracefully (its `disposeTimeout` is the bound) - it refuses new calls, serves the waiting ones and completes once
+every connection came back, with a WARN when the deadline ran out first - and its event loops are disposed
 once the bound has passed (daemon threads, so an exiting JVM is not held up); the JDK client shuts down in order -
 in-flight exchanges run to completion until the deadline, then it is shut down hard with a WARN; Jetty's client
-waits for its in-flight exchanges until the deadline and then stops, with a WARN naming those it aborts; Apache's I/O reactor shuts down gracefully until the deadline and is then
+waits for its in-flight exchanges until the deadline and then stops, with a WARN naming those it aborts; Apache waits for its exchanges in flight until the deadline, then its I/O reactor shuts down gracefully and is
 closed, with a WARN when the deadline ran out - and the exchanges it still had in flight are cancelled (WARN
 with their number), because closing the reactor completes none of their callers, who would otherwise wait out
 their budget. After `shutdown()` no new client can be built (`IllegalStateException`): it would create engine

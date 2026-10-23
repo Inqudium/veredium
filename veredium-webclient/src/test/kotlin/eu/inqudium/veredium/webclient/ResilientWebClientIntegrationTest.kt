@@ -1086,17 +1086,17 @@ class ResilientWebClientIntegrationTest {
     }
 
     @Test
-    fun `should let an in-flight call finish when the pool is disposed, without the drain WARN`() {
+    fun `should let an in-flight call finish before the pool is disposed, without the drain WARN`() {
         // What is tested: shutdown() while a call holds a connection - what the disposal does to it, and that
         //   the bounded wait does not report a drain failure for it.
         // Success criteria: with a request already at the backend (a WireMock request listener says so), the
-        //   call is still running when shutdown() returns, then completes with the backend's answer; the
-        //   factory logs no "did not drain" WARN.
-        // Why it matters: it pins what shutdown() actually waits for. The pool is disposed without Reactor
-        //   Netty's graceful disposeTimeout, so the disposal closes the IDLE connections and completes - it
-        //   neither waits for nor cuts a leased one, and the call finishes on its connection. Graceful shutdown
-        //   therefore depends on the host stopping its traffic first, not on this wait; were the disposal ever
-        //   to cut leased connections, the answer below would be lost and this test would say so.
+        //   call has completed with the backend's answer when shutdown() returns; the factory logs no "did not
+        //   drain" WARN.
+        // Why it matters: it pins what shutdown() waits for. The pool is disposed with Reactor Netty's graceful
+        //   disposeTimeout, so the disposal waits until the leased connection came back - a graceful shutdown
+        //   lets the calls in flight finish, as on every other engine. Were the disposal to complete at once, the
+        //   call would still be running when shutdown() returns; were it to cut leased connections, the answer
+        //   would be lost.
         //
         // Given: an answer 1 s late - inside the endpoint's 1400 ms response timeout, so the transport lets it
         // through - a listener that fires once the request reached WireMock, and the factory logger capturing
@@ -1114,9 +1114,9 @@ class ResilientWebClientIntegrationTest {
             // When
             factory.shutdown()
 
-            // Then: shutdown did not wait for the call, and the call was not cut
-            assertThat(call.isDone).`as`("the disposal waits for idle connections only").isFalse()
-            assertThat(call.get(5, TimeUnit.SECONDS)?.message).isEqualTo("late")
+            // Then: shutdown waited for the call, and the call was not cut
+            assertThat(call.isDone).`as`("the disposal waits for the call in flight").isTrue()
+            assertThat(call.get(0, TimeUnit.SECONDS)?.message).isEqualTo("late")
             assertThat(factoryLines.events()).isEmpty()
         } finally {
             factoryLogger.detachAppender(factoryLines)

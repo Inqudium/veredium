@@ -60,6 +60,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-23T05-20-01.md`:
+
+- `veredium-webclient`: the Apache engine's release no longer fails a call that is still waiting for a
+  connection. It shut the I/O reactor down at once, and a reactor in `SHUTTING_DOWN` opens no connection, so a
+  call queued behind `max-connections` failed with an `IOReactorShutdownException` as soon as the connection it
+  waited for came free, although the drain deadline left it all the time it needed. The release now waits for
+  the engine's exchanges in flight first, as Jetty's does, and shuts the reactor down after. A per-engine test
+  of a call waiting for a connection pins it; on Apache it failed after 0.6 s of a 5 s deadline before the fix.
+  The "in-flight exchange finishes" case, before on Jetty only, now runs on every reactive engine.
+- `veredium-webclient`: the Reactor Netty engine's release no longer fails a call that is still waiting for a
+  connection either. Its pool was disposed without a `disposeTimeout`, which is no graceful shutdown: pending
+  acquires failed at once with a `PoolShutdownException`. The pool is now built with the factory's drain bound as
+  its `disposeTimeout`, so its disposal serves the waiting calls and completes once every connection came back;
+  the release now waits for in-flight calls on every reactive engine alike.
+
 Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-22T14-01-49.md`:
 
 - `veredium-restclient`: a body refused at the buffer limit is no longer read to its end on the Apache engine
