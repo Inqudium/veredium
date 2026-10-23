@@ -136,9 +136,10 @@ class ResilientWebClientFactory(
      * timeout next to the mesh ladder - free to drift below the ladder as endpoints are retuned, and nothing
      * would say so.
      *
-     * The bound is sized for the strongest reading of "drain" - waiting out every in-flight call - although the
-     * disposal [shutdown] runs waits only for the idle connections to close (see there). It is therefore
-     * generous rather than tight; what it must never be is SHORTER than a call that could still be running.
+     * The bound is sized for the strongest reading of "drain" - waiting out every in-flight call, the ones still
+     * waiting for a connection included - which is what every engine's release does. It is therefore generous
+     * rather than tight; what it must never be is SHORTER than a call that could still be running. Reactor
+     * Netty's pool takes it as its graceful `disposeTimeout`.
      */
     internal val poolDisposeTimeout: Duration =
         (meshByBackend.values.maxOfOrNull { it.responseTimeout } ?: Duration.ZERO)
@@ -316,16 +317,16 @@ class ResilientWebClientFactory(
     /**
      * Releases the resources of every engine in use on context shutdown, all of them against ONE deadline
      * [poolDisposeTimeout] from now - the engines are released one after another, and a bound per engine would
-     * let the shutdown take that bound once per engine. Reactor Netty's pool is disposed (below) and its event
-     * loops once the bound has passed, the JDK client shut down in order, Jetty's client stopped once its
-     * in-flight exchanges finished (or the deadline passed), Apache's I/O reactor shut down gracefully. An engine that never built a client has nothing
+     * let the shutdown take that bound once per engine. Reactor Netty's pool is disposed gracefully (below) and its
+     * event loops once the bound has passed, the JDK client shut down in order, Jetty's client stopped once its
+     * in-flight exchanges finished (or the deadline passed), Apache's I/O reactor shut down gracefully once its
+     * exchanges in flight finished (or the deadline passed). An engine that never built a client has nothing
      * to release; afterwards, no client can be built any more ([create]).
      *
-     * For Reactor Netty, what the disposal waits for is narrower than "drain": the pool is built without Reactor
-     * Netty's `disposeTimeout`, so `disposeLater()` is not a graceful shutdown. It fails pending acquires, closes the
-     * IDLE connections and completes; a connection an in-flight call holds is not cut - the call finishes on it,
-     * and the connection is closed when it is released. So an in-flight call does not hold [shutdown] up, and
-     * the timeout bounds the closing of the idle connections.
+     * For Reactor Netty the disposal IS the drain: the pool is built with Reactor Netty's `disposeTimeout`
+     * ([poolDisposeTimeout]), so `disposeLater()` refuses new acquires, still serves the calls waiting for a
+     * connection, lets every in-flight call finish on its connection, and completes once all connections came back.
+     * The wait here is bounded by what is left of the shared deadline.
      *
      * Expiry is an OUTCOME, not a failure. `block(Duration)` would report it as an `IllegalStateException` -
      * the same shape as a genuine disposal error, and one that Spring can only catch and log as a destroy

@@ -93,6 +93,9 @@ internal interface EngineTransport {
     fun isReleased(): Boolean
 
     companion object {
+        /** How often a draining release re-checks the exchanges in flight. */
+        val DRAIN_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(50)
+
         /** The time left until [deadlineNanos], never negative. */
         fun remaining(
             deadlineNanos: Long,
@@ -211,6 +214,12 @@ internal class ReactorNettyTransport(
             .maxIdleTime(properties.pool.maxIdleTime)
             .maxLifeTime(properties.pool.maxLifeTime)
             .evictInBackground(properties.pool.evictInBackground)
+            // A GRACEFUL disposal, bounded by the factory's drain bound: without it `disposeLater()` fails every
+            // call still waiting for a connection at once (`PoolShutdownException`). With it the pool takes no new
+            // acquire, serves the waiting ones and completes once every connection came back - or fails with a
+            // TimeoutException at the bound, which Reactor Netty logs at ERROR; the factory's own wait, bounded by
+            // what is left of the shared deadline, has reported the pool with a WARN before that.
+            .disposeTimeout(loopDisposeDelay)
             .metrics(true)
             .build()
 
@@ -382,7 +391,7 @@ internal class JettyTransport(
     ) {
         if (client.isStopped) return
         while (exchangesInFlight() > 0 && nanoTime() - deadlineNanos < 0 && !Thread.currentThread().isInterrupted) {
-            LockSupport.parkNanos(DRAIN_POLL_NANOS)
+            LockSupport.parkNanos(EngineTransport.DRAIN_POLL_NANOS)
         }
         val interrupted = Thread.currentThread().isInterrupted
         val left = exchangesInFlight()
@@ -414,9 +423,6 @@ internal class JettyTransport(
     companion object {
         /** The client's name, and so the name prefix of this engine's I/O threads. */
         const val THREAD_NAME_PREFIX: String = "veredium-webclient-jetty"
-
-        /** How often [release] re-checks the exchanges in flight. */
-        val DRAIN_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(50)
 
         /**
          * The Jetty queue capacity that means what `pool.pending-acquire-max-count` means on Reactor Netty: how
@@ -555,16 +561,26 @@ internal class ApacheTransport(
         )
 
     /**
-     * A graceful shutdown of the I/O reactor, bounded by the factory's shutdown deadline; past it the client is
-     * closed immediately, with a WARN. Exchanges still in flight are cancelled - with a WARN naming how many -
-     * so their callers do not wait out their budget for a connection that is gone. The evictor is stopped first,
-     * and waited for (briefly) so that [isReleased] means its thread is gone.
+     * Waits until [deadlineNanos] for the exchanges in flight to finish, then shuts the I/O reactor down
+     * gracefully, bounded by the same deadline; past it the client is closed immediately, with a WARN. Exchanges
+     * still in flight then are cancelled - with a WARN naming how many - so their callers do not wait out their
+     * budget for a connection that is gone. The evictor is stopped first, and waited for (briefly) so that
+     * [isReleased] means its thread is gone.
+     *
+     * The wait comes BEFORE the reactor shutdown, as Jetty's does before its stop: a reactor in `SHUTTING_DOWN`
+     * lets an exchange already on a connection finish, but opens no connection any more - a call still waiting
+     * for one (max-connections reached, or a connect not yet made) would fail with an `IOReactorShutdownException`
+     * although the deadline left it all the time it needed. The wait also ends when the calling thread is
+     * INTERRUPTED; the flag is left for the caller.
      */
     override fun release(
         deadlineNanos: Long,
         nanoTime: () -> Long,
     ) {
         releasing = true
+        while (client.inFlightCount() > 0 && nanoTime() - deadlineNanos < 0 && !Thread.currentThread().isInterrupted) {
+            LockSupport.parkNanos(EngineTransport.DRAIN_POLL_NANOS)
+        }
         evictor?.let { running ->
             running.shutdown()
             try {
@@ -585,9 +601,10 @@ internal class ApacheTransport(
         // returns either when every worker ended or at the deadline - so whether the deadline has passed, not the
         // status, says whether the reactor drained.
         val timedOut = nanoTime() - deadlineNanos >= 0
-        // Assumption: Apache's graceful reactor shutdown closes the connections of exchanges still in flight
-        // without completing their callbacks, and so does a hard close (httpclient5 5.6) - the caller's Mono would
-        // wait for its TimeLimiter. Cancelling them hands each caller its cancellation now.
+        // Assumption: an exchange the drain above left behind does not complete on its own once the reactor is
+        // shutting down - one waiting for a connection gets none, and a hard close ends one on a connection
+        // without completing its callback (httpclient5 5.6, httpcore5 5.4) - so the caller's Mono would wait for
+        // its TimeLimiter. Cancelling them hands each caller its cancellation now.
         val aborted = client.abortInFlight()
         if (timedOut) {
             logger.warn("HTTP engine '{}' did not drain by the factory's shutdown deadline - closing it with exchanges still open", engine)
@@ -726,6 +743,9 @@ internal class AbortableAsyncClient(
      * `CancellationException`, which ends the call at once (see [ApacheTransport.release] for why that is needed).
      */
     fun abortInFlight(): Int = inFlight.toList().count { it.cancel(true) }
+
+    /** The exchanges started and not yet completed - waiting for a connection included; what a draining release waits on. */
+    fun inFlightCount(): Int = inFlight.size
 
     override fun start() = delegate.start()
 
