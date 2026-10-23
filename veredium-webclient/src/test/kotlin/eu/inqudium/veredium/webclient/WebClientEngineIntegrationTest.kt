@@ -373,7 +373,7 @@ class WebClientEngineIntegrationTest {
         @EnumSource(WebClientEngine::class)
         fun `should refuse a dripping body past the codec limit at once, dropping the connection`(engine: WebClientEngine) {
             // What is tested: what the codec's refusal of an over-limit body does to the exchange on each engine when
-            //   the rest of the body is still on its way - the body-phase cancellation (Apache: AbortOnBodyCancel).
+            //   the rest of the body is still on its way - the body-phase cancellation (Jetty: AbortJettyOnBodyCancel).
             // Success criteria: against a backend that sends the head and 4 KiB of a declared 1 MiB body at once and
             //   then one byte every 200 ms, a 1 KiB limit and a generous budget, the call fails with
             //   DataBufferLimitException as its root cause within 2 s, and the backend sees its connection dropped

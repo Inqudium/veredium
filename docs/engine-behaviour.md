@@ -385,14 +385,17 @@ engine reports after that is the expected end of an aborted exchange, not an err
 - Blocking: on the decorator's virtual-thread workers, a blocking socket read reacts to an interrupt by closing the
   socket. The read fails at once with `SocketException: Closed by interrupt`, and Apache discards the connection.
   A pool lease and a connect are interruptible too.
-- Reactive: Spring's `HttpComponentsClientHttpConnector` **drops the exchange's `Future`**. A cancelled
-  subscription therefore leaves the exchange running until the response or the response timeout.
+- Reactive: Spring's `HttpComponentsClientHttpConnector` **drops the exchange's `Future`**. A subscription
+  cancelled while waiting for the response therefore leaves the exchange running until the response or the
+  response timeout. A body cancelled before its end (a codec refusal, a TimeLimiter abort) releases its
+  connection without help.
 
 **With veredium.**
 - Blocking: nothing to add.
-- Reactive: `AbortableAsyncClient` records each exchange's `Future` and cancels it, both while waiting for the
-  response and while reading the body. `AbortableExchange` handles an abort that arrives before the `Future`;
-  `AbortableExchangeTest` pins both orders.
+- Reactive: `AbortableAsyncClient` records each exchange's `Future` and cancels it when the subscription is
+  cancelled while waiting for the response. `AbortableExchange` handles an abort that arrives before the
+  `Future`; `AbortableExchangeTest` pins both orders. The body phase needs nothing: the dripping-body cases of
+  `WebClientEngineIntegrationTest` stay green without a body decorator, which is why there is none.
 
 ### JDK `java.net.http`
 

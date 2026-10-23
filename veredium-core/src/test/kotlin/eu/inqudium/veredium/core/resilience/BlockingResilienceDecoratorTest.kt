@@ -302,7 +302,7 @@ class BlockingResilienceDecoratorTest {
 
             try {
                 // When
-                val rejection = catchThrowable { decorator.decorate(alias) { "second" } }
+                val rejection = catchThrowable { decorator.decorate<String>(alias) { "second" } }
 
                 // Then
                 assertThat(rejection).isInstanceOf(BulkheadFullException::class.java)
@@ -331,7 +331,7 @@ class BlockingResilienceDecoratorTest {
             // When
             val thrown =
                 catchThrowable {
-                    decorator.decorate(alias) {
+                    decorator.decorate<String>(alias) {
                         try {
                             release.await()
                         } catch (e: InterruptedException) {
@@ -369,7 +369,7 @@ class BlockingResilienceDecoratorTest {
                 callers.submit<Throwable?> {
                     callerThread.set(Thread.currentThread())
                     catchThrowable {
-                        decorator.decorate(alias) {
+                        decorator.decorate<String>(alias) {
                             entered.countDown()
                             try {
                                 release.await()
@@ -410,7 +410,7 @@ class BlockingResilienceDecoratorTest {
             // When
             val thrown =
                 catchThrowable {
-                    decorator.decorate(alias) {
+                    decorator.decorate<String>(alias) {
                         ran.set(true)
                         "never"
                     }
@@ -484,7 +484,7 @@ class BlockingResilienceDecoratorTest {
                 // When: a call succeeds, a second one is rejected by the held bulkhead, a third fails for a real reason
                 val spare = Bulkhead.ofDefaults("spare")
                 decorator.decorate(breaker, limiter, spare) { "fine" }
-                val rejection = catchThrowable { decorator.decorate(breaker, limiter, bulkhead) { "second" } }
+                val rejection = catchThrowable { decorator.decorate<String>(breaker, limiter, bulkhead) { "second" } }
                 val failure = catchThrowable { decorator.decorate<String>(breaker, limiter, spare) { throw IllegalStateException("ledger down") } }
 
                 // Then: the rejection is not held against the backend, the failure is
