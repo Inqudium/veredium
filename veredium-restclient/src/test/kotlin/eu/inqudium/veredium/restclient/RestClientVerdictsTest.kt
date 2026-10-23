@@ -92,7 +92,7 @@ class RestClientVerdictsTest {
 
             try {
                 // When: a second call is made
-                val rejection = catchThrowable { decorator.decorate(alias) { "second" } }
+                val rejection = catchThrowable { decorator.decorate<String>(alias) { "second" } }
 
                 // Then: it was rejected by the bulkhead ...
                 assertThat(rejection).isInstanceOf(BulkheadFullException::class.java)
@@ -123,7 +123,7 @@ class RestClientVerdictsTest {
             decorator.shutdown()
 
             // When
-            val refusal = catchThrowable { decorator.decorate(alias) { "too late" } }
+            val refusal = catchThrowable { decorator.decorate<String>(alias) { "too late" } }
 
             // Then: the executor refused the call ...
             assertThat(refusal).isInstanceOf(RejectedExecutionException::class.java)
@@ -156,7 +156,7 @@ class RestClientVerdictsTest {
                 callers.submit<Throwable?> {
                     callerThread.set(Thread.currentThread())
                     catchThrowable {
-                        decorator.decorate(alias) {
+                        decorator.decorate<String>(alias) {
                             entered.countDown()
                             release.await()
                             "never"

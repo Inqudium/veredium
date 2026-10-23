@@ -371,7 +371,7 @@ internal class JettyTransport(
             isFollowRedirects = false
             httpCookieStore = HttpCookieStore.Empty()
             val maxLifeMillis = properties.pool.maxLifeTime.toMillis()
-            transport.connectionPoolFactory =
+            httpClientTransport.connectionPoolFactory =
                 ConnectionPool.Factory { destination ->
                     DuplexConnectionPool(destination, meshTransport.maxConnections).apply { maxDuration = maxLifeMillis }
                 }
@@ -689,8 +689,10 @@ internal class ApacheTransport(
  * [AbortableAsyncClient], which records the exchange's `Future` there.
  *
  * Cancelling the subscription - the TimeLimiter's abort, a caller's cancellation - cancels that `Future`, which
- * makes Apache abort the exchange and discard its connection. Both phases are covered: waiting for the response
- * (the cancellation reaches the connector's `Mono`) and reading the body (it reaches the body `Flux`).
+ * makes Apache abort the exchange and discard its connection - while waiting for the response, where the
+ * cancellation reaches the connector's `Mono`. Reading the body needs no help: a body cancelled before its end
+ * (a codec refusal, a TimeLimiter abort) releases its connection through Spring's connector and Apache alone, as
+ * the dripping-body cases of `WebClientEngineIntegrationTest` pin.
  *
  * A connector per exchange costs one small object and an idempotent `start()` on the already running client;
  * it is what lets the context carry per-exchange state without relying on when Spring invokes its context
@@ -715,17 +717,8 @@ internal class ApacheEndpointConnector(
                     setAttribute(AbortableExchange.CONTEXT_ATTRIBUTE, exchange)
                 }
             }.connect(method, uri, requestCallback)
-                .map<ClientHttpResponse> { response -> AbortOnBodyCancel(response, exchange) }
                 .doOnCancel(exchange::abort)
         }
-}
-
-/** A response whose body, when cancelled before it completed, aborts the exchange it belongs to. */
-private class AbortOnBodyCancel(
-    response: ClientHttpResponse,
-    private val exchange: AbortableExchange,
-) : ClientHttpResponseDecorator(response) {
-    override fun getBody(): Flux<DataBuffer> = super.getBody().doOnCancel(exchange::abort)
 }
 
 /**
@@ -786,6 +779,11 @@ internal class AbortableAsyncClient(
 
     override fun initiateShutdown() = delegate.initiateShutdown()
 
+    // Compatibility: never called - neither this module nor Spring's connector registers a push handler, and the
+    // engine speaks HTTP/1.1 only, which has no server push. It exists because CloseableHttpAsyncClient declares it
+    // abstract; deprecated there (httpclient5 5.6), it is delegated unchanged and carries the deprecation on.
+    @Deprecated("Deprecated in Apache's CloseableHttpAsyncClient; delegated unchanged")
+    @Suppress("DEPRECATION")
     override fun register(
         hostname: String?,
         uriPattern: String,
