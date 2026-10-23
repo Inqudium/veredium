@@ -151,7 +151,7 @@ class ResilientWebClientFactory(
 
     init {
         WebClientEngineChecks.requireKnownAliases(properties.engine, meshByBackend.keys)
-        WebClientEngineChecks.requireLibraries(engineByBackend, resourceLoader?.classLoader ?: javaClass.classLoader)
+        WebClientEngineChecks.requireLibraries(properties.engine, engineByBackend, resourceLoader?.classLoader ?: javaClass.classLoader)
         WebClientEngineChecks.requireJettyQueue(engineByBackend, properties.pool)
         WebClientEngineChecks.requireJdkHostHeader(engineByBackend)
         logger.info(WebClientEngineChecks.engineLine(properties.engine, engineByBackend))
@@ -378,7 +378,7 @@ class ResilientWebClientFactory(
 
     internal companion object {
         /** Name of the Reactor-Netty pool shared by that engine's backends; also the `name` tag on its pool metrics. */
-        const val POOL_NAME = "lap-webclient"
+        const val POOL_NAME = "webclient-reactor-netty"
     }
 }
 

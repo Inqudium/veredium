@@ -1,6 +1,6 @@
 package eu.inqudium.veredium.restclient
 
-import org.springframework.util.ClassUtils
+import eu.inqudium.veredium.core.engine.HttpEngine
 
 /**
  * The HTTP engine underneath a [ResilientRestClient]: which of Spring's blocking request factories carries the
@@ -18,16 +18,14 @@ import org.springframework.util.ClassUtils
  * What each engine maps from the mesh ladder and the pool settings, and what it cannot express, is stated on one
  * startup line per engine in use and in the guide's mapping table; the per-engine classes carry the detail.
  *
- * @property key The value the property takes in YAML and the name the startup lines use.
- * @property markerClass A class of the engine's library; its absence on the classpath is a failed start that
- *   names [dependency].
- * @property dependency What a host adds to select the engine, named in the failure when [markerClass] is absent.
+ * The three properties are those of [HttpEngine], shared with the reactive module's engines, which the start-time
+ * checks of `eu.inqudium.veredium.core.engine.EngineSelection` read.
  */
 enum class RestClientEngine(
-    val key: String,
-    val markerClass: String,
-    val dependency: String,
-) {
+    override val key: String,
+    override val requiredClasses: List<String>,
+    override val dependency: String,
+) : HttpEngine {
     /**
      * Apache HttpClient 5 through Spring's `HttpComponentsClientHttpRequestFactory` - the default, and the only
      * engine whose library is a regular dependency of this module. One shared pool with every knob the mesh
@@ -35,7 +33,7 @@ enum class RestClientEngine(
      */
     APACHE(
         key = "apache",
-        markerClass = "org.apache.hc.client5.http.impl.classic.HttpClients",
+        requiredClasses = listOf("org.apache.hc.client5.http.impl.classic.HttpClients"),
         dependency = "org.apache.httpcomponents.client5:httpclient5 (a regular dependency of veredium-restclient)",
     ),
 
@@ -46,27 +44,24 @@ enum class RestClientEngine(
      */
     JDK(
         key = "jdk",
-        markerClass = "java.net.http.HttpClient",
+        requiredClasses = listOf("java.net.http.HttpClient"),
         dependency = "the JDK module java.net.http (part of every full JDK; add it to a jlink image)",
     ),
 
     /** Eclipse Jetty's `HttpClient` through Spring's `JettyClientHttpRequestFactory`. */
     JETTY(
         key = "jetty",
-        markerClass = "org.eclipse.jetty.client.HttpClient",
+        requiredClasses = listOf("org.eclipse.jetty.client.HttpClient"),
         dependency = "org.eclipse.jetty:jetty-client (version managed by the Spring Boot BOM)",
     ),
 
     /** Reactor Netty's `HttpClient` through Spring's `ReactorClientHttpRequestFactory`, on resources the factory owns. */
     REACTOR_NETTY(
         key = "reactor-netty",
-        markerClass = "reactor.netty.http.client.HttpClient",
+        requiredClasses = listOf("reactor.netty.http.client.HttpClient"),
         dependency = "io.projectreactor.netty:reactor-netty-http (version managed by the Spring Boot BOM)",
     ),
     ;
-
-    /** Whether the engine's library is on the classpath this module was loaded from. */
-    fun isPresent(): Boolean = ClassUtils.isPresent(markerClass, RestClientEngine::class.java.classLoader)
 
     override fun toString(): String = key
 }

@@ -26,7 +26,7 @@ import org.springframework.core.env.Environment
  *    [timeLimiterCustomizer].
  *  - **An undeclared instance is created on the default.** For a customizer name it finds no `instances.<name>`
  *    entry for, the Boot configuration creates the instance anyway - on the registry DEFAULT config, not on the
- *    named base config the operator chose (`lap-backend`). The verdicts and the derived budget arrive, every
+ *    named base config the operator chose (`mesh-backend`). The verdicts and the derived budget arrive, every
  *    value of the shipped policy is silently lost. [MeshResilienceStartupGuard] turns that silence into a
  *    failed start.
  *

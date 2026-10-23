@@ -131,7 +131,7 @@ class WebClientEngineIsolationTest {
         //
         // Given: Boot's HTTP-client auto-configuration and the module's factory on the selected engine
         hostContext()
-            .withPropertyValues("app.webclient.engine.default=${engine.propertyValue}")
+            .withPropertyValues("app.webclient.engine.default=${engine.key}")
             .run { context ->
                 // When: the module's client and a host client built from Boot's builder each make a call
                 val factory = context.getBean(ResilientWebClientFactory::class.java)
@@ -186,7 +186,7 @@ class WebClientEngineIsolationTest {
                 wireMock.verify(
                     getRequestedFor(urlEqualTo("/host")).withHeader("User-Agent", matching(ENGINE_USER_AGENT.getValue(bootConnector))),
                 )
-                val engine = WebClientEngine.entries.single { it.propertyValue == moduleEngine }
+                val engine = WebClientEngine.entries.single { it.key == moduleEngine }
                 assertThat(responseThreads(context, "/$BACKEND")).isNotEmpty().allMatch { it.matches(Regex(MODULE_ENGINE_THREAD.getValue(engine))) }
                 val expected =
                     if (engine == WebClientEngine.JDK) JdkClientHttpConnector::class.java else ReactorClientHttpConnector::class.java

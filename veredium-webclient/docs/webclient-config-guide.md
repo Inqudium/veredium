@@ -259,7 +259,7 @@ calls off the wire (the `User-Agent` each engine sends on its own).
 The engine resources belong to the factory: created when the first client of an engine is built (an engine no
 backend selected is never created - not even Reactor Netty's pool), shared by that engine's backends, and
 released in `shutdown()`. That includes Reactor Netty: its pool, its event loops (threads named after the pool,
-`lap-webclient-...`) and its resolver (Netty's `InetAddress`-based `DefaultAddressResolverGroup`, set explicitly
+`webclient-reactor-netty-...`) and its resolver (Netty's `InetAddress`-based `DefaultAddressResolverGroup`, set explicitly
 because Reactor Netty's default resolver comes from the global resources) are the factory's, not the
 process-wide `HttpResources` every other Reactor Netty client of the JVM shares and Boot's `ReactorResourceFactory`
 manages. Until the engine switch existed the default engine ran on those global loops and that global resolver;
@@ -560,13 +560,13 @@ Instance keys are the derived aliases (§2.2).
 resilience4j:
   bulkhead:
     configs:
-      lap-backend:
+      mesh-backend:
         max-concurrent-calls: 25    # sum across backends <= transport.max-connections (100); see below
         max-wait-duration: 0        # fail fast rather than queue (a waiting caller blocks its subscribing thread)
-    instances: { <alias>: { base-config: lap-backend }, ... }
+    instances: { <alias>: { base-config: mesh-backend }, ... }
   circuitbreaker:
     configs:
-      lap-backend:
+      mesh-backend:
         failure-rate-threshold: 50
         sliding-window-type: COUNT_BASED
         sliding-window-size: 100
@@ -575,13 +575,13 @@ resilience4j:
         permitted-number-of-calls-in-half-open-state: 10
         slow-call-rate-threshold: 100
         slow-call-duration-threshold: 60s   # inert unless mesh derives it (§2.6); the TimeLimiter cancels first
-    instances: { <alias>: { base-config: lap-backend }, ... }
+    instances: { <alias>: { base-config: mesh-backend }, ... }
   timelimiter:
     configs:
-      lap-backend:
+      mesh-backend:
         timeout-duration: 3s        # the fallback for an endpoint whose time-limiter toggle is off
         cancel-running-future: true
-    instances: { <alias>: { base-config: lap-backend }, ... }   # EVERY alias, or the start fails
+    instances: { <alias>: { base-config: mesh-backend }, ... }   # EVERY alias, or the start fails
 ```
 
 - **The bulkheads partition the shared pool.** `sum(max-concurrent-calls)` over the mesh aliases must not exceed
@@ -616,7 +616,7 @@ YAML, before the instance exists - and set **only** the derived knobs on top of 
 Nothing is removed or recreated and nothing is re-bound: the instance the metric and health binders see is the
 final one. The price is that **every** derived alias must be declared under all three
 `resilience4j.<layer>.instances` - Resilience4j creates an instance for an undeclared customizer name on the
-registry *default*, not on `lap-backend`, and says nothing. `MeshResilienceStartupGuard` (also `veredium-core`)
+registry *default*, not on `mesh-backend`, and says nothing. `MeshResilienceStartupGuard` (also `veredium-core`)
 fails the start in that case and names the key to add; `MeshResilienceShippedConfigTest` boots the reference
 configuration of this module against it.
 

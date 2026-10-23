@@ -16,6 +16,7 @@ import com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
 import eu.inqudium.veredium.core.Veredium
+import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
@@ -730,7 +731,7 @@ class RestClientEngineIntegrationTest {
         fun `should let an in-flight exchange finish before closing the engine`(engine: RestClientEngine) {
             // What is tested: the drain of shutdown() on each engine, on a real clock.
             // Success criteria: a call whose backend answers 500 ms after shutdown() was entered SUCCEEDS with the
-            //   backend's value; shutdown() waited at least 100 ms; no "did not drain" / "did not terminate" WARN.
+            //   backend's value; shutdown() waited at least 100 ms; no "did not drain" WARN.
             // Why it matters: closing an engine cuts its in-flight exchanges; without the wait a graceful shutdown
             //   would fail every call still on the wire. Apache's drain has its own cases; the other three engines
             //   drain by other routes (Jetty's and Reactor Netty's counters, the JDK's awaitTermination).
@@ -763,7 +764,7 @@ class RestClientEngineIntegrationTest {
             //   call of the same backend waiting for it (on the JDK client, whose pool is unbounded, on a
             //   connection of its own).
             // Success criteria: BOTH calls succeed with the backend's answer; shutdown() raises nothing; no
-            //   "did not drain" / "did not terminate" WARN.
+            //   "did not drain" WARN.
             // Why it matters: a call queued for a connection is in flight for its caller as much as one on the
             //   wire. A drain that counts only the connections handed out could close the pool in the moment the
             //   first call gives its connection back, before the waiting one has taken it - the reactive engines
@@ -815,7 +816,7 @@ class RestClientEngineIntegrationTest {
             // What is tested: the deadline branch of each engine's shutdown, on a clock that is past the deadline
             //   at its next read.
             // Success criteria: with an exchange in flight, shutdown() returns without an exception, writes one WARN
-            //   naming the engine's pool or client and the window, and the engine reports itself closed within 2 s.
+            //   naming the engine and the window, and the engine reports itself closed within 2 s.
             // Why it matters: the line is the only trace of a shutdown that cut calls off; it is unreachable on a
             //   real clock short of a call longer than every response timeout.
             //
@@ -839,7 +840,7 @@ class RestClientEngineIntegrationTest {
 
                 // Then
                 assertThat(outcome).isNull()
-                assertThat(warnings().single()).contains(engineResourceName(engine), "within ")
+                assertThat(warnings().single()).contains("'${engine.key}'", "within ")
                 // The JDK client terminates its own threads after shutdownNow() returned.
                 awaitCondition("the $engine engine must report itself closed") { transport.isClosed }
             }
@@ -875,7 +876,7 @@ class RestClientEngineIntegrationTest {
 
                 // Then
                 assertThat(shutdown.get(PROMPTLY.toMillis(), TimeUnit.MILLISECONDS)).`as`("the interrupt flag must survive").isTrue()
-                assertThat(warnings().single()).contains(engineResourceName(engine), "because the shutdown thread was interrupted")
+                assertThat(warnings().single()).contains("'${engine.key}'", "because the shutdown thread was interrupted")
             }
             inFlight.get(10, TimeUnit.SECONDS)
         }
@@ -955,8 +956,9 @@ class RestClientEngineIntegrationTest {
         @Test
         fun `should refuse the JDK engine for a backend whose Host the JDK would replace, naming the key`() {
             // What is tested: the fail-fast check of the JDK engine against its restricted Host header.
-            // Success criteria: constructing the factory fails with IllegalStateException naming the override
-            //   key, the Host the JDK would send instead, and the three ways out.
+            // Success criteria: in a JVM whose JDK client refuses the header, constructing the factory fails with
+            //   IllegalArgumentException naming the override key, the Host the JDK would send instead, and the three
+            //   ways out.
             // Why it matters: the JDK client silently sends the base URL's authority (`localhost:<port>`) instead;
             //   behind a sidecar every call would be routed by the wrong host. Only a failed start makes that a
             //   configuration error instead of a production incident.
@@ -965,8 +967,8 @@ class RestClientEngineIntegrationTest {
             val engines = RestClientProperties.Engine(endpoints = mapOf("hosted" to RestClientEngine.JDK))
 
             // When / Then
-            assertThatThrownBy { newFactory(engines, mesh = mesh("hosted", host = "api.example.com")) }
-                .isInstanceOf(IllegalStateException::class.java)
+            assertThatThrownBy { newFactory(engines, mesh = mesh("hosted", host = "api.example.com"), jdkAllowsHostHeader = { false }) }
+                .isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContainingAll(
                     "app.restclient.engine.endpoints.hosted",
                     "instead of 'api.example.com'",
@@ -977,8 +979,9 @@ class RestClientEngineIntegrationTest {
 
         @Test
         fun `should see no conflict when the JVM allows the Host header or the base URL already names the host`() {
-            // What is tested: the two ways the JDK conflict check lets a backend pass - the JVM-wide property set
-            //   by the host, and a base URL whose authority IS the Host (default port omitted, as the JDK does).
+            // What is tested: the two ways the JDK conflict check lets a backend pass - a JDK client that accepts the
+            //   header (the JVM-wide property set by the host), and a base URL whose authority IS the Host (default
+            //   port omitted, as the JDK does).
             // Success criteria: hostHeaderConflict is null for both, and names the JDK's Host for the plain
             //   sidecar case.
             // Why it matters: a check that refused these would push a host off the JDK engine for no reason; one
@@ -989,9 +992,9 @@ class RestClientEngineIntegrationTest {
             val direct = behindSidecar.copy(baseUrl = "http://API.example.com")
 
             // When / Then
-            assertThat(JdkEngineTransport.hostHeaderConflict(behindSidecar, null)).contains("'${localAuthority()}'")
-            assertThat(JdkEngineTransport.hostHeaderConflict(behindSidecar, "connection, host")).isNull()
-            assertThat(JdkEngineTransport.hostHeaderConflict(direct, null)).isNull()
+            assertThat(JdkEngineTransport.hostHeaderConflict(behindSidecar, hostAllowed = false)).contains("'${localAuthority()}'")
+            assertThat(JdkEngineTransport.hostHeaderConflict(behindSidecar, hostAllowed = true)).isNull()
+            assertThat(JdkEngineTransport.hostHeaderConflict(direct, hostAllowed = false)).isNull()
         }
     }
 
@@ -1046,7 +1049,7 @@ class RestClientEngineIntegrationTest {
         @Test
         fun `should refuse an override for an alias that is no mesh endpoint, naming the key`() {
             // What is tested: typo protection on the override keys.
-            // Success criteria: constructing the factory fails with IllegalStateException naming the full key and
+            // Success criteria: constructing the factory fails with IllegalArgumentException naming the full key and
             //   listing the known aliases.
             // Why it matters: a mistyped alias would otherwise leave the intended backend on the default engine
             //   without a word - the trial would seem to run and measure nothing.
@@ -1056,7 +1059,7 @@ class RestClientEngineIntegrationTest {
 
             // When / Then
             assertThatThrownBy { newFactory(engines, mesh = mesh("trial")) }
-                .isInstanceOf(IllegalStateException::class.java)
+                .isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContainingAll("app.restclient.engine.endpoints.tiral", "names no mesh endpoint", "[trial]")
         }
 
@@ -1075,7 +1078,7 @@ class RestClientEngineIntegrationTest {
             // When / Then
             assertThatThrownBy {
                 newFactory(RestClientProperties.Engine(default = RestClientEngine.JETTY), engineLibraryPresent = jettyMissing)
-            }.isInstanceOf(IllegalStateException::class.java)
+            }.isInstanceOf(IllegalArgumentException::class.java)
                 .hasMessageContainingAll("app.restclient.engine.default", "'jetty'", "greet", "org.eclipse.jetty:jetty-client")
             assertThat(newFactory(RestClientProperties.Engine(), engineLibraryPresent = jettyMissing).engineTransports.keys)
                 .containsExactly(RestClientEngine.APACHE)
@@ -1309,7 +1312,8 @@ class RestClientEngineIntegrationTest {
         bulkheads: BulkheadRegistry = BulkheadRegistry.ofDefaults(),
         maxInMemorySize: DataSize = RestClientProperties().maxInMemorySize,
         meterRegistry: MeterRegistry? = null,
-        engineLibraryPresent: (RestClientEngine) -> Boolean = RestClientEngine::isPresent,
+        engineLibraryPresent: (RestClientEngine) -> Boolean = { it.isPresent() },
+        jdkAllowsHostHeader: () -> Boolean = EngineSelection::jdkAllowsHostHeader,
         nanoTime: () -> Long = System::nanoTime,
     ): ResilientRestClientFactory {
         val resilience =
@@ -1325,6 +1329,7 @@ class RestClientEngineIntegrationTest {
             // the factory in a context).
             restClientBuilder = RestClient.builder(),
             engineLibraryPresent = engineLibraryPresent,
+            jdkAllowsHostHeader = jdkAllowsHostHeader,
             nanoTime = nanoTime,
         ).also { factories += it }
     }
@@ -1520,15 +1525,6 @@ class RestClientEngineIntegrationTest {
             }
         }
     }
-
-    /** The pool or client name each engine's shutdown line names. */
-    private fun engineResourceName(engine: RestClientEngine): String =
-        when (engine) {
-            RestClientEngine.APACHE -> RestClientMetrics.POOL_NAME
-            RestClientEngine.JDK -> JdkEngineTransport.CLIENT_NAME
-            RestClientEngine.JETTY -> JettyEngineTransport.POOL_NAME
-            RestClientEngine.REACTOR_NETTY -> ReactorNettyEngineTransport.POOL_NAME
-        }
 
     /** Captures the factory's WARN lines for [block], which reads them through the function it is given. */
     private fun capturingFactoryWarnings(block: (warnings: () -> List<String>) -> Unit) {

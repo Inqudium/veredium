@@ -28,12 +28,12 @@ resilience4j:
   # `instances.<name>` listed here, and the mesh customizer (MeshResilienceCustomizers) sets the derived budget
   # on every endpoint whose time-limiter toggle is on (the default) WHILE that instance is built. An alias an
   # endpoint uses but this block does not declare still gets an instance (Resilience4j creates one for the
-  # customizer) - on the registry default, not on lap-backend, silently; MeshResilienceStartupGuard therefore
+  # customizer) - on the registry default, not on mesh-backend, silently; MeshResilienceStartupGuard therefore
   # fails the start and names the missing key. MeshResilienceShippedConfigTest boots the auto-configuration
   # against this file.
   timelimiter:
     configs:
-      lap-backend:
+      mesh-backend:
         # A fallback only: the mesh customizer sets every enabled instance to
         # the derived timeout (see docs/mesh-timeout.md), so 3s is only the fallback for an
         # endpoint whose time-limiter toggle is switched off. cancel-running-future is the Resilience4j default,
@@ -43,20 +43,20 @@ resilience4j:
         cancel-running-future: true
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       api-example-com-GET-v5-access-profiles-by-involved-party:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-POST-v5-involved-parties-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-GET-v6-involved-parties:
-        base-config: lap-backend
+        base-config: mesh-backend
 
   # The values below are the Resilience4j defaults, written out DELIBERATELY: making them visible and
   # reviewable is the point, and pinning them here means a library upgrade cannot change this application's
   # behaviour behind its back. Tune them against real traffic - the notes say what each one costs.
   bulkhead:
     configs:
-      lap-backend:
+      mesh-backend:
         # Bound by the SHARED connection pool, not chosen per backend: every endpoint talks to the same local
         # sidecar through one Apache HttpClient pool of app.mesh.defaults.transport.max-connections (100). With
         # four backends, 4 x 25 = 100 - the bulkheads shed load exactly as the pool runs out, rather than
@@ -85,17 +85,17 @@ resilience4j:
         # queueing. The decision this inherits is recorded in veredium-restclient/docs/decisions.md (D1).
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       api-example-com-GET-v5-access-profiles-by-involved-party:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-POST-v5-involved-parties-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-GET-v6-involved-parties:
-        base-config: lap-backend
+        base-config: mesh-backend
 
   circuitbreaker:
     configs:
-      lap-backend:
+      mesh-backend:
         # NOTE: a bulkhead rejection is NOT counted as a backend failure - see ClientSideFailurePolicy, which
         # the mesh customizer installs on every instance below while Resilience4j builds it. That invariant
         # lives in code on purpose, so it cannot be lost by an edit to this block.
@@ -123,10 +123,10 @@ resilience4j:
         slow-call-duration-threshold: 60s
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       api-example-com-GET-v5-access-profiles-by-involved-party:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-POST-v5-involved-parties-lookup:
-        base-config: lap-backend
+        base-config: mesh-backend
       apis-example-com-GET-v6-involved-parties:
-        base-config: lap-backend
+        base-config: mesh-backend

@@ -1,6 +1,7 @@
 package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.Veredium
+import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.util.unit.DataSize
@@ -151,7 +152,7 @@ data class WebClientProperties(
      * aliases): an [endpoints] key that names no `app.mesh` alias fails the start - unlike a misspelt
      * `validation.endpoints` key, which would silently fall back to the default - and so does an engine whose
      * library is missing from the classpath, naming the Maven coordinates to add
-     * ([WebClientEngine.coordinates]).
+     * ([WebClientEngine.dependency]).
      *
      * @property default The engine of every alias without an entry in [endpoints]. YAML: `reactor-netty`
      *   (default), `jdk`, `jetty`, `apache`.
@@ -163,6 +164,14 @@ data class WebClientProperties(
     ) {
         /** The engine of [alias]: its own override when set, otherwise [default]. */
         fun engineFor(alias: String): WebClientEngine = endpoints[alias] ?: default
+
+        /** The key [alias]'s engine is selected by - its override, or the default - for a message naming it. */
+        fun keyFor(alias: String): String = EngineSelection.keyFor(PREFIX, alias, alias in endpoints)
+
+        companion object {
+            /** The prefix of this block. */
+            const val PREFIX: String = "app.webclient.engine"
+        }
     }
 
     /**

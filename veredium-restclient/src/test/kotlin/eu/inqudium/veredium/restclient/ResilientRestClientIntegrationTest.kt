@@ -109,7 +109,7 @@ class ResilientRestClientIntegrationTest {
 
         /** The factory's drain line: marker within the message, and the prefix it starts with. */
         private const val DRAIN_MARKER = "did not drain"
-        private const val DRAIN_PREFIX = "Connection pool"
+        private const val DRAIN_PREFIX = "HTTP engine"
 
         private lateinit var wireMock: WireMockServer
 
@@ -466,7 +466,7 @@ class ResilientRestClientIntegrationTest {
         assertThat(poolMeters.map { it.id.name })
             .containsExactlyInAnyOrder("restclient.pool.leased", "restclient.pool.available", "restclient.pool.pending")
         assertThat(poolMeters.map { it.id.getTag(RestClientMetrics.POOL_TAG) }).containsOnly(RestClientMetrics.POOL_NAME)
-        assertThat(RestClientMetrics.POOL_NAME).isEqualTo("restclient-pool")
+        assertThat(RestClientMetrics.POOL_NAME).isEqualTo("restclient-apache")
     }
 
     @Test
@@ -1099,8 +1099,8 @@ class ResilientRestClientIntegrationTest {
                 assertThat(warning.level).isEqualTo(Level.WARN)
                 assertThat(warning.formattedMessage)
                     .contains("did not drain within")
-                    .contains("connection(s) still leased")
-                    .contains(RestClientMetrics.POOL_NAME)
+                    .contains("exchange(s) still in flight")
+                    .contains("'${RestClientEngine.APACHE.key}'")
             }
         } finally {
             // Closing the pool dropped the leased connection, so the parked worker fails rather than waiting 5 s

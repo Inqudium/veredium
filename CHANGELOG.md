@@ -190,6 +190,36 @@ Findings of `docs/assessment/DEFECT_ANALYSIS-2026-10-21T20-14-02.md`:
 
 ### Changed
 
+Findings of `docs/assessment/CODE_STYLE-2026-10-23T10-45-28.md`:
+
+- **Renamed resources (operator-visible):** the module's pools, clients and threads follow one scheme,
+  `<module>-<engine>`:
+  - the reactive Reactor Netty pool is `webclient-reactor-netty` instead of `lap-webclient` - the `name` tag of
+    its `reactor.netty.connection.provider.*` meters;
+  - the blocking Apache pool is `restclient-apache` instead of `restclient-pool` - the `pool` tag of its
+    `restclient.pool.*` gauges and its evictor thread's name;
+  - the reactive Jetty and Apache threads are `webclient-jetty-*` and `webclient-apache-*` instead of
+    `veredium-webclient-*`.
+
+  Dashboards and alerts filtering on the old tag values need the new ones. The Resilience4j base configuration of
+  both reference configurations is `mesh-backend` instead of `lap-backend`; a host that copied it keeps working
+  under its own name.
+- Both client stacks select their HTTP engine through one shape in `veredium-core`
+  (`eu.inqudium.veredium.core.engine`).
+  - `RestClientEngine` and `WebClientEngine` implement `HttpEngine` (`key`, `requiredClasses`, `dependency`);
+    `WebClientEngine.propertyValue` and `coordinates` are now `key` and `dependency`, and
+    `RestClientEngine.markerClass` is now `requiredClasses`.
+  - The checks of an unknown override key, a missing engine library and the JDK client's Host restriction fail
+    with an `IllegalArgumentException` and one message form on both stacks. The blocking stack threw an
+    `IllegalStateException`.
+  - The blocking stack asks the JDK whether it accepts the Host header instead of reading
+    `jdk.httpclient.allowRestrictedHeaders` with `System.getProperty`, which a value set after the JDK read it
+    would have fooled.
+  - Both stacks' engines drain through `EngineDrain` and report an engine that did not drain with one WARN form:
+    `HTTP engine '<key>' did not drain <reason> - closing it with <n> exchange(s) still in flight`.
+
+Earlier:
+
 - `pool.max-idle-time` must be positive on both stacks (`app.restclient.pool`, `app.webclient.pool`); zero is
   refused at binding, naming the key. Zero meant opposite things per engine: no keep-alive at all on Reactor
   Netty, no idle timeout on Jetty, every idle connection closed at each sweep on Apache.

@@ -689,7 +689,7 @@ class WebClientEngineIntegrationTest {
             //   another engine would pass every behavioural test above that the two engines share.
             //
             // Given
-            val engines = WebClientEngine.entries.associateBy { it.propertyValue }
+            val engines = WebClientEngine.entries.associateBy { it.key }
             val factory = newFactory(WebClientProperties.Engine(endpoints = engines), engines.keys.toList())
 
             // When
@@ -791,7 +791,7 @@ class WebClientEngineIntegrationTest {
         fun `should run reactor-netty on the factory's own loops and resolver, not Reactor Netty's global resources`() {
             // What is tested: the isolation of the default engine from Reactor Netty's process-wide HttpResources.
             // Success criteria: the response of a reactor-netty backend is handled on a thread of the factory's
-            //   own loop group (named after the pool, `lap-webclient-...`), not on a `reactor-http-...` thread of
+            //   own loop group (named after the pool, `webclient-reactor-netty-...`), not on a `reactor-http-...` thread of
             //   the global loops; and the backend's HttpClient carries the explicit resolver rather than the
             //   default one, which HttpResources would supply.
             // Why it matters: HttpResources is shared with every other Reactor Netty client of the JVM and managed,

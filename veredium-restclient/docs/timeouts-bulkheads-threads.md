@@ -390,13 +390,15 @@ Apache engine, in order:
    derived, so it cannot drift below the ladder as endpoints are retuned. No in-flight call can outlive its
    own response timeout, so waiting longer could not let anything finish that was not going to;
 4. close the manager (`CloseMode.GRACEFUL`). Expiry of the wait is an *outcome*, logged as one WARN naming the
-   pool (`Connection pool '<name>' did not drain within …`), never an exception out of a destroy callback.
+   engine (`HTTP engine 'apache' did not drain within … - closing it with N exchange(s) still in flight`), never
+   an exception out of a destroy callback. Both client stacks write this line, through `veredium-core`'s
+   `EngineDrain`.
 
 Apache's own `close` discards leased connections on the spot — the drain wait exists because Apache has no
 "dispose when drained". The other engines drain the same way before they are closed: Reactor Netty's pool waits
 for its leased connections and Jetty's client for its active and queued requests (the same WARN line, naming
-`restclient-reactor-netty` or `restclient-jetty`), the JDK client through its own `shutdown` + `awaitTermination`
-(`HTTP client 'restclient-jdk' did not terminate …`, then `shutdownNow`). After the factory, Spring destroys the decorator, whose `shutdownNow` interrupts any
+`reactor-netty` or `jetty`), the JDK client through its own `shutdown` + `awaitTermination` (the same line for
+`jdk`, without a count, then `shutdownNow`). After the factory, Spring destroys the decorator, whose `shutdownNow` interrupts any
 worker still running; those exchanges end as `Closed by interrupt`.
 
 ---

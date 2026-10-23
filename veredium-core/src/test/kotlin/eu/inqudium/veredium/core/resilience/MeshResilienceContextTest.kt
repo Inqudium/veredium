@@ -87,7 +87,7 @@ class MeshResilienceContextTest {
                     .isEqualTo(endpoint.timeLimiterTimeout)
                 assertThat(timeLimiter.shouldCancelRunningFuture()).`as`("cancelRunningFuture of %s", endpoint.alias).isTrue()
 
-                // ... each CircuitBreaker carries both verdicts on top of the YAML's lap-backend policy
+                // ... each CircuitBreaker carries both verdicts on top of the YAML's mesh-backend policy
                 val circuitBreaker = circuitBreakers.circuitBreaker(endpoint.alias).circuitBreakerConfig
                 assertThat(circuitBreaker.ignoreExceptionPredicate.test(TestBufferLimitException()))
                     .`as`("CircuitBreaker of %s must ignore a client-side failure", endpoint.alias)
@@ -96,7 +96,7 @@ class MeshResilienceContextTest {
                 assertThat(circuitBreaker.recordExceptionPredicate.test(TestResponseException(404)))
                     .`as`("CircuitBreaker of %s must not record a benign 4xx", endpoint.alias)
                     .isFalse()
-                assertThat(circuitBreaker.failureRateThreshold).`as`("lap-backend policy of %s survives", endpoint.alias).isEqualTo(50f)
+                assertThat(circuitBreaker.failureRateThreshold).`as`("mesh-backend policy of %s survives", endpoint.alias).isEqualTo(50f)
             }
         }
     }
@@ -134,10 +134,10 @@ class MeshResilienceContextTest {
     fun `should refuse to start when an endpoint's time limiter is not declared`() {
         // What is tested: the silent case the guard exists for, in the real wiring - the fixture minus one
         //   TimeLimiter instance, as the reactive stack's configuration once shipped. Resilience4j still creates
-        //   the instance for the customizer (on the registry default, not on lap-backend), so nothing else
+        //   the instance for the customizer (on the registry default, not on mesh-backend), so nothing else
         //   would notice.
         // Success criteria: the context fails, and the failure names the key that is missing - and only it.
-        // Why it matters: an undeclared instance runs on the registry default instead of the lap-backend policy,
+        // Why it matters: an undeclared instance runs on the registry default instead of the mesh-backend policy,
         //   with no error anywhere; refusing the start is the only point at which that drift is visible.
         //
         // Given: the fixture properties without one endpoint's time-limiter instance

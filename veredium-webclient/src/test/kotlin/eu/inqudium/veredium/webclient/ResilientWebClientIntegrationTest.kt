@@ -1174,7 +1174,7 @@ class ResilientWebClientIntegrationTest {
             assertThat(drained.isCompletedExceptionally).isFalse()
             val warn = factoryLines.events().single()
             assertThat(warn.level).isEqualTo(Level.WARN)
-            assertThat(warn.formattedMessage).contains("'lap-webclient'", "did not drain within $timeout")
+            assertThat(warn.formattedMessage).contains("'webclient-reactor-netty'", "did not drain within $timeout")
         } finally {
             factoryLogger.detachAppender(factoryLines)
             clock.dispose()

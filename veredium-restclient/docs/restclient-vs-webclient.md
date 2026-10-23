@@ -114,7 +114,7 @@ which is why it is the default (§3.1 for the others). The mapping, as the Apach
 | per-endpoint `responseTimeout`                 | per-client `RequestConfig.responseTimeout` (Apache applies it as the socket timeout of the request) |
 | `maxIdleTime` / `maxLifeTime` / `evictInBackground` | `closeIdle` / `ConnectionConfig.timeToLive` + `closeExpired`, run by one scheduler the factory owns (Apache's own `evictIdleConnections` would start a thread per client); `evictInBackground: 0` = off, `maxLifeTime: 0` = unbounded |
 | `compress(true)` / `keepAlive(true)`           | Apache's defaults (on)                                                   |
-| `.metrics(true)` on the pool                   | Apache's `ConnPoolMeters` (`httpclient5-observation`; Micrometer's own hc5 binder is deprecated in its favour) → `restclient.pool.{leased,available,pending}{pool="restclient-pool"}` |
+| `.metrics(true)` on the pool                   | Apache's `ConnPoolMeters` (`httpclient5-observation`; Micrometer's own hc5 binder is deprecated in its favour) → `restclient.pool.{leased,available,pending}{pool="restclient-apache"}` |
 | `.metrics(true)` per request, URI-templated    | **none** — see §4                                                        |
 | `disposeLater().timeout(...)` on shutdown      | bounded wait for `leased == 0` (`LockSupport.parkNanos`), then `close(GRACEFUL)`; same WARN on expiry |
 
@@ -295,7 +295,7 @@ walked to a bounded depth — are written once and cannot drift between the stac
 What the twin's applier reported as an ERROR is a failed start on both stacks. An alias missing from
 `resilience4j.<layer>.instances` does not go unserved — Resilience4j creates an instance for every customizer
 name it finds no declaration for — but it is built on the registry default, not on the named base config
-(`lap-backend`), so the operator's policy is silently lost (and a bulkhead, which has no customizer, is created
+(`mesh-backend`), so the operator's policy is silently lost (and a bulkhead, which has no customizer, is created
 on the first call). `MeshResilienceStartupGuard` (`SmartInitializingSingleton`, `veredium-core`) checks for every
 mesh alias that all three layers DECLARE it (read off the bound `resilience4j.*` property beans, not the
 registry) and that the customizer's effect is observable on the instance the registry serves, and fails the

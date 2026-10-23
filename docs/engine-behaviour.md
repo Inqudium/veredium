@@ -528,7 +528,7 @@ a JVM alive. There is no Micrometer binder.
 
 **With veredium.** One client per engine, started with the factory and stopped with it. If a construction fails
 part-way, the engines already created are stopped before the failure is rethrown. Reactive I/O threads are named
-`veredium-webclient-jetty-*`.
+`webclient-jetty-*`.
 
 ### Reactor Netty
 

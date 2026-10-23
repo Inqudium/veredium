@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.webclient
 
+import eu.inqudium.veredium.core.engine.EngineSelection
 import eu.inqudium.veredium.core.mesh.MeshConnectionPool
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import io.github.resilience4j.bulkhead.BulkheadRegistry
@@ -124,8 +125,8 @@ class WebClientEngineConfigTest {
         @Test
         fun `should refuse an override key that names no mesh alias, naming the key and the known aliases`() {
             // What is tested: typo protection for app.webclient.engine.endpoints.
-            // Success criteria: construction fails with an IllegalArgumentException naming
-            //   app.webclient.engine.endpoints, the unknown key, and the aliases that do exist.
+            // Success criteria: construction fails with an IllegalArgumentException naming the unknown key in full
+            //   and the aliases that do exist.
             // Why it matters: a misspelt key would otherwise leave its backend on the default engine without a
             //   word - the very backend someone meant to move.
             //
@@ -135,7 +136,7 @@ class WebClientEngineConfigTest {
             // When/Then
             assertThatThrownBy { factory(engine, aliases = listOf("orders", "payments")) }
                 .isInstanceOf(IllegalArgumentException::class.java)
-                .hasMessageContainingAll("app.webclient.engine.endpoints", "[orderz]", "[orders, payments]")
+                .hasMessageContainingAll("app.webclient.engine.endpoints.orderz", "names no mesh endpoint", "[orders, payments]")
         }
 
         @ParameterizedTest(name = "{0} without {1}")
@@ -151,8 +152,8 @@ class WebClientEngineConfigTest {
             // What is tested: the classpath check, against a class loader that hides ONLY the reactive adapter
             //   of an engine whose client library stays visible (jetty-client without jetty-reactive-httpclient,
             //   httpclient5 without httpcore5-reactive).
-            // Success criteria: construction fails naming app.webclient.engine, the engine, the backend and the
-            //   adapter's Maven coordinates.
+            // Success criteria: construction fails naming the selecting key app.webclient.engine.default, the
+            //   engine, the backend and the adapter's Maven coordinates.
             // Why it matters: the half-present engine is the likely real mistake - the client library often
             //   arrives transitively, the adapter never does - and a check satisfied by ANY one of the required
             //   classes would pass it, leaving a NoClassDefFoundError at the first client.
@@ -163,7 +164,7 @@ class WebClientEngineConfigTest {
             // When/Then
             assertThatThrownBy { factory(WebClientProperties.Engine(default = engine), resourceLoader = hidden) }
                 .isInstanceOf(IllegalArgumentException::class.java)
-                .hasMessageContainingAll("app.webclient.engine selects '$engine' for [orders]", coordinates)
+                .hasMessageContainingAll("app.webclient.engine.default selects the HTTP engine '$engine' for [orders]", coordinates)
         }
 
         @Test
@@ -251,8 +252,8 @@ class WebClientEngineConfigTest {
             //   message; this test says why in one line.
             //
             // Given/When/Then
-            assertThat(System.getProperty(WebClientEngineChecks.JDK_RESTRICTED_HEADERS_PROPERTY)).isEqualTo("host")
-            assertThat(WebClientEngineChecks.jdkAllowsHostHeader()).isTrue()
+            assertThat(System.getProperty(EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS)).isEqualTo("host")
+            assertThat(EngineSelection.jdkAllowsHostHeader()).isTrue()
         }
 
         @Test

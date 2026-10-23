@@ -233,7 +233,7 @@ internal class ApacheEngineTransport(
     ) {
         evictor?.shutdownNow()
         httpClients.forEach { it.close(CloseMode.GRACEFUL) }
-        drainOrReport(poolName, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
+        drainOrReport(engine, ::connectionsInUse, deadlineNanos, nanoTime, window, logger)
         connectionManager.close(CloseMode.GRACEFUL)
         boundPoolMeters.forEach { meterRegistry?.remove(it) }
     }
