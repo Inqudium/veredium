@@ -1,5 +1,8 @@
 package eu.inqudium.veredium.webclient
 
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.equalTo
 import com.github.tomakehurst.wiremock.client.WireMock.get
@@ -7,9 +10,16 @@ import com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.okJson
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
+import eu.inqudium.legatium.webclient.logging.ClientLoggingAutoConfiguration
+import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.testsupport.ConfigurationFiles
+import eu.inqudium.veredium.testsupport.capturing
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
+import io.github.resilience4j.springboot.bulkhead.autoconfigure.BulkheadAutoConfiguration
+import io.github.resilience4j.springboot.circuitbreaker.autoconfigure.CircuitBreakerAutoConfiguration
+import io.github.resilience4j.springboot.timelimiter.autoconfigure.TimeLimiterAutoConfiguration
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler
@@ -20,11 +30,15 @@ import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.AutoConfigurations
+import org.springframework.boot.jackson.autoconfigure.JacksonAutoConfiguration
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration
 import org.springframework.boot.webclient.WebClientCustomizer
 import org.springframework.boot.webclient.autoconfigure.WebClientAutoConfiguration
 import org.springframework.boot.webclient.autoconfigure.WebClientObservationAutoConfiguration
+import org.springframework.core.env.MapPropertySource
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
@@ -45,6 +59,11 @@ import java.util.function.Supplier
  * that excluded `WebClientAutoConfiguration` would lose its CLIENT span without a log line. Both are invisible
  * at runtime; only a context test pins them.
  *
+ * Most contexts register the factory by its constructor, to pin what the constructor does with what it is given.
+ * In a host the factory comes from [VerediumWebClientAutoConfiguration]'s @Bean method instead, so the last nested
+ * class boots that auto-configuration and pins that the method hands the factory the host's builder, meter
+ * registry and validator factory - by a call - and requires the builder.
+ *
  * The contexts are driven with an [ApplicationContextRunner] - a real Spring context, no mocks - and the
  * backend is a local WireMock on a dynamic port, as in `ResilientWebClientIntegrationTest`. No inner
  * `@Configuration` class: every bean is registered on the runner, so nothing here can leak into another
@@ -58,13 +77,17 @@ class ResilientWebClientFactoryBuilderWiringTest {
         private const val PROBE_VALUE = "from-host-customizer"
         private const val HTTP_CLIENT_OBSERVATION = "http.client.requests"
 
+        /** legatium's exchange logger, as the reference adapter-logging block names it. */
+        private const val EXCHANGE_LOGGER = "adapter-http-exchange"
+
         private lateinit var wireMock: WireMockServer
 
         @JvmStatic
         @BeforeAll
         fun startWireMock() {
             wireMock = WireMockServer(wireMockConfig().dynamicPort()).apply { start() }
-            wireMock.stubFor(get(urlEqualTo(PROBE_PATH)).willReturn(okJson("""{"message":"hi"}""")))
+            // A message longer than ConstrainedGreeting allows, for the validation's report.
+            wireMock.stubFor(get(urlEqualTo(PROBE_PATH)).willReturn(okJson("""{"message":"hi from the probe"}""")))
         }
 
         @JvmStatic
@@ -181,6 +204,92 @@ class ResilientWebClientFactoryBuilderWiringTest {
         }
     }
 
+    @Nested
+    inner class `Through the module's auto-configuration` {
+        @Test
+        fun `should carry the host's customizer, meter registry, validator and exchange logging into a call`() {
+            // What is tested: a call through the factory the module's own auto-configuration builds - its @Bean
+            //   method, not the constructor - in a context with Boot's WebClient, Jackson, Validation and
+            //   Resilience4j auto-configurations, legatium's exchange logging on the reference adapter-logging
+            //   block, a host WebClientCustomizer and a host MeterRegistry.
+            // Success criteria: the customizer's header arrives at WireMock; the host registry holds the
+            //   response-size meter of the backend with one sample; legatium wrote the backend's exchange event;
+            //   and the report-only validation line names the violation of the answer - so the builder, the meter
+            //   registry and the validator factory all reached the factory.
+            // Why it matters: in a host the factory exists only through that @Bean method. A method that built on
+            //   `WebClient.builder()` instead of the injected builder, or passed no meter registry or validator
+            //   factory, would start and serve every call - while every client of the host silently lost its
+            //   exchange event, the host's customizers, the size meter and the response validation; the contexts
+            //   that register the factory by its constructor cannot see that.
+            //
+            // Given: the module's auto-configuration with a host customizer and registry, a backend answering a
+            // body that breaks ConstrainedGreeting's schema, and the exchange and client loggers capturing
+            wireMock.resetRequests()
+            val meterRegistry = SimpleMeterRegistry()
+            val exchangeLogger = LoggerFactory.getLogger(EXCHANGE_LOGGER) as Logger
+            val clientLogger = LoggerFactory.getLogger(ResilientWebClient::class.java) as Logger
+            autoConfiguredContext()
+                .withBean(SimpleMeterRegistry::class.java, Supplier { meterRegistry })
+                .withBean(
+                    WebClientCustomizer::class.java,
+                    Supplier { WebClientCustomizer { builder -> builder.defaultHeader(PROBE_HEADER, PROBE_VALUE) } },
+                ).run { context ->
+                    assertThat(context).hasNotFailed()
+                    capturing(exchangeLogger, Level.INFO, accept = { it.field("adapter_name") == BACKEND }) { exchanges ->
+                        capturing(clientLogger, Level.WARN, accept = { it.formattedMessage.contains("backend '$BACKEND'") }) { clientLines ->
+                            // When: a client of the context's factory makes a request
+                            val result =
+                                context
+                                    .getBean(ResilientWebClientFactory::class.java)
+                                    .create(BACKEND)
+                                    .get(ConstrainedGreeting::class.java) { it.uri(PROBE_PATH) }
+                                    .block()
+
+                            // Then: the call returned (report-only), with the host's header on the wire ...
+                            assertThat(result?.message).isEqualTo("hi from the probe")
+                            wireMock.verify(getRequestedFor(urlEqualTo(PROBE_PATH)).withHeader(PROBE_HEADER, equalTo(PROBE_VALUE)))
+                            // ... the size meter in the host's registry ...
+                            val summary =
+                                meterRegistry
+                                    .find(WebClientMetrics.RESPONSE_BODY_SIZE)
+                                    .tag(ResponseBodyMetrics.ADAPTER_TAG, BACKEND)
+                                    .summary()
+                            assertThat(summary?.count()).isEqualTo(1L)
+                            // ... the validation's report ...
+                            assertThat(clientLines.events.map { it.formattedMessage })
+                                .anySatisfy { assertThat(it).contains("violates its own schema", "reported only, not enforced") }
+                            // ... and legatium's exchange event
+                            val event = exchanges.awaitEvents().first()
+                            assertThat(event.field("adapter_outcome")).isEqualTo("success")
+                            assertThat(event.field("adapter_response_status_code")).isEqualTo(200)
+                        }
+                    }
+                }
+        }
+
+        @Test
+        fun `should fail the context start naming WebClient Builder when the host has no builder bean`() {
+            // What is tested: the module's auto-configuration in a context without Boot's WebClient
+            //   auto-configuration and without a builder bean of the host.
+            // Success criteria: the context fails to start, and the failure names both `WebClient$Builder` and
+            //   the bean method that required it, `resilientWebClientFactory`.
+            // Why it matters: the auto-configuration is the route by which a host gets the factory. Were its
+            //   @Bean method to take the builder as optional - an ObjectProvider with a fallback, a nullable
+            //   parameter - the factory would start on a bare builder: no customizer, no observation, no exchange
+            //   event, and no error.
+            //
+            // Given: the module's auto-configuration without Boot's WebClient auto-configuration
+            autoConfiguredContext(withBootsWebClient = false)
+                // When: the context starts
+                .run { context ->
+                    // Then
+                    assertThat(context).hasFailed()
+                    assertThat(context.startupFailure)
+                        .hasMessageContainingAll("WebClient\$Builder", "'resilientWebClientFactory'")
+                }
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------
@@ -246,6 +355,50 @@ class ResilientWebClientFactoryBuilderWiringTest {
                 WebClientObservationAutoConfiguration::class.java,
             ),
         )
+
+    /**
+     * The module's own auto-configuration - [VerediumWebClientAutoConfiguration], with the core's mesh wiring and its
+     * startup guard - next to the auto-configurations a host has: Resilience4j's three, Jackson, Bean Validation,
+     * legatium's exchange logging on the reference `adapter-logging` block and, unless [withBootsWebClient] is
+     * false, Boot's WebClient. The mesh is the probe endpoint against WireMock, with the three Resilience4j instances
+     * the guard asks for; validation reports only; the HTTP observation stays off, because with it on the
+     * auto-configuration enables Reactor's automatic context propagation, a JVM-wide switch the other test classes of
+     * this JVM must not inherit.
+     */
+    private fun autoConfiguredContext(withBootsWebClient: Boolean = true): ApplicationContextRunner {
+        val properties =
+            ConfigurationFiles.referenceProperties("adapter-logging.") +
+                mapOf(
+                    "app.mesh.defaults.individual-request-timeout-ms" to "1000",
+                    "app.mesh.endpoints[0].triplet" to "/endpoint/localhost/GET/$BACKEND",
+                    "app.mesh.endpoints[0].alias" to BACKEND,
+                    "app.mesh.endpoints[0].base-url" to wireMock.baseUrl(),
+                    "app.webclient.observability.http-observation-enabled" to "false",
+                    "app.webclient.validation.enabled" to "true",
+                    "app.webclient.validation.fail-on-violation" to "false",
+                    "resilience4j.timelimiter.instances.$BACKEND.cancel-running-future" to "true",
+                    "resilience4j.bulkhead.instances.$BACKEND.max-concurrent-calls" to "25",
+                    "resilience4j.circuitbreaker.instances.$BACKEND.sliding-window-size" to "100",
+                )
+        val bootsWebClient = if (withBootsWebClient) listOf(WebClientAutoConfiguration::class.java) else emptyList()
+        return ApplicationContextRunner()
+            .withInitializer { context ->
+                context.environment.propertySources.addFirst(MapPropertySource("auto-configured-probe", properties))
+            }.withConfiguration(
+                AutoConfigurations.of(
+                    TimeLimiterAutoConfiguration::class.java,
+                    CircuitBreakerAutoConfiguration::class.java,
+                    BulkheadAutoConfiguration::class.java,
+                    JacksonAutoConfiguration::class.java,
+                    ValidationAutoConfiguration::class.java,
+                    ClientLoggingAutoConfiguration::class.java,
+                    *bootsWebClient.toTypedArray(),
+                    VerediumWebClientAutoConfiguration::class.java,
+                ),
+            )
+    }
+
+    private fun ILoggingEvent.field(name: String): Any? = keyValuePairs?.singleOrNull { it.key == name }?.value
 
     /** One GET against the probe endpoint through a client of the context's factory. */
     private fun probeThrough(factory: ResilientWebClientFactory) {
