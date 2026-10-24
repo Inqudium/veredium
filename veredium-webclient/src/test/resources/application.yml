@@ -3,8 +3,8 @@
 # pin it so the example stays true: ResilienceConfigContractTest (aliases declared, bulkheads within the pool),
 # MeshResilienceShippedConfigTest (Resilience4j's auto-configuration booted on it), and
 # LegatiumExchangeLoggingIntegrationTest / WebClientPropertiesTest (the adapter-logging and app.webclient
-# blocks). LoggingLevelContractTest reads the test-owned fixture application-test.yml instead;
-# ResilienceConfigContractTest checks both files.
+# blocks), LoggingLevelContractTest (the logger names and levels). ResilienceConfigContractTest and
+# LoggingLevelContractTest check the test-owned fixture application-test.yml as well.
 
 logging:
   level:
@@ -17,7 +17,7 @@ logging:
     # adapter-logging block below). INFO = every call; WARN = only failures, timeouts, cancellations, slow
     # calls and the 401/403/408/429 rejections; ERROR = only calls that threw. Raising this level FILTERS the
     # stream instead of switching it off - severity and semantics are decoupled, dashboards key on
-    # adapter_outcome. Both names are pinned by LoggingLevelContractTest (in the fixture application-test.yml).
+    # adapter_outcome. Both names are pinned by LoggingLevelContractTest.
     adapter-http-exchange: INFO
     # The library's own logger: the immediate WARN breadcrumb when a call throws, and errors of the logging
     # itself (fail-open lines). Keep at WARN or lower - silencing it hides the breadcrumb. DEBUG adds the wiring
