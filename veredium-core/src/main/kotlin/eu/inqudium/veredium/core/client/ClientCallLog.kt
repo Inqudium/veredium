@@ -26,7 +26,7 @@ import java.time.Duration
  * The error line's severity follows the SAME classification as the circuit breaker's record predicate
  * ([BreakerVerdicts.httpExchangeError]), so the two never disagree: a documented 4xx - which the adapter
  * contract declares as a normal outcome and the caller handles - is logged at DEBUG WITHOUT a stack trace,
- * everything else at WARN with one. Logging every non-2xx at ERROR made routine "not found" answers
+ * everything else at WARN with one. Logging every non-2xx at ERROR would make routine "not found" answers
  * indistinguishable from real outages. (legatium's exchange event classifies on its own terms: a 4xx answer is
  * `rejected` with its status there, INFO except for 401/403/408/429.) The cause is attached ONLY to the
  * unexpected branch: a benign 4xx must not carry a stack trace that explains nothing the status and URL do not
@@ -205,7 +205,7 @@ class ClientCallLog(
         if (!verdicts.clientSideFailure.isBufferLimitFailure(error)) return
         val contentLength = bufferLimit.contentLengthOf(error)
         // Through log(), like every other line: it carries the two join fields (class KDoc) - written straight
-        // to the logger, this was the one transport line no dashboard could group next to its exchange event.
+        // to the logger, it would be the one transport line no dashboard can group next to its exchange event.
         log(
             Level.WARN,
             "Response body exceeded the {} on backend '{}': limit={} bytes, Content-Length={}" +

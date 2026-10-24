@@ -116,13 +116,13 @@ class ClientSideFailurePolicy(
      * of an exchange into a `ResourceAccessException`, and its reactive client wraps a codec failure on an
      * otherwise successful response into a `WebClientResponseException` reporting **200 OK** with the real
      * cause underneath. Matching on the thrown type alone - which is all `ignoreExceptions(Class...)` does -
-     * would never see either, and the entry would be a silent no-op; the reactive stack saw exactly that
-     * happen.
+     * would never see either, and the entry would be a silent no-op.
      *
      * Walking the chain is safe here rather than merely convenient: a genuine backend failure does NOT carry
      * one of these as a cause. A 5xx whose error body exceeds the buffer limit yields a plain status exception
-     * with no limit exception underneath - on both stacks, each pinned by its own `ClientSideFailure*Test` -
-     * so it is still recorded.
+     * with no limit exception underneath - on both stacks, each pinned by "should still record a genuine backend
+     * failure that carries a large error body" in its `RestClientVerdictsTest` / `WebClientVerdictsTest` - so it
+     * is still recorded.
      */
     fun isClientSideFailure(error: Throwable): Boolean = causeChain(error).any { candidate -> clientSideFailures.any { it.isInstance(candidate) } }
 

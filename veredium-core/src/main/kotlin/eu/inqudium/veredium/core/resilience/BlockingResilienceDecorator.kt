@@ -273,7 +273,7 @@ class BlockingResilienceDecorator(
             }
         result.waiter.set(waiter)
         // Safety: a cancel() that arrived before the line above found no waiter to interrupt; do it now. Nothing
-        // can reach `result` before it is returned below today, so this is unreachable as written - kept so that
+        // can reach `result` before it is returned below, so this is unreachable as written - kept so that
         // a change publishing the future earlier (a callback, a registry of in-flight calls) cannot reopen the
         // window in which a cancelled call would keep its worker and its permit.
         if (result.isCancelled) waiter.cancel(true)
@@ -290,7 +290,7 @@ class BlockingResilienceDecorator(
     /**
      * Wraps [call] so that it runs on the worker with the CALLER's context: the MDC as the caller has it now,
      * and the caller's current observation reopened as a scope. Captured on the calling thread at decoration
-     * time, which is the moment `decorate` runs - the same moment a reactive `contextCapture()` would read the
+     * time, which is the moment [decorate] runs - the same moment a reactive `contextCapture()` would read the
      * subscriber's thread-locals.
      *
      * Restoration is unconditional and in `finally` ([CallerMdc.with] for the MDC): the virtual workers of this class
