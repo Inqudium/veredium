@@ -2,7 +2,8 @@ package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.testsupport.CustomizedRegistries
-import io.github.resilience4j.bulkhead.BulkheadConfig
+import eu.inqudium.veredium.testsupport.ignores
+import eu.inqudium.veredium.testsupport.singlePermitBulkheads
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
@@ -121,10 +122,10 @@ class WebClientVerdictsTest {
                     .initCause(DataBufferLimitException("Exceeded limit on max bytes to buffer : 8192")) as Throwable
 
             // Then
-            assertThat(ignores(circuitBreakerRegistry, wrapped)).isTrue()
+            assertThat(ignores(circuitBreakerRegistry, wrapped, alias)).isTrue()
             assertThat(WebClientVerdicts.clientSideFailure.isBufferLimitFailure(wrapped)).isTrue()
             // ... and the bare form too, so the rule does not depend on the wrapping staying as it is
-            assertThat(ignores(circuitBreakerRegistry, DataBufferLimitException("too big"))).isTrue()
+            assertThat(ignores(circuitBreakerRegistry, DataBufferLimitException("too big"), alias)).isTrue()
             // ... and a 200-reporting response exception is never read as a benign 4xx
             assertThat(WebClientVerdicts.httpExchangeError.isExpectedClientError(wrapped)).isFalse()
         }
@@ -146,8 +147,8 @@ class WebClientVerdictsTest {
 
             // When / Then: a server error stays a server error
             val serverError = WebClientResponseException(500, "Internal Server Error", null, ByteArray(64 * 1024), null)
-            assertThat(ignores(circuitBreakerRegistry, serverError)).isFalse()
-            assertThat(ignores(circuitBreakerRegistry, TimeoutException("budget blown"))).isFalse()
+            assertThat(ignores(circuitBreakerRegistry, serverError, alias)).isFalse()
+            assertThat(ignores(circuitBreakerRegistry, TimeoutException("budget blown"), alias)).isFalse()
         }
     }
 
@@ -224,28 +225,8 @@ class WebClientVerdictsTest {
     // Helpers
     // ---------------------------------------------------------------------------
 
-    /** Whether the registered instance's config classifies [error] as ignorable (not a backend failure). */
-    private fun ignores(
-        registry: CircuitBreakerRegistry,
-        error: Throwable,
-    ): Boolean =
-        registry
-            .circuitBreaker(alias)
-            .circuitBreakerConfig.ignoreExceptionPredicate
-            .test(error)
-
     /** A response exception in the shape the pipeline sees it; status only, no body is needed here. */
     private fun response(status: Int): WebClientResponseException = WebClientResponseException(status, "status $status", null, null, null)
-
-    /** A registry whose bulkheads hold exactly one permit and reject the next caller without waiting. */
-    private fun singlePermitBulkheads(): BulkheadRegistry =
-        BulkheadRegistry.of(
-            BulkheadConfig
-                .custom()
-                .maxConcurrentCalls(1)
-                .maxWaitDuration(Duration.ZERO)
-                .build(),
-        )
 
     /**
      * A decorator over the supplied registries. The time limiter is deliberately generous: these tests hold a

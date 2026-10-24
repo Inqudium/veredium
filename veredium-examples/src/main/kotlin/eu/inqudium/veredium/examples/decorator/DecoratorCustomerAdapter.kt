@@ -8,6 +8,7 @@ import org.apache.http.client.methods.HttpGet
 import org.apache.http.client.utils.URIBuilder
 import org.apache.http.impl.client.CloseableHttpClient
 import org.apache.http.util.EntityUtils
+import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import tools.jackson.databind.ObjectMapper
@@ -47,6 +48,8 @@ class DecoratorCustomerAdapter(
     private val objectMapper: ObjectMapper,
     private val properties: LegacyDirectoryProperties,
 ) : BaseAdapter {
+    private val logger: Logger = LoggerFactory.getLogger(DecoratorCustomerAdapter::class.java)
+
     /** The TimeLimiter budget configured for the call. */
     override val timeLimiterTimeout: Duration get() = decorator.requestBudget(NAME)
 
@@ -83,7 +86,7 @@ class DecoratorCustomerAdapter(
                 setHeader(HttpHeaders.HOST, properties.host)
                 setHeader(HttpHeaders.ACCEPT, "application/json")
             }
-        // The response handler form releases the connection whatever the handler does.
+        // Assumption: HttpClient 4's response handler form releases the connection whatever the handler does.
         return httpClient.execute(request) { response ->
             when (val status = response.statusLine.statusCode) {
                 200 -> objectMapper.readValue(EntityUtils.toString(response.entity, Charsets.UTF_8), Customer::class.java)
@@ -96,7 +99,5 @@ class DecoratorCustomerAdapter(
     companion object {
         /** The name of the call's Resilience4j instances. */
         const val NAME = "legacy-directory"
-
-        private val logger = LoggerFactory.getLogger(DecoratorCustomerAdapter::class.java)
     }
 }

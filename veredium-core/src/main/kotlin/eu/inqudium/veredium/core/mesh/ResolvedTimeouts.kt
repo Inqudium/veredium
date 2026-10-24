@@ -36,33 +36,37 @@ import java.time.Duration
  *   [MeshProperties.resolveAll] and the prefix of every guard message.
  * @property alias The Resilience4j instance name and metric label: the configured alias, or the one derived from
  *   the [triplet].
+ * @property host Upstream host from the triplet, sent as the Host header so the sidecar routes to the right API.
+ * @property pathTemplate Path template from the triplet (with `{vars}`); the adapter builds its request URI from it.
+ * @property baseUrl Client base URL (the sidecar): the per-endpoint override, or the shared
+ *   [MeshProperties.Transport.sidecarBaseUrl].
+ * @property headers Extra static headers beyond Host (usually empty).
  * @property individualRequestTimeoutMs The MEASURED anchor `p99(single attempt) + margin` - the one rung that is
  *   configured rather than derived.
  * @property maxRetries The sidecar's retry count; with the anchor it derives [sidecarGlobalMs].
  * @property margins The shared [MeshProperties.Defaults.margins].
  * @property transport The app->sidecar transport caps; their computed [MeshProperties.Transport.timeLimiterMargin]
  *   lifts [timeLimiterTimeout] above [responseTimeout].
+ * @property timeLimiterEnabled Whether mesh derives + overrides this endpoint's TimeLimiter (the resolved tri-state
+ *   of [MeshProperties.BackendToggleOverride]).
+ * @property circuitBreakerEnabled Whether mesh derives + overrides this endpoint's CircuitBreaker (the resolved
+ *   tri-state of [MeshProperties.BackendToggleOverride]).
+ * @property stack The client stack that owns the endpoint, or `null` for the only stack in the context
+ *   ([MeshProperties.endpointsOwnedBy]).
  */
 data class ResolvedTimeouts(
     val triplet: String,
     val alias: String,
-    /** Upstream host from the triplet, sent as the Host header so the sidecar routes to the right API. */
     val host: String,
-    /** Path template from the triplet (with `{vars}`); the adapter builds its request URI from it. */
     val pathTemplate: String,
-    /** Client base URL (the sidecar): the per-endpoint override, or the shared [MeshProperties.Transport.sidecarBaseUrl]. */
     val baseUrl: String,
-    /** Extra static headers beyond Host (usually empty). */
     val headers: Map<String, String>,
     val individualRequestTimeoutMs: Long,
     val maxRetries: Int,
     val margins: MeshProperties.Margins,
     val transport: MeshProperties.Transport,
-    /** Whether mesh derives + overrides this endpoint's TimeLimiter (the resolved tri-state of [MeshProperties.BackendToggleOverride]). */
     val timeLimiterEnabled: Boolean,
-    /** Whether mesh derives + overrides this endpoint's CircuitBreaker (the resolved tri-state of [MeshProperties.BackendToggleOverride]). */
     val circuitBreakerEnabled: Boolean,
-    /** The client stack that owns the endpoint, or `null` for the only stack in the context ([MeshProperties.endpointsOwnedBy]). */
     val stack: String? = null,
 ) {
     /**
@@ -73,9 +77,10 @@ data class ResolvedTimeouts(
     val sidecarGlobalMs: Long = (1 + maxRetries) * individualRequestTimeoutMs + margins.globalMarginMs
 
     /**
-     * The transport's response timeout for the app->sidecar hop, one rung above the sidecar's `global`: the
-     * blocking stack applies it as Apache's `RequestConfig.responseTimeout`, the reactive stack as Reactor
-     * Netty's `responseTimeout`. Same rung, same number, whichever stack the host runs on.
+     * The transport's response timeout for the app->sidecar hop, one rung above the sidecar's `global`, applied by
+     * whichever engine carries the call - on the default engines as Apache's `RequestConfig.responseTimeout` and
+     * Reactor Netty's `responseTimeout`; how the other engines map it is in `docs/engine-behaviour.md` (ADR-0004).
+     * Same rung, same number, whichever stack and engine the host runs on.
      */
     val responseTimeout: Duration = Duration.ofMillis(sidecarGlobalMs + margins.responseTimeoutMarginMs)
 

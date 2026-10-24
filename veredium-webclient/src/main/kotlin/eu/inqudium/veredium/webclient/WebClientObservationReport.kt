@@ -16,10 +16,12 @@ import org.springframework.core.env.Environment
  */
 class WebClientObservationReport(
     properties: WebClientProperties,
-    // Nullable ON PURPOSE: an optional dependency, so tests can construct the report directly; the Spring
-    // context always injects it. Read ONLY for the two central disable-filter values.
+    /**
+     * Nullable ON PURPOSE: an optional dependency, so tests can construct the report directly; the Spring context
+     * always injects it. Read ONLY for the two central disable-filter values.
+     */
     environment: Environment? = null,
-    // Nullable like environment: read ONLY to make the toggle line truthful.
+    /** Nullable like `environment`: read ONLY to make the toggle line truthful. */
     observationRegistry: ObservationRegistry? = null,
 ) : HttpObservationReport(
         stackName = "WebClient",

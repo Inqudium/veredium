@@ -2,6 +2,7 @@ package eu.inqudium.veredium.webclient
 
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.testsupport.CustomizedRegistries
+import eu.inqudium.veredium.testsupport.singlePermitBulkheads
 import io.github.resilience4j.bulkhead.Bulkhead
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadFullException
@@ -228,16 +229,6 @@ class ReactiveResilienceDecoratorTest {
 
     /** For the tests NOT about the timeout: a budget no call here can run into. */
     private fun generousBudget(): TimeLimiterConfig = TimeLimiterConfig.custom().timeoutDuration(Duration.ofMinutes(5)).build()
-
-    /** A registry whose bulkheads hold exactly one permit and wait [maxWait] for it. */
-    private fun singlePermitBulkheads(maxWait: Duration): BulkheadRegistry =
-        BulkheadRegistry.of(
-            BulkheadConfig
-                .custom()
-                .maxConcurrentCalls(1)
-                .maxWaitDuration(maxWait)
-                .build(),
-        )
 
     /** Counts the permits [bulkhead] hands out - its CallPermitted events. */
     private fun bulkheadPermits(bulkhead: Bulkhead): AtomicInteger = AtomicInteger().also { count -> bulkhead.eventPublisher.onCallPermitted { count.incrementAndGet() } }

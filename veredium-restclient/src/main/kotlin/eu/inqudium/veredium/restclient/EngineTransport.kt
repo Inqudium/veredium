@@ -26,8 +26,8 @@ import java.time.Duration
  * settings it applies, and its shutdown.
  *
  * Created by the factory only for an engine some backend selects, at most once per factory, and shared by every
- * backend on that engine - one pool per engine. Nothing of it is a Spring bean, so
- * nothing of it is visible to, or replaceable by, the host's own HTTP client wiring.
+ * backend on that engine - one pool per engine. Nothing of it is a Spring bean, so nothing of it is visible to, or
+ * replaceable by, the host's own HTTP client wiring.
  *
  * Every subclass defines [cancellation] honestly: what an interrupted worker (a TimeLimiter expiry, a caller
  * interrupt, a cancelled asynchronous future) does to the exchange on this engine. That is the property the

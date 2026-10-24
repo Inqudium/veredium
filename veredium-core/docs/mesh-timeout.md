@@ -128,18 +128,22 @@ ever consulted. A breaker that records the benign 4xx while it DOES ignore the c
 differently - the customizer's client-side verdict is in place, so the message points at a record rule
 composed after it (`record-exceptions`, `record-exception-predicate`) rather than at the registry.
 
-**What the guard warns about.** Once every alias is wired, it adds up `max-concurrent-calls` of the mesh
-aliases' bulkheads (the merged values of the registry's instances) and compares the sum with
-`app.mesh.defaults.transport.max-connections`. The bulkheads are a partition of the shared pool: if together
-they admit more calls than it has connections, the excess queues for a connection instead of being shed with a
-named `BulkheadFullException`, and the pending-acquire timeout that follows is a **failure** on the breaker of
-whichever backend is waiting - not necessarily the one holding the connections. The guard logs a **WARN**
-naming the sum, the pool size and every alias with its permits, and does not fail the start: an over-committed
-pool can be a deliberate choice for backends that are never busy at once. The sum is over all mesh aliases,
-which is exact for the default blocking engine (one Apache pool, its total cap shared by all routes) and
-conservative where the engine caps per remote address or destination (Reactor Netty, Jetty: endpoints with
-their own `base-url` get their own pool). The JDK client has no connection cap at all, so the sum has nothing
-to exceed there; the guard still compares it with the configured value.
+**What the guard warns about.** Once every alias is wired, it checks the bulkheads against the connection pools
+they lease from. The pools come from the client factories: each factory is a `MeshConnectionPools` bean and
+reports one pool per engine in use, with the aliases that run on it and its `max-connections`
+(`app.mesh.defaults.transport.max-connections`); the reactive stack reports Reactor Netty as one pool per backend,
+because its client holds a sub-pool per backend. For each pool the guard adds up `max-concurrent-calls` of the
+bulkheads of its own stack's aliases on that pool (the merged values of the registry's instances) and compares the
+sum with the pool's bound. The bulkheads are a partition of the pool: if together they admit more calls than it has
+connections, the excess queues for a connection instead of being shed with a named `BulkheadFullException`, and the
+pending-acquire timeout that follows is a **failure** on the breaker of whichever backend is waiting - not
+necessarily the one holding the connections. The guard logs a **WARN** naming the pool, the sum, the pool size and
+every alias with its permits, and does not fail the start: an over-committed pool can be a deliberate choice for
+backends that are never busy at once. Per pool the sum is exact for a total cap shared by all routes (Apache) and
+conservative where the engine caps per remote address and an endpoint has a `base-url` of its own. The JDK client
+has no connection cap, so its pool is reported without a bound and **not checked** - no WARN comes for it. Only
+when no factory reports a pool (a context without a client factory, e.g. a test) does the guard fall back to one
+shared pool of `max-connections` over its stack's aliases.
 
 ## One endpoint per operation; the alias is the logical backend name
 

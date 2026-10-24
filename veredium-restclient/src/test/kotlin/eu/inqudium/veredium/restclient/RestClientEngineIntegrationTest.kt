@@ -28,7 +28,6 @@ import eu.inqudium.veredium.testsupport.capturing
 import eu.inqudium.veredium.testsupport.causeChain
 import eu.inqudium.veredium.testsupport.causeNames
 import eu.inqudium.veredium.testsupport.eventually
-import eu.inqudium.veredium.testsupport.leapingClock
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
@@ -980,8 +979,8 @@ class RestClientEngineIntegrationTest {
             //   that with a ResourceAccessException over the IOException of the interrupted head wait - not at the
             //   backend's answer or the budget, both of which need the held loops.
             // Why it matters: Spring's wait for the head is a block() without a time bound. A shutdown past its
-            //   deadline disposes the loops, and an exchange whose end they no longer signal - the hang once seen on
-            //   CI - holds its worker and its permit until the TimeLimiter budget. Only the head wait running on the
+            //   deadline disposes the loops, and an exchange whose end they no longer signal holds its worker and its
+            //   permit until the TimeLimiter budget. Only the head wait running on the
             //   offload executor, and that executor's shutdownNow, end it; held loops are what makes that the only
             //   way out on demand - with live loops the channel's close ends the call anyway, and the shutdown
             //   cases above stay green without either.
@@ -1304,7 +1303,7 @@ class RestClientEngineIntegrationTest {
             val gauge = { suffix: String ->
                 meters
                     .find("reactor.netty.connection.provider$suffix")
-                    .tag("name", ReactorNettyEngineTransport.POOL_NAME)
+                    .tag("name", ReactorNettyEngineTransport.ENGINE_NAME)
                     .gauge()
                     ?.value()
                     ?.toInt()
@@ -1396,7 +1395,7 @@ class RestClientEngineIntegrationTest {
             assertThat(
                 meters
                     .find("reactor.netty.connection.provider.total.connections")
-                    .tag("name", ReactorNettyEngineTransport.POOL_NAME)
+                    .tag("name", ReactorNettyEngineTransport.ENGINE_NAME)
                     .gauge(),
             ).isNotNull()
             assertThat(
@@ -1416,7 +1415,7 @@ class RestClientEngineIntegrationTest {
                     .filterNot { it in threadsBefore }
                     .map { it.name }
             assertThat(newThreads).noneMatch { it.startsWith("reactor-http-") }
-            assertThat(newThreads).anyMatch { it.startsWith(ReactorNettyEngineTransport.POOL_NAME) }
+            assertThat(newThreads).anyMatch { it.startsWith(ReactorNettyEngineTransport.ENGINE_NAME) }
         }
 
         @Test

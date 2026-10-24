@@ -70,7 +70,7 @@ internal class JettyEngineTransport(
     private val window = settings.window
     private val logger = settings.logger
 
-    override val name: String = POOL_NAME
+    override val name: String = ENGINE_NAME
 
     /** The one client of this engine, started here. `internal` so a test can see it stop and read its pool. */
     internal val httpClient: RequestCapturingHttpClient =
@@ -165,7 +165,7 @@ internal class JettyEngineTransport(
         if (httpClient.isStopped) return
         EngineDrain.drainOrReport(logger, engine.key, ::exchangesInFlight, deadlineNanos, nanoTime, window)
         if (Thread.currentThread().isInterrupted) {
-            Thread.ofVirtual().name("$POOL_NAME-stop").start { httpClient.stop() }
+            Thread.ofVirtual().name("$ENGINE_NAME-stop").start { httpClient.stop() }
         } else {
             httpClient.stop()
         }
@@ -228,6 +228,6 @@ internal class JettyEngineTransport(
 
     companion object {
         /** The engine's [name]: the stem of the thread an interrupted shutdown stops the client on. */
-        const val POOL_NAME: String = "restclient-jetty"
+        const val ENGINE_NAME: String = "restclient-jetty"
     }
 }

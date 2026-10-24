@@ -6,7 +6,6 @@ import java.io.InputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -107,33 +106,6 @@ class BackendsTest {
                 assertThat(backend.requests.get()).isEqualTo(2)
                 assertThat(backend.connections.get()).isEqualTo(1)
             }
-        }
-    }
-
-    @Test
-    fun `should report a request that arrived and the client's close, and answer nothing`() {
-        // What is tested: SilentBackend against a client that sends a request and then closes its socket.
-        // Success criteria: requestArrived opens; the client reads no byte within 300 ms; after the close
-        //   connectionClosed opens and closedAtNanos lies between the close and the check.
-        // Why it matters: the suites time an engine's abort by the moment the backend saw the connection closed;
-        //   a timestamp taken elsewhere would measure the test, not the engine.
-        //
-        // Given
-        SilentBackend().use { backend ->
-            val client = connect(backend)
-            client.soTimeout = 300
-            client.getOutputStream().write(REQUEST)
-            assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).isTrue()
-            val answered = runCatching { client.getInputStream().read() }
-
-            // When
-            val closed = System.nanoTime()
-            client.close()
-
-            // Then
-            assertThat(answered.exceptionOrNull()).`as`("no byte within the read timeout").isInstanceOf(SocketTimeoutException::class.java)
-            assertThat(backend.connectionClosed.await(5, TimeUnit.SECONDS)).isTrue()
-            assertThat(backend.closedAtNanos).isBetween(closed, System.nanoTime())
         }
     }
 

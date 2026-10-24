@@ -75,15 +75,15 @@ class RestClientPropertiesTest {
         }
 
         @Test
-        fun `should default to 256 KB, the twin's ceiling, large enough for an access-profile list response`() {
+        fun `should default to 256 KB, the twin's ceiling, large enough for a typical JSON list response`() {
             // What is tested: the code default of the buffer limit, as a value in its own right rather than
             //   as a by-product of the range check above.
             // Success criteria: the default is 256 KB and NOT 8 KB.
             // Why it matters: the two modules front the SAME backends, and a response that fits one
             //   client's buffer and not the other's would be a difference nobody expects from a twin. 8 KB is
-            //   too small for a real access-profile response; the limit applies per concurrently buffered
-            //   response and the shared pool is bounded at 100 connections, so this default also bounds the
-            //   worst case at ~25 MB of response buffers - the reason it is not simply raised further.
+            //   too small for a typical JSON payload; the limit applies per concurrently buffered response and
+            //   the mesh bulkheads admit 100 calls in all, so this default also bounds the worst case at
+            //   ~25 MB of response buffers - the reason it is not simply raised further.
             //
             // Given / When / Then
             assertThat(RestClientProperties().maxInMemorySize)

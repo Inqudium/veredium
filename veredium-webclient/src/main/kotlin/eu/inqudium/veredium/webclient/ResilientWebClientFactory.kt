@@ -59,31 +59,39 @@ class ResilientWebClientFactory(
     private val meshProperties: MeshProperties,
     private val resilience: ReactiveResilienceDecorator,
     private val objectMapper: ObjectMapper,
-    // Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; Spring injects
-    // the auto-configured factory when a Bean Validation provider is on the classpath. Absent -> validation
-    // cannot run for ANY backend, whatever the properties say, which the startup line reports rather than
-    // leaving it to be discovered. See `ResponseValidation` for why the FACTORY rather than a Validator.
+    /**
+     * Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; Spring injects the
+     * auto-configured factory when a Bean Validation provider is on the classpath. Absent -> validation cannot run
+     * for ANY backend, whatever the properties say, which the startup line reports rather than leaving it to be
+     * discovered. See [eu.inqudium.veredium.core.validation.ResponseValidation] for why the FACTORY rather than a
+     * Validator.
+     */
     validatorFactory: ValidatorFactory? = null,
-    // Nullable like the two above: an optional dependency, so a direct (test) construction and a minimal
-    // context both work without one. Absent -> the response-size summary is simply not registered and the
-    // per-call path records nothing; nothing else about the client changes.
+    /**
+     * Nullable like `validatorFactory`: an optional dependency, so a direct (test) construction and a minimal context
+     * both work without one. Absent -> the response-size summary is simply not registered and the per-call path
+     * records nothing; nothing else about the client changes.
+     */
     private val meterRegistry: MeterRegistry? = null,
-    // Boot's auto-configured builder (prototype scope: this factory owns its instance and clones it per
-    // backend). Every WebClientCustomizer the host declares has already been applied to it - Boot's own
-    // (observation registry + convention, codecs, connector) and the host's.
-    //
-    // REQUIRED on purpose, unlike the optional dependencies above: those are optional because the factory
-    // works sensibly without them. Without this one it would work DIFFERENTLY - a bare builder from the static
-    // factory carries no host customizer and no observation registry, so the http.client.requests span would vanish
-    // without a log line. Spring treats a Kotlin default as an optional dependency and would take exactly that
-    // silent path when the bean is absent; a required parameter makes a missing bean a context-start failure
-    // that names WebClient.Builder. A host that excludes WebClientAutoConfiguration declares its own
-    // WebClient.Builder bean. Tests that construct the factory directly pass a bare builder and say so at the
-    // call site.
+    /**
+     * Boot's auto-configured builder (prototype scope: this factory owns its instance and clones it per backend).
+     * Every `WebClientCustomizer` the host declares has already been applied to it - Boot's own (observation registry
+     * and convention, codecs, connector) and the host's.
+     *
+     * REQUIRED on purpose, unlike the optional dependencies above: those are optional because the factory works
+     * sensibly without them. Without this one it would work DIFFERENTLY - a bare builder from the static factory
+     * carries no host customizer and no observation registry, so the `http.client.requests` span would vanish without
+     * a log line. Spring treats a Kotlin default as an optional dependency and would take exactly that silent path when
+     * the bean is absent; a required parameter makes a missing bean a context-start failure that names
+     * [WebClient.Builder]. A host that excludes `WebClientAutoConfiguration` declares its own [WebClient.Builder] bean.
+     * Tests that construct the factory directly pass a bare builder and say so at the call site.
+     */
     webClientBuilder: WebClient.Builder,
-    // Nullable like the optional dependencies above: the context injects itself, so the engine-library check asks
-    // the class loader the context was started with (which is what a test with a filtered class loader varies).
-    // Absent -> this class's own loader.
+    /**
+     * Nullable like the optional dependencies above: the context injects itself, so the engine-library check asks the
+     * class loader the context was started with (which is what a test with a filtered class loader varies). Absent ->
+     * this class's own loader.
+     */
     resourceLoader: ResourceLoader? = null,
     /**
      * Monotonic clock for the ONE wait this factory makes - the shared release deadline in [shutdown]. Injectable so
@@ -119,11 +127,12 @@ class ResilientWebClientFactory(
     private val meshTransport: MeshProperties.Transport = plan.transport
 
     /**
-     * How long [shutdown] waits for the engines to drain ([MeshClientPlan.drainWindow]). Sized for the strongest
-     * reading of "drain" - waiting out every in-flight call, the ones still waiting for a connection included - which
-     * is what every engine's release does. Reactor Netty's pool takes it as its graceful `disposeTimeout`.
+     * How long [shutdown] waits for the engines to drain ([MeshClientPlan.drainWindow]) - the window every engine's
+     * transport is handed and its WARN names. Sized for the strongest reading of "drain" - waiting out every in-flight
+     * call, the ones still waiting for a connection included - which is what every engine's release does. Reactor
+     * Netty's pool takes it as its graceful `disposeTimeout`.
      */
-    internal val poolDisposeTimeout: Duration = plan.drainWindow
+    internal val drainWindow: Duration = plan.drainWindow
 
     /** The engine of every backend, resolved once: its `app.webclient.engine.endpoints` entry or the default. */
     private val engineByBackend: Map<String, WebClientEngine> = meshByBackend.keys.associateWith(properties.engine::engineFor)
@@ -148,19 +157,19 @@ class ResilientWebClientFactory(
         EngineSet(engineByBackend.values.toSortedSet(), "ResilientWebClientFactory", logger) { engine ->
             when (engine) {
                 WebClientEngine.REACTOR_NETTY -> {
-                    ReactorNettyEngineTransport(properties, meshTransport, POOL_NAME, poolDisposeTimeout, ::awaitPoolDisposal)
+                    ReactorNettyEngineTransport(properties, meshTransport, POOL_NAME, drainWindow, ::awaitPoolDisposal)
                 }
 
                 WebClientEngine.JDK -> {
-                    JdkEngineTransport(meshTransport, poolDisposeTimeout, logger)
+                    JdkEngineTransport(meshTransport, drainWindow, logger)
                 }
 
                 WebClientEngine.JETTY -> {
-                    JettyEngineTransport(properties, meshTransport, poolDisposeTimeout, logger)
+                    JettyEngineTransport(properties, meshTransport, drainWindow, logger)
                 }
 
                 WebClientEngine.APACHE -> {
-                    ApacheEngineTransport(properties, meshTransport, poolDisposeTimeout, logger)
+                    ApacheEngineTransport(properties, meshTransport, drainWindow, logger)
                 }
             }
         }
@@ -182,6 +191,8 @@ class ResilientWebClientFactory(
      * Everything per-endpoint (base URL, Host header, timeouts) comes from the `app.mesh.endpoints[]` entry
      * whose alias equals [backendName].
      *
+     * @throws IllegalArgumentException if the endpoint belongs to the other stack (`app.mesh.endpoints[].stack`) -
+     *         its client is that stack's factory's to build.
      * @throws IllegalStateException if no mesh endpoint with that alias is configured - failing fast at
      *         startup beats a confusing 404/connection error at the first call - and for a client not built
      *         before [shutdown]: building it would create engine resources that nothing releases any more.
@@ -260,20 +271,20 @@ class ResilientWebClientFactory(
 
     /**
      * Releases the resources of every engine in use on context shutdown, all of them against ONE deadline
-     * [poolDisposeTimeout] from now - the engines are released one after another, and a bound per engine would
-     * let the shutdown take that bound once per engine. Reactor Netty's pool is disposed gracefully (below) and its
-     * event loops once the bound has passed, the JDK client shut down in order, Jetty's client stopped once its
-     * in-flight exchanges finished (or the deadline passed), Apache's I/O reactor shut down gracefully once its
+     * [drainWindow] from now - the engines are released one after another, and a window per engine would let the
+     * shutdown take that window once per engine. Reactor Netty's pool is disposed gracefully ([awaitPoolDisposal])
+     * and its event loops once the window has passed, the JDK client shut down in order, Jetty's client stopped once
+     * its in-flight exchanges finished (or the deadline passed), Apache's I/O reactor shut down gracefully once its
      * exchanges in flight finished (or the deadline passed). Afterwards, no client can be built any more ([create]).
      */
     @PreDestroy
     fun shutdown() {
-        transports.shutdown(nanoTime() + poolDisposeTimeout.toNanos(), nanoTime)
+        transports.shutdown(nanoTime() + drainWindow.toNanos(), nanoTime)
     }
 
     /**
      * The Reactor Netty engine's wait for its pool's [disposal] during [shutdown], bounded by [left] - what is left of
-     * the shared deadline when that engine's turn comes, never the full [poolDisposeTimeout] again ([drain]).
+     * the shared deadline when that engine's turn comes, never the full [drainWindow] again ([drain]).
      *
      * The wait ends when the calling thread is INTERRUPTED, as every engine's drain does ([EngineDrain]): the disposal
      * keeps running, the interrupt is reported on the one drain line and the flag is left for the caller. Not
@@ -290,19 +301,19 @@ class ResilientWebClientFactory(
             pending.get()
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
-            EngineDrain.reportUndrained(logger, WebClientEngine.REACTOR_NETTY.key, poolDisposeTimeout, left = null)
+            EngineDrain.reportUndrained(logger, WebClientEngine.REACTOR_NETTY.key, drainWindow, left = null)
         } catch (e: ExecutionException) {
             throw e.cause ?: e
         }
     }
 
     /**
-     * [shutdown]'s bounded wait for [disposal], with the WARN for a disposal that outlives [timeout] - what is
+     * [shutdown]'s bounded wait for [disposal], with the WARN for a disposal that outlives [left] - what is
      * left of the shutdown deadline when the Reactor Netty engine's turn comes. The WARN names the drain window
-     * [poolDisposeTimeout], as every engine's does, not the part of it that was left for this engine.
+     * [drainWindow], as every engine's does, not the part of it that was left for this engine.
      *
      * For Reactor Netty the disposal IS the drain: the pool is built with Reactor Netty's `disposeTimeout`
-     * ([poolDisposeTimeout]), so `disposeLater()` refuses new acquires, still serves the calls waiting for a
+     * ([drainWindow]), so `disposeLater()` refuses new acquires, still serves the calls waiting for a
      * connection, lets every in-flight call finish on its connection, and completes once all connections came back.
      *
      * Expiry is an OUTCOME, not a failure. `block(Duration)` would report it as an `IllegalStateException` -
@@ -310,35 +321,36 @@ class ResilientWebClientFactory(
      * method that threw. The last line before the process exits would then be a stack trace, at the moment
      * someone is looking for one, saying nothing about what actually happened. `timeout` + `onErrorResume`
      * turns it into the statement it is: the engine did not drain in time, and it is being closed anyway - on
-     * the same WARN line as every other engine ([EngineDrain.reportUndrained]), named by its engine key. The bare
-     * `block()` in [awaitPoolDisposal] cannot hang - the timeout guarantees a terminal signal.
+     * the same WARN line as every other engine ([EngineDrain.reportUndrained]), named by its engine key. The
+     * `timeout` also guarantees the returned [Mono] a terminal signal, so the wait in [awaitPoolDisposal] cannot
+     * hang, whatever form that wait takes.
      *
      * Separate from [shutdown] for the one reason that the timeout branch can only be tested with a disposal
      * that never ends and a clock that can be advanced: the real pool's disposal finishes in milliseconds, and
-     * [poolDisposeTimeout] is longer than any response timeout by construction. [timer] is where the timeout is
+     * [drainWindow] is longer than any response timeout by construction. [timer] is where the timeout is
      * scheduled - Reactor's parallel scheduler in production (what `timeout(Duration)` uses on its own), a
      * virtual-time scheduler in the test.
      */
     internal fun drain(
         disposal: Mono<Void>,
         timer: Scheduler,
-        timeout: Duration = poolDisposeTimeout,
+        left: Duration = drainWindow,
     ): Mono<Void> =
         disposal
-            .timeout(timeout, timer)
+            .timeout(left, timer)
             .onErrorResume(TimeoutException::class.java) {
-                EngineDrain.reportUndrained(logger, WebClientEngine.REACTOR_NETTY.key, poolDisposeTimeout, left = null)
+                EngineDrain.reportUndrained(logger, WebClientEngine.REACTOR_NETTY.key, drainWindow, left = null)
                 Mono.empty()
             }
 
     internal companion object {
-        /** Name of the Reactor-Netty pool shared by that engine's backends; also the `name` tag on its pool metrics. */
+        /** Name of the Reactor Netty pool shared by that engine's backends; also the `name` tag on its pool metrics. */
         const val POOL_NAME = "webclient-reactor-netty"
     }
 }
 
 /**
- * Central URI tag mapper for Reactor-Netty HTTP-client metrics. Left raw, a path variable (a UUID per call)
+ * Central URI tag mapper for Reactor Netty HTTP-client metrics. Left raw, a path variable (a UUID per call)
  * would mint a new time series per request - an unbounded cardinality leak. This maps each known path to its
  * low-cardinality TEMPLATE and collapses the rest to a single [UNKNOWN] bucket.
  *
@@ -359,9 +371,9 @@ object WebClientMetrics {
     /**
      * The URI->tag mapper for ONE endpoint's HttpClient: its own template, or [UNKNOWN].
      *
-     * Each endpoint gets its own Reactor-Netty `HttpClient` (the transport builds one per endpoint),
-     * and each such client only ever calls its own path - the adapters build the URI from
-     * [ResilientWebClient.pathTemplate]. A mapper holding the templates of ALL endpoints would give a request the
+     * Each endpoint gets its own Reactor Netty `HttpClient` (the transport builds one per endpoint),
+     * and each such client is there to call its own endpoint's path ([ResilientWebClient.pathTemplate]) - whatever
+     * URI form its caller writes that path in. A mapper holding the templates of ALL endpoints would give a request the
      * chance to match a FOREIGN template first and be counted under another endpoint's series.
      * Scoping the mapper to the one template the client can actually call removes that by construction, rather
      * than ordering the templates of all endpoints and hoping the right one matches first.

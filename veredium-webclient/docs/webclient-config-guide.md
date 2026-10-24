@@ -63,10 +63,9 @@ app:
 The upper bound on how much of a response body the codec will buffer. It bounds the *exchange*, not the log: how
 much of a body reaches the exchange event is `adapter-logging.max-body-bytes` (§4.1), an independent number.
 
-256 KB is Spring's standard `ExchangeStrategies` ceiling. 8 KB is too small for a real access-profile list and
-deterministically rejects the otherwise successful response. At the shared pool's default maximum of 100
-concurrent connections, the ceiling bounds simultaneous response buffers at roughly
-25 MB.
+256 KB is Spring's standard `ExchangeStrategies` ceiling. 8 KB is too small for an ordinary list response and
+deterministically rejects the otherwise successful response. With the reference configuration's mesh bulkheads,
+which admit 100 concurrent calls in all (§3.1), the ceiling bounds simultaneous response buffers at roughly 25 MB.
 
 - **Guard:** must be in `1 B .. Int.MAX_VALUE B`. Both ends are load-bearing:
   - *Zero or negative* binds silently and then fails **every** call with a `DataBufferLimitException` — which the
@@ -80,7 +79,8 @@ concurrent connections, the ceiling bounds simultaneous response buffers at roug
 - It stays a **module** property and wins over Boot's `spring.http.codecs.max-in-memory-size` for these clients:
   the factory clones Boot's auto-configured `WebClient.Builder` (§1.3) and applies this limit to the clone
   *after* Boot's codec customizer ran, so the host's global ceiling governs the host's own WebClients and this one
-  governs the mesh clients — deliberately, because the number is sized against this module's pool (above).
+  governs the mesh clients — deliberately, because the number is sized against this module's own concurrency
+  (above).
 - Successful decoded bodies contribute their UTF-8 byte size to
   `webclient.response.body.size{adapter="<mesh alias>"}`. Bodies that exceed the ceiling cannot be sampled because
   decoding aborts first; their WARN line therefore reports the configured limit and `Content-Length` when the
@@ -88,7 +88,7 @@ concurrent connections, the ceiling bounds simultaneous response buffers at roug
 
 ### 1.2 `pool.*` — the connection pool (`WebClientProperties.Pool`)
 
-One Reactor-Netty `ConnectionProvider` serves every endpoint's `HttpClient`, but it does **not** make them share
+One Reactor Netty `ConnectionProvider` serves every endpoint's `HttpClient`, but it does **not** make them share
 connections: Reactor Netty keeps a separate sub-pool per remote address *and* per client configuration, and each
 endpoint's `HttpClient` is configured on its own (its response timeout, its URI tagger). On `reactor-netty` the
 pool limits (`max-connections`, the pending-acquire limits) therefore apply **per backend**; two backends behind
@@ -352,12 +352,16 @@ gracefully (its `disposeTimeout` is the bound) - it refuses new calls, serves th
 every connection came back, with a WARN when the deadline ran out first - and its event loops are disposed
 once the bound has passed (daemon threads, so an exiting JVM is not held up); the JDK client shuts down in order -
 in-flight exchanges run to completion until the deadline, then it is shut down hard with a WARN; Jetty's client
-waits for its in-flight exchanges until the deadline and then stops, with a WARN naming those it aborts; Apache waits for its exchanges in flight until the deadline, then its I/O reactor shuts down gracefully and is
-closed, with a WARN when the deadline ran out - and the exchanges it still had in flight are cancelled (WARN
-with their number), because closing the reactor completes none of their callers, who would otherwise wait out
-their budget. Every engine that did not drain reports it on the same WARN line, named by its engine key:
-`HTTP engine '<engine>' did not drain ... - closing it with ... still in flight`. After `shutdown()` no new client can be built (`IllegalStateException`): it would create engine
-resources nothing releases.
+waits for its in-flight exchanges until the deadline and then stops, with a WARN naming those it aborts; Apache
+waits for its exchanges in flight until the deadline, then its I/O reactor shuts down gracefully and is closed,
+with a WARN when the deadline ran out - and the exchanges it still had in flight are cancelled (WARN with their
+number), because closing the reactor completes none of their callers, who would otherwise wait out their
+budget. Every engine that did not drain reports it on the same WARN line, named by its engine key:
+`HTTP engine '<engine>' did not drain ... - closing it with ... still in flight`. A shutdown thread that is
+interrupted stops waiting at once, on every engine: the release goes on, the interrupt is reported on that same
+WARN line and the flag is left for the caller (`EngineDrain`, shared with the blocking client). After
+`shutdown()` no new client can be built (`IllegalStateException`): it would create engine resources nothing
+releases.
 
 **Fail-fast** (§5): an override key that names no mesh alias, a selected engine whose library is missing (the
 message names the coordinates), `jdk` without the Host flag, and `jetty` with `pool.pending-acquire-max-count: 0`.
@@ -586,7 +590,7 @@ resilience4j:
     instances: { <alias>: { base-config: mesh-backend }, ... }   # EVERY alias, or the start fails
 ```
 
-- **The bulkheads partition the shared pool.** `sum(max-concurrent-calls)` over the mesh aliases must not exceed
+- **The bulkheads partition the pool.** `sum(max-concurrent-calls)` over the mesh aliases must not exceed
   `app.mesh.defaults.transport.max-connections`; otherwise the excess queues for a connection instead of being
   shed with a named `BulkheadFullException`, and the pending-acquire timeout that follows is a **failure** on
   the breaker of whichever backend is waiting. `ResilienceConfigContractTest` fails the build when the reference
@@ -641,6 +645,10 @@ The `Mono<T>` of `get`/`post` emits exactly one value or an error. A 2xx answer 
 200 with an empty entity — fails with `EmptyResponseBodyException` (veredium-core) naming the backend and the
 expected type. Like a deserialisation failure it is raised **after** the decoration: the breaker records the
 exchange as the success it was, and the client's error line reports the exception at WARN.
+
+Only a 2xx is a body: a 1xx or 3xx fails as a `WebClientResponseException` with its status (no engine follows a
+redirect), which the breaker records as a failure like any status that is not a benign 4xx. What every status
+becomes on both stacks: [Status contract](../../docs/status-contract.md).
 
 > **Behaviour change (2026-10-21).** Before, such an answer completed the `Mono` **empty**: no error line, and a
 > `NoSuchElementException` out of the caller's `awaitSingle()` that named neither the backend nor the cause —
@@ -815,7 +823,9 @@ resilience4j:                                  # §3 (instance keys = derived al
 ## See also
 
 - [mesh-timeout.md](../../veredium-core/docs/mesh-timeout.md) — the mesh derivation and its R4j registration in depth.
-- [logging-guide.md](logging-guide.md) — SUPERSEDED: the design of the module's own exchange diary, replaced by legatium and kept for its reasoning (§0 there says what still applies).
+- [logging-guide.md](logging-guide.md) — how the exchanges are logged today (legatium) and the constraints that
+  serve; the superseded designs, the module's own exchange diary among them, are kept for their reasoning in
+  [logging-history.md](logging-history.md), outside the published guides.
 - `legatium/docs/GUIDE.md` and `legatium-webclient-logging/docs/GUIDE.md` (outside this repository) — the library that writes the exchange event.
 - [metrics.md](metrics.md) — the emitted metrics and their cardinality.
 - The reference configuration `src/test/resources/application.yml` is the authoritative example: a test resource,

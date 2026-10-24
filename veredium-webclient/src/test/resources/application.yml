@@ -229,15 +229,18 @@ resilience4j:
   bulkhead:
     configs:
       mesh-backend:
-        # Bound by the SHARED connection pool, not chosen per backend: every endpoint talks to the same local
-        # sidecar through one Reactor-Netty pool of app.mesh.defaults.transport.max-connections (100). With
-        # four backends, 4 x 25 = 100 - the bulkheads shed load exactly as the pool runs out, rather than
-        # letting callers pile up on pendingAcquire. Raising this without raising max-connections moves the
-        # queueing into the pool, where pending-acquire-timeout-ms (200) fails them anyway, only later and
-        # with a less obvious error - a FAILURE on the breaker of whichever backend is waiting.
-        # ResilienceConfigContractTest enforces sum(max-concurrent-calls) <= max-connections for this file; at
-        # runtime MeshResilienceStartupGuard (veredium-core) logs a WARN naming both numbers when a host's
-        # configuration exceeds it.
+        # Bound by the connection pool, not chosen per backend: every endpoint talks to the same local sidecar,
+        # and a pool holds app.mesh.defaults.transport.max-connections (100). With four backends, 4 x 25 = 100.
+        # On jetty and apache the four backends share one pool, and the sum is exact: the bulkheads shed load
+        # exactly as the pool runs out, rather than letting callers pile up on pendingAcquire. On reactor-netty
+        # (the default) every backend has a sub-pool of its own, each holding max-connections, and the sum is
+        # conservative. Raising this without raising max-connections moves the queueing into a shared pool,
+        # where pending-acquire-timeout-ms (200) fails them anyway, only later and with a less obvious error -
+        # a FAILURE on the breaker of whichever backend is waiting. ResilienceConfigContractTest enforces
+        # sum(max-concurrent-calls) <= max-connections for this file, whatever the engine; at runtime
+        # MeshResilienceStartupGuard (veredium-core) logs a WARN naming both numbers when the bulkheads on one
+        # of the factory's pools exceed it - on reactor-netty, that is one backend's bulkhead against its own
+        # sub-pool.
         max-concurrent-calls: 25
         # Fail fast rather than queue: the same choice the mesh transport already makes for the pool. A waiting
         # caller does not even spend its TimeLimiter budget on the wait - the reactive bulkhead acquires inside
@@ -246,7 +249,7 @@ resilience4j:
         max-wait-duration: 0
         #
         # ROLE: these bulkheads are a POOL PARTITION and a BACKSTOP - not a load-steering mechanism. They exist
-        # so one hot alias cannot starve the other three out of the shared 100-connection pool, and so
+        # so one hot alias cannot starve the other three out of a pool they share (jetty, apache), and so
         # exhaustion surfaces as an immediate, named BulkheadFullException rather than as pending-acquire
         # queueing. Callers are expected to bound their own concurrency BEFORE reaching here, dimensioned
         # against this very number (one logical operation may occupy one slot in each of two aliases at the
@@ -255,8 +258,9 @@ resilience4j:
         # A BulkheadFullException on a known path is therefore a SIGNAL, not the design working: it says that
         # the caller's own bound is mis-sized, or that a second caller in the same JVM is consuming more of the
         # alias than assumed. Raising this value is the wrong first response; sum(max-concurrent-calls) <=
-        # max-connections is enforced for this file by ResilienceConfigContractTest (and warned about at startup
-        # by MeshResilienceStartupGuard), and raising it here without raising the pool just moves the queueing.
+        # max-connections is enforced for this file by ResilienceConfigContractTest (and, per pool, warned about
+        # at startup by MeshResilienceStartupGuard), and raising it here without raising the pool just moves the
+        # queueing.
         # The decision this inherits is recorded in veredium-restclient/docs/decisions.md (D1).
     instances:
       apis-example-com-POST-v8-agreements-products-lookup:

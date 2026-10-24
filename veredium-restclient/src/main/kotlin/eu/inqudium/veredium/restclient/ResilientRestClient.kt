@@ -6,6 +6,7 @@ import eu.inqudium.veredium.core.client.EmptyResponseBodyException
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
+import eu.inqudium.veredium.core.resilience.ClientSideFailurePolicy
 import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import io.micrometer.core.instrument.DistributionSummary
 import jakarta.validation.ConstraintViolationException
@@ -46,6 +47,8 @@ import java.util.concurrent.TimeoutException
  * A 2xx body is deserialised into the requested type; every other outcome is an exception, never `null`:
  * - a 4xx/5xx is Spring's status exception ([HttpClientErrorException] / [HttpServerErrorException], the
  *   status-specific subclass, with the truncated error body on it);
+ * - a 1xx/3xx the engine did not resolve - none follows a redirect - is a plain [RestClientResponseException]
+ *   carrying its status and body, which the breaker records as a failure;
  * - a 2xx WITHOUT a body - a 204, or a 200 with an empty entity - is an [EmptyResponseBodyException] naming the
  *   backend and the type that was expected, the same exception the reactive twin raises;
  * - a 2xx past the buffer limit is a [ResponseBodyLimitExceededException];
@@ -89,8 +92,8 @@ class ResilientRestClient(
     /**
      * The buffering limit for a response body, in bytes - `maxInMemorySize` as the factory resolved it for this
      * client. Enforced HERE, by the bounded read in [exchange], because the blocking client has no codec limit
-     * of its own; and named on the line that reports a response exceeding it (the buffer-limit line of [ClientCallLog]), so
-     * that line carries the number an operator has to raise.
+     * of its own; and named on the line that reports a response exceeding it (the buffer-limit line of
+     * [ClientCallLog]), so that line carries the number an operator has to raise.
      */
     private val maxInMemoryBytes: Int,
     /**
@@ -123,7 +126,7 @@ class ResilientRestClient(
      *
      * Recorded in UTF-8 BYTES ([ResponseBodyMetrics.utf8Size]) rather than `String.length`, so the sample and the
      * limit it informs are the same unit. For a UTF-8 body that is the byte count as read, taken without decoding
-     * the body to a `String` first (see `decode`).
+     * the body to a `String` first (see [decode]).
      *
      * Null-as-off, like [validator]: resolved once per backend by [ResilientRestClientFactory], so the hot path
      * holds no registry lookup.
@@ -164,9 +167,11 @@ class ResilientRestClient(
                     wording = "buffer limit",
                     maxInMemoryBytes = maxInMemoryBytes,
                     meterName = RestClientMetrics.RESPONSE_BODY_SIZE,
-                    // Carried on this module's own exception, wherever in the cause chain it sits.
+                    // Carried on this module's own exception, wherever in the cause chain it sits - within the
+                    // core's bounded walk, as the verdicts read the same chain.
                     contentLengthOf = { error ->
-                        generateSequence(error) { it.cause.takeIf { cause -> cause !== it } }
+                        ClientSideFailurePolicy
+                            .causeChain(error)
                             .filterIsInstance<ResponseBodyLimitExceededException>()
                             .firstOrNull()
                             ?.contentLength ?: -1L
@@ -193,10 +198,10 @@ class ResilientRestClient(
         execute(
             // Stamp the endpoint's low-cardinality path template onto the request so legatium's exchange
             // event (adapter_url_template) and Spring's client observation can record the template next to
-            // the expanded URL. Done centrally so it holds regardless of which uri(...) overload the adapter
-            // used - the builder-lambda form (POST adapters) does not set the attribute, and re-setting it for
-            // the GET adapters is a no-op (same value they already passed via uri(template, vars)). The key
-            // is the library's public constant, the same string Spring's own uri(template, vars) sets.
+            // the expanded URL. Done centrally so it holds regardless of which uri(...) overload the caller
+            // used - the builder-lambda form does not set the attribute, and for a caller that passed
+            // uri(template, vars) re-setting it is a no-op (the same value). The key is the library's public
+            // constant, the same string Spring's own uri(template, vars) sets.
             block(restClient.get()).attribute(ClientRequestLoggingInterceptor.URI_TEMPLATE_ATTRIBUTE, pathTemplate),
             responseType,
             requestBody = null,
@@ -228,10 +233,10 @@ class ResilientRestClient(
     ): T {
         val serialized = objectMapper.writeValueAsString(body)
         // Hand the JSON string straight to body(): the String converter writes it as UTF-8 under the content
-        // type the adapter set, so an explicit toByteArray() would only allocate a redundant array.
-        // .attribute stamps the path template centrally (see get()): the POST adapters build the URI via
-        // the uri { builder -> ... } overload, which does NOT set the template attribute, so without this
-        // the exchange event and the observation would have no template for these calls.
+        // type the caller set, so an explicit toByteArray() would only allocate a redundant array.
+        // .attribute stamps the path template centrally (see get()): a caller that builds the URI with the
+        // uri { builder -> ... } overload does NOT set the template attribute, so without this the exchange
+        // event and the observation would have no template for its calls.
         val spec =
             block(restClient.post())
                 .body(serialized)
@@ -383,9 +388,9 @@ class ResilientRestClient(
         } catch (e: Throwable) {
             // Everything else carries the resilience verdict as well as the raw HTTP outcome: a TimeLimiter
             // timeout, CircuitBreaker short-circuit, BulkheadFull, or an empty body, a deserialisation failure or a
-            // violation from decode all surface here. (The exchange event legatium writes sees only what reached the RestClient: a breaker
-            // short-circuit or a full bulkhead produces no exchange and no event - this line is where those
-            // verdicts are logged.)
+            // violation from decode all surface here. (The exchange event legatium writes sees only what reached
+            // the RestClient: a breaker short-circuit or a full bulkhead produces no exchange and no event - this
+            // line is where those verdicts are logged.)
             outcome = "error"
             calls.onError(responseType, e, elapsedMillis)
             throw e
@@ -435,7 +440,8 @@ class ResilientRestClient(
 
     /**
      * The HTTP exchange proper, run by the decorator on its worker: sends the request, reads the body under the
-     * buffer limit and surfaces a non-2xx as the exception Spring's own default handler would raise.
+     * buffer limit and surfaces a 4xx/5xx as the exception Spring's own default handler would raise, a 1xx/3xx
+     * as a plain [RestClientResponseException].
      *
      * `exchange` rather than `retrieve()` because the bounded read needs the raw stream, and `exchange` is the one
      * API that hands it over. It also hands over the status decision - `exchange` applies no status handlers -
@@ -443,7 +449,7 @@ class ResilientRestClient(
      * [HttpClientErrorException], a 5xx an [HttpServerErrorException], each carrying status, headers and the
      * (truncated) error body, so a caller or a log sees the same exception types a plain `retrieve()` throws.
      * Only a 2xx is a body to return. A 1xx or 3xx the transport did not resolve - no engine follows a redirect -
-     * is never the answer the adapter asked for, so it fails as a [RestClientResponseException] carrying its status,
+     * is never the answer the caller asked for, so it fails as a [RestClientResponseException] carrying its status,
      * which the breaker records like any status that is not a benign 4xx.
      *
      * The response is closed by `RestClient` when this function returns (`close = true`), which is also the
@@ -458,7 +464,7 @@ class ResilientRestClient(
             // trusted as the length of what follows.
             val contentLength = headers.contentLength
             if (!status.is2xxSuccessful) {
-                // An error body is diagnostic only: cut it at the limit rather than reject it, so a 5xx stays a
+                // A non-2xx body is diagnostic only: cut it at the limit rather than reject it, so a 5xx stays a
                 // 5xx for the breaker whatever size its error page has.
                 val body = BoundedBodyReader.readTruncated(response.body, maxInMemoryBytes, contentLength)
                 throw statusException(status, response.statusText, headers, body)
@@ -472,8 +478,9 @@ class ResilientRestClient(
     /**
      * The exception for a non-2xx answer, shaped like Spring's own: the concrete subclass for a 4xx/5xx status
      * (`HttpClientErrorException.NotFound`, `HttpServerErrorException.InternalServerError`, ...), the plain
-     * [RestClientResponseException] for a 1xx/3xx, each with the full body attached and a message that previews it. The preview is capped because this message ends up in
-     * the WARN line's stack trace; the whole body stays on the exception for whoever asks for it.
+     * [RestClientResponseException] for a 1xx/3xx, each with the full body attached and a message that previews
+     * it. The preview is capped because this message ends up in the WARN line's stack trace; the whole body stays
+     * on the exception for whoever asks for it.
      */
     private fun statusException(
         status: HttpStatusCode,

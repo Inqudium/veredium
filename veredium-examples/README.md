@@ -23,7 +23,7 @@ All of them are configured once in [`application.yml`](src/main/resources/applic
 | [`ReactiveExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveExampleApplication.kt) | The same wiring for the reactive client. |
 | [`ReactiveCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/reactive/ReactiveCustomerAdapter.kt) | `ResilientWebClient`: the same adapter on `Mono`s, a 404 turned into an empty `Mono`, `Mono.zip` for both calls, and a `suspend` function for coroutine code. |
 | [`MixedExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/mixed/MixedExampleApplication.kt) | Both clients in one context, no exclusion: the `mixed` profile ([`application-mixed.yml`](src/main/resources/application-mixed.yml)) names the stack of each endpoint, the one key a host needs when it depends on both modules. |
-| [`MixedCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/mixed/MixedCustomerAdapter.kt) | The customer directory on the blocking client and the order search on the reactive one, each from its own stack's factory. Its test also shows each factory refusing the other's endpoint and each breaker running on its owner's verdicts. |
+| [`MixedCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/mixed/MixedCustomerAdapter.kt) | The customer directory on the blocking client and the order search on the reactive one, each from its own stack's factory, and the two `BaseAdapter` budgets as the ceiling over both stacks. Its test also shows each factory refusing the other's endpoint and each breaker running on its owner's verdicts. |
 | [`DecoratorExampleApplication`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorExampleApplication.kt) | A host without a client module: it excludes both clients' auto-configurations, which this module has on its classpath and a real host of the decorator alone would not. |
 | [`DecoratorConfiguration`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorConfiguration.kt) | The wiring a host declares itself for `BlockingResilienceDecorator`: the bean over the auto-configured registries, the breaker customizer that ignores `SELF_INFLICTED_FAILURES` and the backend's own "unknown customer" answer, and a native Apache HttpClient 4 with its bounds, no retries and no redirects. |
 | [`DecoratorCustomerAdapter`](src/main/kotlin/eu/inqudium/veredium/examples/decorator/DecoratorCustomerAdapter.kt) | `decorate` and `decorateAsync` by instance name around a HttpClient 4 exchange that sets its own Host header, a 404 that the breaker ignores, and the two `BaseAdapter` budgets from the decorator and the client. |
@@ -80,6 +80,6 @@ published artifact the same way as [`veredium-coverage`](../veredium-coverage/RE
   excludes both.
   `spring.main.web-application-type: none` keeps `spring-webflux`, which the reactive client brings, from starting
   a web server in any of them.
-- **Four Boot contexts share one test JVM.** The tests keep every context off Micrometer's global registry
+- **The examples' Boot contexts share one test JVM.** The tests keep every context off Micrometer's global registry
   (`management.metrics.use-global-registry=false`, set once in `ExampleContext`). A single host does not need that
   setting.

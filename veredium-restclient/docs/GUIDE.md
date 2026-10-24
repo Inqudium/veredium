@@ -129,15 +129,19 @@ ignored silently:
 | `transport.pending-acquire-timeout-ms` | `connectionRequestTimeout` | **does not apply** - nothing waits for a connection | **does not apply** - a queued request waits within its total timeout; the queue is bounded at 1024 per destination | `pendingAcquireTimeout`; the queue is bounded at 2 × `max-connections` |
 | `pool.max-idle-time` | `closeIdle` on the eviction schedule | **does not apply** | `HttpClient.idleTimeout` | `maxIdleTime` |
 | `pool.max-life-time` | `timeToLive` | **does not apply** | the pool's `maxDuration`, checked when a connection is leased | `maxLifeTime` |
-| `pool.evict-in-background` | the factory's eviction schedule | **does not apply** | **does not apply** - Jetty closes an idle connection when its idle timeout passes | `evictInBackground` |
+| `pool.evict-in-background` | the engine's own eviction schedule (`closeIdle` / `closeExpired`) | **does not apply** | **does not apply** - Jetty closes an idle connection when its idle timeout passes | `evictInBackground` |
 | pool meters | `restclient.pool.{leased,available,pending}` | none | none | `reactor.netty.connection.provider.*{name=restclient-reactor-netty}` |
-| response timeout surfaces as (under `ResourceAccessException`) | `SocketTimeoutException` | `HttpTimeoutException` | `TimeoutException` | `ReadTimeoutException` |
+| response timeout while waiting for the head surfaces as (under `ResourceAccessException`) | `SocketTimeoutException` | `HttpTimeoutException` | `TimeoutException` | an `IOException` around `ReadTimeoutException` |
+| response timeout while the body stalls surfaces as (under `ResourceAccessException`) | `SocketTimeoutException` | an `IOException` of the body stream Spring's deadline closed - **no** `HttpTimeoutException` | `TimeoutException` | an `IOException` around `ReadTimeoutException` |
 
 `pool.max-idle-time` must be positive: a zero would mean "evict every idle connection at once" to Reactor Netty
 (no keep-alive), "no idle timeout" to Jetty and "close every idle connection at each sweep" to Apache, so the binding
 refuses it. Zero keeps its meaning for `pool.max-life-time` (unbounded) and `pool.evict-in-background` (off).
 
-Every one of those four is classified as `timeout` by legatium's exchange event. The JDK's pool knobs exist only
+The four head-phase types are each classified as `timeout` by legatium's exchange event. The JDK's body-phase
+failure names no timeout type - Spring's deadline closes the stream and the read fails - so an alert or a log query
+that filters on the exception type misses it on `jdk` (pinned per engine and phase by
+`RestClientEngineIntegrationTest`). The JDK's pool knobs exist only
 as JVM-wide system properties (`jdk.httpclient.keepalive.timeout`, `jdk.httpclient.connectionPoolSize`), which
 the module does not set. With `jdk`, size the bulkheads knowing that no pool bounds the connections behind them.
 

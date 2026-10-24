@@ -36,8 +36,9 @@ interface BaseAdapter {
 
     /**
      * The transport's response timeout - the bound on waiting for the HTTP response, sitting just below
-     * [timeLimiterTimeout]. The ladder's `responseTimeout` rung: Apache's `RequestConfig.responseTimeout` on
-     * the blocking stack, Reactor Netty's `responseTimeout` on the reactive one, the same number on both.
+     * [timeLimiterTimeout]. The ladder's [eu.inqudium.veredium.core.mesh.ResolvedTimeouts.responseTimeout] rung,
+     * applied by whichever engine carries the call (a host selects one per stack and endpoint, ADR-0004): the same
+     * number on every engine of both stacks.
      */
     val responseTimeout: Duration
 }

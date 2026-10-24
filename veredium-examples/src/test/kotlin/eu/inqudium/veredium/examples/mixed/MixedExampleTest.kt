@@ -17,6 +17,7 @@ import org.springframework.http.HttpStatus
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.web.client.HttpClientErrorException
 import org.springframework.web.reactive.function.client.WebClientResponseException
+import java.time.Duration
 
 /**
  * The mixed example as a host runs it: both client modules active in one Boot context, each mesh endpoint owned by
@@ -91,5 +92,23 @@ class MixedExampleTest(
         assertThat(ordersBreaker.test(reactive404)).`as`("order-search (webclient) records a WebClient 404").isFalse()
         assertThat(customersBreaker.test(reactive404)).`as`("customers (restclient) records a WebClient 404").isTrue()
         assertThat(ordersBreaker.test(blocking404)).`as`("order-search (webclient) records a RestClient 404").isTrue()
+    }
+
+    @Test
+    fun `should publish the ceiling of both stacks' budgets`() {
+        // What is tested: the BaseAdapter values of MixedCustomerAdapter, whose two clients run on different stacks.
+        // Success criteria: the values of the slower endpoint, order-search on the reactive client: the response
+        //   timeout 900 ms and the TimeLimiter budget 1300 ms - the blocking customers endpoint's 700 ms and 1100 ms
+        //   are lower.
+        // Why it matters: both stacks derive the budgets from the same ladder, so the ceiling over a blocking and a
+        //   reactive client is a number an orchestrating caller can compose like any other adapter's.
+        //
+        // When
+        val response = adapter.responseTimeout
+        val budget = adapter.timeLimiterTimeout
+
+        // Then
+        assertThat(response).isEqualTo(Duration.ofMillis(900))
+        assertThat(budget).isEqualTo(Duration.ofMillis(1300))
     }
 }

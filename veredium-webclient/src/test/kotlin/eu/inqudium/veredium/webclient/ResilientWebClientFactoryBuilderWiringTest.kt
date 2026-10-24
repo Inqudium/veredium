@@ -2,7 +2,6 @@ package eu.inqudium.veredium.webclient
 
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
-import ch.qos.logback.classic.spi.ILoggingEvent
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.equalTo
 import com.github.tomakehurst.wiremock.client.WireMock.get
@@ -15,6 +14,7 @@ import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.testsupport.ConfigurationFiles
 import eu.inqudium.veredium.testsupport.capturing
+import eu.inqudium.veredium.testsupport.field
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.springboot.bulkhead.autoconfigure.BulkheadAutoConfiguration
@@ -397,8 +397,6 @@ class ResilientWebClientFactoryBuilderWiringTest {
                 ),
             )
     }
-
-    private fun ILoggingEvent.field(name: String): Any? = keyValuePairs?.singleOrNull { it.key == name }?.value
 
     /** One GET against the probe endpoint through a client of the context's factory. */
     private fun probeThrough(factory: ResilientWebClientFactory) {

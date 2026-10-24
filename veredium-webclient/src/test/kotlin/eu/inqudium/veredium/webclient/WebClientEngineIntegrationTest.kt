@@ -25,7 +25,6 @@ import eu.inqudium.veredium.testsupport.CustomizedRegistries
 import eu.inqudium.veredium.testsupport.DrippingBackend
 import eu.inqudium.veredium.testsupport.Greeting
 import eu.inqudium.veredium.testsupport.LookupRequest
-import eu.inqudium.veredium.testsupport.SilentBackend
 import eu.inqudium.veredium.testsupport.UnansweredConnectBackend
 import eu.inqudium.veredium.testsupport.WireMockArrivals
 import eu.inqudium.veredium.testsupport.capturing
@@ -849,13 +848,13 @@ class WebClientEngineIntegrationTest {
             // Given: Reactor's default schedulers on a virtual clock, which the transport's delay runs on
             val clock = VirtualTimeScheduler.getOrSet()
             try {
-                val bound = Duration.ofSeconds(30)
+                val window = Duration.ofSeconds(30)
                 val transport =
-                    ReactorNettyEngineTransport(WebClientProperties(), MeshProperties.Transport(), "loops-probe", bound) { disposal, _ -> disposal.block() }
+                    ReactorNettyEngineTransport(WebClientProperties(), MeshProperties.Transport(), "loops-probe", window) { disposal, _ -> disposal.block() }
 
                 // When
                 transport.shutdown(System.nanoTime() + GENEROUS_BUDGET.toNanos(), System::nanoTime)
-                clock.advanceTimeBy(bound.minusMillis(1))
+                clock.advanceTimeBy(window.minusMillis(1))
 
                 // Then: the pool is gone, the loops are not
                 assertThat(transport.isClosed).isTrue()
@@ -877,10 +876,10 @@ class WebClientEngineIntegrationTest {
             //   transport's share of the shared deadline, and the factory's wait bounded by it.
             // Success criteria: released with a deadline already spent, the transport hands its wait a remaining
             //   time of zero; the factory's wait, given 100 ms left and a disposal that never ends, returns within
-            //   1 s - not after the full drain bound - with its WARN naming the drain window, as every engine's
+            //   1 s - not after the full drain window - with its WARN naming the drain window, as every engine's
             //   does, not the 100 ms that were left of it.
-            // Why it matters: the deadline is shared so that releasing several engines takes the drain bound once,
-            //   not once per engine. A wait that took the full bound for Reactor Netty would add it again after the
+            // Why it matters: the deadline is shared so that releasing several engines takes the drain window once,
+            //   not once per engine. A wait that took the full window for Reactor Netty would add it again after the
             //   engines before it had spent the deadline. The line states the configured window an operator can
             //   look up, whichever engine's turn came last.
             //
@@ -907,7 +906,7 @@ class WebClientEngineIntegrationTest {
                 assertThat(lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage })
                     .singleElement()
                     .asString()
-                    .contains("'reactor-netty' did not drain within ${factory.poolDisposeTimeout}")
+                    .contains("'reactor-netty' did not drain within ${factory.drainWindow}")
                     .doesNotContain("PT0.1S")
             }
         }
@@ -953,15 +952,15 @@ class WebClientEngineIntegrationTest {
             //   against an exchange that never ends, with a deadline 300 ms ahead and one that has already passed.
             // Success criteria: shutdown() returns within 2 s; the transport reports itself released; the held
             //   exchange's connection is closed and its CALL fails at once (not at its 30 s budget); and the
-            //   factory's logger has a WARN for the engine - "did not drain within"
-            //   for every engine, each of which waits for the exchange up to the deadline; and no ERROR is logged,
-            //   neither by Apache nor by the factory (a
-            //   reactor closed hard while a worker is still shutting down reports a ClosedSelectorException, which
-            //   during the shutdown is the worker's expected end).
+            //   factory's logger has a WARN for the engine - "did not drain within" for every engine, each of which
+            //   waits for the exchange up to the deadline; and no ERROR is logged, neither by Apache nor by the
+            //   factory (a reactor closed hard while a worker is still shutting down reports a
+            //   ClosedSelectorException, which during the shutdown is the worker's expected end).
             // Why it matters: the bound is the whole point of a draining shutdown - a context close must not wait
             //   for an exchange the backend never ends, and the caller of that exchange must not be left waiting
-            //   for its budget either (Apache's hard close completes no callback of an exchange in flight). A deadline already spent by an engine released before
-            //   this one must not turn into "wait forever" either (Apache reads a wait of 0 as forever in places).
+            //   for its budget either (Apache's hard close completes no callback of an exchange in flight). A
+            //   deadline already spent by an engine released before this one must not turn into "wait forever"
+            //   either (Apache reads a wait of 0 as forever in places).
             //
             // Given: a call held by a backend that never answers, the factory's log captured
             val logger = LoggerFactory.getLogger(ResilientWebClientFactory::class.java) as Logger
@@ -987,8 +986,8 @@ class WebClientEngineIntegrationTest {
                         // Then
                         assertThat(elapsed).isLessThan(Duration.ofSeconds(2))
                         val warnings = lines.events.filter { it.level == Level.WARN }.map { it.formattedMessage }
-                        val drained = "did not drain within"
-                        assertThat(warnings).anySatisfy { assertThat(it).contains("'$engine'", drained) }
+                        val undrained = "did not drain within"
+                        assertThat(warnings).anySatisfy { assertThat(it).contains("'$engine'", undrained) }
                         assertThat(transport.isClosed).isTrue()
                         assertThat(backend.connectionClosed.await(2, TimeUnit.SECONDS)).`as`("the held connection was closed").isTrue()
                         assertThat(catchThrowable { held.get(2, TimeUnit.SECONDS) }).isNotNull().isNotInstanceOf(TimeoutException::class.java)

@@ -4,13 +4,12 @@ import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.mesh.ResolvedTimeouts
 import eu.inqudium.veredium.core.resilience.BreakerVerdicts
 import eu.inqudium.veredium.core.resilience.circuitBreakerCustomizer
-import eu.inqudium.veredium.core.resilience.timeLimiterCustomizer
+import io.github.resilience4j.bulkhead.BulkheadConfig
+import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreaker
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
-import io.github.resilience4j.timelimiter.TimeLimiter
-import io.github.resilience4j.timelimiter.TimeLimiterConfig
-import io.github.resilience4j.timelimiter.TimeLimiterRegistry
+import java.time.Duration
 
 /**
  * Applies the mesh customizers, fed with a stack's [BreakerVerdicts], to plain `Registry.of(...)` registries the way
@@ -24,53 +23,49 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry
  * one thing the real path never does (it never has a prior instance), and it is what lets a test register a marker
  * config first and assert what survives the customizer.
  *
- * The same object exists in veredium-core's tests, which cannot depend on this module (see its pom). The parameters
- * are in the same order; only the verdicts differ: here a caller passes its stack's, there they default to the core's
- * test verdicts.
+ * The same object exists in veredium-core's tests, which cannot depend on this module (see its pom). There it also
+ * customizes single instances and the time limiters, which only the core's own tests exercise; the verdicts differ as
+ * well: here a caller passes its stack's, there they default to the core's test verdicts.
  */
 object CustomizedRegistries {
-    /** The circuit breaker of [endpoint], customized with [verdicts] over [base] (default: the config registered under its alias). */
-    fun circuitBreaker(
-        registry: CircuitBreakerRegistry,
-        endpoint: ResolvedTimeouts,
-        base: CircuitBreakerConfig? = null,
-        verdicts: BreakerVerdicts,
-    ): CircuitBreaker {
-        val seed = base ?: registry.find(endpoint.alias).map { it.circuitBreakerConfig }.orElse(registry.defaultConfig)
-        val builder = CircuitBreakerConfig.from(seed)
-        circuitBreakerCustomizer(endpoint, verdicts).customize(builder)
-        registry.remove(endpoint.alias)
-        return registry.circuitBreaker(endpoint.alias, builder.build())
-    }
-
-    /**
-     * The time limiter of [endpoint], customized over [base] when its derivation is enabled; an endpoint with the
-     * derivation off has no customizer bean, so its instance is left exactly as registered (or created from the
-     * default), as in the context.
-     */
-    fun timeLimiter(
-        registry: TimeLimiterRegistry,
-        endpoint: ResolvedTimeouts,
-        base: TimeLimiterConfig? = null,
-    ): TimeLimiter {
-        if (!endpoint.timeLimiterEnabled) return registry.timeLimiter(endpoint.alias)
-        val seed = base ?: registry.find(endpoint.alias).map { it.timeLimiterConfig }.orElse(registry.defaultConfig)
-        val builder = TimeLimiterConfig.from(seed)
-        timeLimiterCustomizer(endpoint).customize(builder)
-        registry.remove(endpoint.alias)
-        return registry.timeLimiter(endpoint.alias, builder.build())
-    }
-
     /** Every circuit breaker of [mesh], customized with [verdicts]. */
     fun circuitBreakers(
         registry: CircuitBreakerRegistry,
         mesh: MeshProperties,
         verdicts: BreakerVerdicts,
-    ) = mesh.resolveAll().values.forEach { circuitBreaker(registry, it, verdicts = verdicts) }
+    ) = mesh.resolveAll().values.forEach { circuitBreaker(registry, it, verdicts) }
 
-    /** Every time limiter of [mesh], customized where enabled. */
-    fun timeLimiters(
-        registry: TimeLimiterRegistry,
-        mesh: MeshProperties,
-    ) = mesh.resolveAll().values.forEach { timeLimiter(registry, it) }
+    /** The circuit breaker of [endpoint], customized with [verdicts] over the config registered under its alias. */
+    private fun circuitBreaker(
+        registry: CircuitBreakerRegistry,
+        endpoint: ResolvedTimeouts,
+        verdicts: BreakerVerdicts,
+    ): CircuitBreaker {
+        val seed = registry.find(endpoint.alias).map { it.circuitBreakerConfig }.orElse(registry.defaultConfig)
+        val builder = CircuitBreakerConfig.from(seed)
+        circuitBreakerCustomizer(endpoint, verdicts).customize(builder)
+        registry.remove(endpoint.alias)
+        return registry.circuitBreaker(endpoint.alias, builder.build())
+    }
 }
+
+/** Whether the circuit breaker registered under [alias] classifies [error] as ignorable (not a backend failure). */
+fun ignores(
+    registry: CircuitBreakerRegistry,
+    error: Throwable,
+    alias: String,
+): Boolean =
+    registry
+        .circuitBreaker(alias)
+        .circuitBreakerConfig.ignoreExceptionPredicate
+        .test(error)
+
+/** A registry whose bulkheads hold exactly one permit and wait [maxWait] for it - by default not at all. */
+fun singlePermitBulkheads(maxWait: Duration = Duration.ZERO): BulkheadRegistry =
+    BulkheadRegistry.of(
+        BulkheadConfig
+            .custom()
+            .maxConcurrentCalls(1)
+            .maxWaitDuration(maxWait)
+            .build(),
+    )

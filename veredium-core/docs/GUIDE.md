@@ -36,8 +36,14 @@ engine; see [Configuration](#configuration). The core is the same for every engi
   `timeLimiterTimeout` and `responseTimeout`, one contract for both stacks;
 - the **per-call log and validation** (`eu.inqudium.veredium.core.client`): `ClientCallLog`, the
   transport lines a client writes under the caller's correlation keys, the verdict-driven severity
-  of its error line, the size sample and the Bean Validation of the decoded response; and
-  `ResponseBodyMetrics`, the UTF-8 size the sample is taken in.
+  of its error line, the size sample and the Bean Validation of the decoded response;
+  `ResponseBodyMetrics`, the UTF-8 size the sample is taken in; and `MeshClientPlan`, what both
+  client factories derive from `app.mesh` and their `validation` block, the same way on both;
+- the **engine lifecycle** (`eu.inqudium.veredium.core.engine`): the checks behind a stack's
+  engine selection, `EngineSet` (a factory's engines created together, used under a lock, released
+  against one deadline) and the bounded drain of an engine's in-flight exchanges;
+- `CallerMdc`: the caller's MDC carried onto a thread the caller never ran on - the blocking
+  decorator's worker and the reactive client's signal hooks.
 
 Nothing in here knows an HTTP stack. A host does not depend on this module directly; it comes
 with the client module the host chooses. The decision to cut the modules this way is
@@ -86,9 +92,10 @@ consults them as the last step of building each `instances.<alias>` entry, so th
 metric and health binders bind to is already the final one. `MeshResilienceStartupGuard` fails
 the context when an alias is not declared under all three `resilience4j.<layer>.instances` (the
 instance would silently run on the registry default) or when the customizer's effect is not
-observable on the instance the registry serves, and logs a WARN when the mesh bulkheads together
-admit more calls (`sum(max-concurrent-calls)`) than the shared pool has connections
-(`app.mesh.defaults.transport.max-connections`). Each stack's auto-configuration `@Import`s
+observable on the instance the registry serves, and logs a WARN when the bulkheads of the aliases
+on one connection pool together admit more calls (`sum(max-concurrent-calls)`) than that pool has connections -
+per pool the client factories report, one per engine; the JDK client has no bound and is not checked
+([What the guard warns about](mesh-timeout.md)). Each stack's auto-configuration `@Import`s
 `MeshResilienceConfiguration` (the `app.mesh` binding, the ladder logger) next to its registrar, so a host that
 depends on its stack's module gets all of it.
 

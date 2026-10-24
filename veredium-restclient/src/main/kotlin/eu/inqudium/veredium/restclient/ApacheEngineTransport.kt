@@ -71,6 +71,7 @@ internal class ApacheEngineTransport(
     private val pool = settings.pool
     private val window = settings.window
     private val logger = settings.logger
+    private val meterRegistry: MeterRegistry? = settings.meterRegistry
 
     /** Name of the single shared Apache pool: the [RestClientMetrics.POOL_TAG] value on its gauges, its evictor's thread name. */
     override val name: String = RestClientMetrics.POOL_NAME
@@ -131,7 +132,7 @@ internal class ApacheEngineTransport(
 
     /** The pool gauges registered in the host's registry, removed again in [shutdown]. */
     private val boundPoolMeters: List<Meter> =
-        settings.meterRegistry?.let { registry ->
+        meterRegistry?.let { registry ->
             val before = registry.meters.toSet()
             // Pool metrics: the same question the reactor twin's `.metrics(true)` answers - how full is the pool.
             // Apache's own binder (httpclient5-observation; Micrometer deprecated its hc5 binder in favour of it)
@@ -149,8 +150,6 @@ internal class ApacheEngineTransport(
             )
             registry.meters.filterNot { it in before }
         } ?: emptyList()
-
-    private val meterRegistry: MeterRegistry? = settings.meterRegistry
 
     /** The per-endpoint transports, kept so [shutdown] can close them ahead of the pool they share. */
     private val httpClients = CopyOnWriteArrayList<CloseableHttpClient>()
@@ -202,7 +201,7 @@ internal class ApacheEngineTransport(
     override val notApplied: List<String> = emptyList()
 
     override val poolMeters: String =
-        if (settings.meterRegistry != null) {
+        if (meterRegistry != null) {
             "${RestClientMetrics.POOL_METER_PREFIX}.pool.{leased,available,pending}{${RestClientMetrics.POOL_TAG}=$name}"
         } else {
             "none (no MeterRegistry)"

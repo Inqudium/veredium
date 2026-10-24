@@ -10,16 +10,18 @@ import java.time.Duration
 /**
  * GLOBAL configuration for the RestClients produced by [ResilientRestClientFactory] - everything NOT
  * per-endpoint. The per-endpoint config (base URL, Host, timeout ladder) lives in `app.mesh.endpoints[]`,
- * so one factory serves several backends from that tree with one shared connection [pool].
+ * so one factory serves several backends from that tree with one connection pool per engine ([pool]).
  *
- * Only knobs with no mesh equivalent stay here: `maxInMemorySize`, the pool lifecycle and the HTTP [engine]. The
- * mesh transport config owns `maxConnections` / `pendingAcquireTimeout`, the ladder owns the response timeout.
+ * Only knobs with no mesh equivalent stay here: [maxInMemorySize], the pool lifecycle and the HTTP [engine]. The
+ * mesh transport config owns [eu.inqudium.veredium.core.mesh.MeshProperties.Transport.maxConnections] /
+ * [eu.inqudium.veredium.core.mesh.MeshProperties.Transport.pendingAcquireTimeoutMs], the ladder owns the response
+ * timeout.
  *
  * Every value is checked while BINDING, the way [eu.inqudium.veredium.core.mesh.MeshProperties] and
- * [eu.inqudium.veredium.core.mesh.ResolvedTimeouts] do it - and for the
- * same reason: a wrong number here does not announce itself. It binds, the context starts, and the effect
- * shows up as a runtime symptom that points anywhere but at the configuration. The messages therefore name
- * the PROPERTY KEY, not the Kotlin field, because the key is what the person reading the failure has to edit.
+ * [eu.inqudium.veredium.core.mesh.ResolvedTimeouts] do it - and for the same reason: a wrong number here does not
+ * announce itself. It binds, the context starts, and the effect shows up as a runtime symptom that points anywhere
+ * but at the configuration. The messages therefore name the PROPERTY KEY, not the Kotlin field, because the key is
+ * what the person reading the failure has to edit.
  */
 @ConfigurationProperties(prefix = "app.restclient")
 data class RestClientProperties(
@@ -33,14 +35,13 @@ data class RestClientProperties(
      * the same reason (see [RestClientVerdicts.clientSideFailure]).
      *
      * **Why 256 KB and not less.** This is the WebClient twin's ceiling, kept so that the two modules size their
-     * buffers identically against the same backends. 8 KB is too small for a list response from these backends:
-     * an access-profile list exceeds it, and a call refused on its buffer spends its whole retry cap on the same
-     * answer.
+     * buffers identically against the same backends. 8 KB is too small for a typical JSON list response, and a
+     * call refused on its buffer spends its whole retry cap on the same answer.
      *
-     * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and the shared pool is bounded
-     * at `maxConnections` (100, [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst case is ~25 MB of
-     * response buffers; at the 1 MB some other clients use it would be ~100 MB, which is real money on a
-     * service that otherwise needs little heap.
+     * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and the mesh bulkheads admit
+     * `maxConnections` calls in all (100, [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst
+     * case is ~25 MB of response buffers; at the 1 MB some other clients use it would be ~100 MB, which is real
+     * money on a service that otherwise needs little heap.
      *
      * **Why a limit at all** - see the range check in `init`: without one, a single degenerate response takes
      * the pod down, and the failure mode of getting it wrong is documented there.
@@ -100,7 +101,7 @@ data class RestClientProperties(
     /**
      * The lifecycle knobs of the shared connection pool. Written for Apache HttpClient 5, the default engine, and
      * applied there in full; the other engines take what they have an equivalent for - Reactor Netty all three,
-     * Jetty `maxIdleTime` (its connection idle timeout) and `maxLifeTime` (its pool's max duration, checked at
+     * Jetty [maxIdleTime] (its connection idle timeout) and [maxLifeTime] (its pool's max duration, checked at
      * lease time), the JDK engine none, since its pool is configurable only through JVM-wide system properties.
      * Each engine's startup line names the knobs it applies and the ones it does not.
      *
@@ -111,8 +112,9 @@ data class RestClientProperties(
      */
     data class Pool(
         /**
-         * Evict a connection that sat idle in the pool for longer than this. Enforced by the factory's eviction
-         * schedule (`closeIdle`), every [evictInBackground].
+         * Evict a connection that sat idle in the pool for longer than this. On the Apache engine enforced by its
+         * eviction schedule (`closeIdle`), every [evictInBackground]; the other engines apply it by their own
+         * mechanism or not at all ([Pool]).
          *
          * Must be positive. Zero has no reading the engines agree on: Reactor Netty evicts every idle connection at
          * once (no keep-alive at all), Jetty takes it as "no idle timeout", Apache closes all idle connections at
@@ -125,8 +127,9 @@ data class RestClientProperties(
          */
         val maxLifeTime: Duration = Duration.ofMinutes(5),
         /**
-         * How often the factory's eviction schedule runs `closeIdle` / `closeExpired` on the pool. Zero
-         * switches background eviction off, the same reading Reactor Netty gives the value.
+         * How often the Apache engine's eviction schedule runs `closeIdle` / `closeExpired` on its pool; Reactor
+         * Netty's `evictInBackground` takes the same value, Jetty and the JDK engine have no counterpart ([Pool]).
+         * Zero switches background eviction off, the same reading Reactor Netty gives the value.
          */
         val evictInBackground: Duration = Duration.ofSeconds(30),
     ) {
@@ -201,8 +204,9 @@ data class RestClientProperties(
      * `ObservationRegistry` bean at all Boot wires nothing and it is a NOOP.
      *
      * Unlike the WebClient twin there is no JVM-wide hook to gate: the observation reaches the exchange across
-     * the blocking decorator's thread hand-off because [eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator] reopens the caller's
-     * observation scope on the worker thread - a per-call, local act, not process-wide state.
+     * the blocking decorator's thread hand-off because
+     * [eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator] reopens the caller's observation scope on
+     * the worker thread - a per-call, local act, not process-wide state.
      *
      * This is DELIBERATELY self-contained: it resolves from this module's own property and reads no other
      * module's switch - the adapter traces its HTTP calls whatever else is on the host's classpath. The

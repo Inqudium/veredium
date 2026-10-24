@@ -36,7 +36,8 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  *
  * ## What it checks
  *
- * For every endpoint of [MeshProperties.resolveAll]:
+ * For every endpoint this guard's [stack] owns ([MeshProperties.endpointsOwnedBy]) - with two stacks in one
+ * context, each stack's guard probes its own aliases with its own verdicts:
  *
  *  1. **Declared** - `resilience4j.<layer>.instances.<alias>` exists in the bound properties for the circuit
  *     breaker, the time limiter AND the bulkhead. Read off the properties, not the registry: the registry holds
@@ -69,10 +70,11 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  * a deliberately over-committed pool can be right for a host whose backends are never busy at once, so it is a
  * WARN naming both numbers and every alias, not a failed start. Which aliases share a pool is the client
  * modules' knowledge - each engine of a client factory has a pool of its own - so the pools come from the
- * [MeshConnectionPools] beans the factories are; a pool without a bound (the JDK client) is not
- * checked. Without such a bean the sum runs over ALL mesh aliases against the one pool the mesh transport
- * describes. Per engine the sum is exact for Apache's blocking pool (one total cap for every route) and
- * conservative where the cap is per remote address and an endpoint has a `base-url` of its own.
+ * [MeshConnectionPools] beans the factories are; a pool without a bound (the JDK client) is not checked, and
+ * only the aliases of [MeshProperties.endpointsOwnedBy] are summed. Without such a bean the sum runs over those
+ * aliases against the one pool the mesh transport describes. Per engine the sum is exact for Apache's blocking
+ * pool (one total cap for every route) and conservative where the cap is per remote address and an endpoint has
+ * a `base-url` of its own.
  * The values are read off the registry's instances, i.e. after base config and instance properties were
  * merged; the wiring check guarantees there is one per alias by then.
  *
@@ -86,10 +88,6 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  *
  * The benign-4xx probe comes from the stack ([BreakerVerdicts.benignClientErrorProbe]): the record predicate is
  * applied to a 404 in the exact shape that stack throws, which is the only shape its policy recognises.
- *
- * Each stack has its own guard ([stack]), and it checks the endpoints that stack owns
- * ([MeshProperties.endpointsOwnedBy]) - with two stacks in one context, each probes its own aliases with its own
- * verdicts and sizes its own pools.
  */
 class MeshResilienceStartupGuard(
     private val meshProperties: MeshProperties,
@@ -109,7 +107,7 @@ class MeshResilienceStartupGuard(
      */
     private val connectionPools: () -> List<MeshConnectionPool> = { emptyList() },
 ) : SmartInitializingSingleton {
-    private val log: Logger = LoggerFactory.getLogger(MeshResilienceStartupGuard::class.java)
+    private val logger: Logger = LoggerFactory.getLogger(MeshResilienceStartupGuard::class.java)
 
     override fun afterSingletonsInstantiated() = verify()
 
@@ -127,9 +125,9 @@ class MeshResilienceStartupGuard(
         }
         warnIfBulkheadsOvercommitThePool(endpoints)
         val aliases = endpoints.joinToString(", ") { it.alias }
-        verdicts.clientSideFailure.logPolicy(log.atInfo(), aliases)
-        verdicts.httpExchangeError.logPolicy(log.atInfo(), aliases)
-        endpoints.forEach { endpoint -> log.info("mesh backends [{}] {}: {}", endpoint.alias, endpoint.triplet, decisionOf(endpoint)) }
+        verdicts.clientSideFailure.logPolicy(logger.atInfo(), aliases)
+        verdicts.httpExchangeError.logPolicy(logger.atInfo(), aliases)
+        endpoints.forEach { endpoint -> logger.info("mesh backends [{}] {}: {}", endpoint.alias, endpoint.triplet, decisionOf(endpoint)) }
     }
 
     private fun problemsOf(endpoint: ResolvedTimeouts): List<String> {
@@ -235,7 +233,7 @@ class MeshResilienceStartupGuard(
                     .associateWith { bulkheadRegistry.bulkhead(it).bulkheadConfig.maxConcurrentCalls }
             val total = permits.values.sumOf { it.toLong() }
             if (total <= maxConnections) return@forEach
-            log.warn(
+            logger.warn(
                 "The mesh bulkheads admit more concurrent calls than the connection pool '{}' holds: " +
                     "sum(resilience4j.bulkhead.instances.<alias>.max-concurrent-calls)={} > " +
                     "app.mesh.defaults.transport.max-connections={} ({}). The excess queues for a connection instead " +

@@ -65,7 +65,7 @@ class HttpExchangeErrorPolicy(
     ) {
         logBuilder
             .setMessage(
-                "CircuitBreaker now ignores benign 4xx (every client error except 408/429) for backend(s): " +
+                "CircuitBreaker now counts benign 4xx (every client error except 408/429) as a success for backend(s): " +
                     "{} - a business-case rejection cannot open a breaker against a healthy backend",
             ).addArgument(name)
             .log()
@@ -116,13 +116,13 @@ class ClientSideFailurePolicy(
      * of an exchange into a `ResourceAccessException`, and its reactive client wraps a codec failure on an
      * otherwise successful response into a `WebClientResponseException` reporting **200 OK** with the real
      * cause underneath. Matching on the thrown type alone - which is all `ignoreExceptions(Class...)` does -
-     * would never see either, and the entry would be a silent no-op; the reactive stack saw exactly that
-     * happen.
+     * would never see either, and the entry would be a silent no-op.
      *
      * Walking the chain is safe here rather than merely convenient: a genuine backend failure does NOT carry
      * one of these as a cause. A 5xx whose error body exceeds the buffer limit yields a plain status exception
-     * with no limit exception underneath - on both stacks, each pinned by its own `ClientSideFailure*Test` -
-     * so it is still recorded.
+     * with no limit exception underneath - on both stacks, each pinned by "should still record a genuine backend
+     * failure that carries a large error body" in its `RestClientVerdictsTest` / `WebClientVerdictsTest` - so it
+     * is still recorded.
      */
     fun isClientSideFailure(error: Throwable): Boolean = causeChain(error).any { candidate -> clientSideFailures.any { it.isInstance(candidate) } }
 
@@ -151,17 +151,19 @@ class ClientSideFailurePolicy(
             .log()
     }
 
-    /**
-     * [error] and its causes, outermost first, at most [MAX_CAUSE_DEPTH] of them. The self-cause guard only
-     * catches a throwable that is its OWN cause; a longer cycle is stopped by the depth bound alone.
-     */
-    private fun causeChain(error: Throwable): Sequence<Throwable> =
-        generateSequence(error) { it.cause.takeIf { cause -> cause !== it } }
-            .take(MAX_CAUSE_DEPTH)
-
     companion object {
         /** Bound on the cause walk, so a pathological cause chain cannot spin. */
         const val MAX_CAUSE_DEPTH: Int = 10
+
+        /**
+         * [error] and its causes, outermost first, at most [MAX_CAUSE_DEPTH] of them. The self-cause guard only
+         * catches a throwable that is its OWN cause; a longer cycle is stopped by the depth bound alone. The one
+         * cause walk of the module, offered to the client stacks so that a stack reading its own exception off a
+         * chain walks it with the same bound.
+         */
+        fun causeChain(error: Throwable): Sequence<Throwable> =
+            generateSequence(error) { it.cause.takeIf { cause -> cause !== it } }
+                .take(MAX_CAUSE_DEPTH)
     }
 }
 
