@@ -18,21 +18,20 @@ the *cursus publicus*: the mount that carries the envoy to the foreign party and
 sibling [Legatium](https://github.com/Inqudium/legatium) records what the envoy's call came to;
 Veredium is the ride itself.
 
-> The project is at its beginning: this repository holds the build, the workflows and the
-> documentation site, set up from the sibling projects, and the first module. The client
-> itself follows.
-
 ## Quickstart
 
 [![veredium-core on Maven Central](https://img.shields.io/maven-central/v/eu.inqudium/veredium-core.svg?label=veredium-core)](https://central.sonatype.com/artifact/eu.inqudium/veredium-core)
 
-The badge shows the current release on Maven Central — use that version where the snippet
-says `...`:
+A host declares the client module of the stack it calls with - `veredium-restclient` for the
+blocking client, `veredium-webclient` for the reactive one, both for a host that runs the two
+side by side ([ADR-0003](docs/adr/ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md)).
+Each brings `veredium-core` along. The badge shows the current release on Maven Central — use
+that version where the snippet says `...`:
 
 ```xml
 <dependency>
     <groupId>eu.inqudium</groupId>
-    <artifactId>veredium-core</artifactId>
+    <artifactId>veredium-restclient</artifactId>
     <version>...</version>
 </dependency>
 ```
@@ -55,8 +54,8 @@ group, the fictional periodic table of **Inqudium**.
 | Module | Role | Root package |
 |---|---|---|
 | [`veredium-core`](veredium-core/README.md) | the stack-neutral core both clients share: mesh timeout ladder, breaker verdicts, Resilience4j wiring | `eu.inqudium.veredium.core` |
-| [`veredium-restclient`](veredium-restclient/README.md) | the blocking client: Spring `RestClient` over Apache HttpClient 5, mesh timeout ladder, Resilience4j | `eu.inqudium.veredium.restclient` |
-| [`veredium-webclient`](veredium-webclient/README.md) | the reactive client: Spring `WebClient` over Reactor Netty, mesh timeout ladder, Resilience4j | `eu.inqudium.veredium.webclient` |
+| [`veredium-restclient`](veredium-restclient/README.md) | the blocking client: Spring `RestClient` over a selectable HTTP engine (default Apache HttpClient 5; [ADR-0004](docs/adr/ADR-0004-the-http-engine-is-the-hosts-choice.md)), mesh timeout ladder, Resilience4j | `eu.inqudium.veredium.restclient` |
+| [`veredium-webclient`](veredium-webclient/README.md) | the reactive client: Spring `WebClient` over a selectable HTTP engine (default Reactor Netty; [ADR-0004](docs/adr/ADR-0004-the-http-engine-is-the-hosts-choice.md)), mesh timeout ladder, Resilience4j | `eu.inqudium.veredium.webclient` |
 
 [`veredium-examples`](veredium-examples/README.md) shows a host using veredium: one Spring Boot application per
 calling style of the two clients (blocking, asynchronous, reactive), one that runs both clients in one context, and
