@@ -26,7 +26,7 @@ import java.time.Duration
  * @property connectTimeout HttpClient 4's connect timeout.
  * @property responseTimeout HttpClient 4's socket timeout: the bound on every read, the head's and the body's.
  *   It sits below the TimeLimiter budget, so normally the transport trips first.
- * @property maxConnections The pool size; matches the bulkhead, so a permit always finds a connection.
+ * @property maxConnections The pool size; at least the bulkhead's permits, so a permit always finds a connection.
  */
 @ConfigurationProperties("legacy-directory")
 data class LegacyDirectoryProperties(
@@ -43,9 +43,8 @@ data class LegacyDirectoryProperties(
  * - the decorator, over the auto-configured registries, with worker threads named after the call
  *   (`legacy-call-<n>`) and the host's observation registry when there is one. It is shut down with the
  *   context (`@PreDestroy` on [BlockingResilienceDecorator.shutdown]);
- * - the breaker customizer the decorator needs: its pipeline raises three failures itself - a full bulkhead, an
- *   interrupted caller, a call after shutdown - and a breaker that counted them would open against a backend
- *   that was never called. The customizer ignores those listed in
+ * - the breaker customizer the decorator needs: its pipeline raises failures of its own, and a breaker that counted
+ *   them would open against a backend that was never called. The customizer ignores those,
  *   [BlockingResilienceDecorator.SELF_INFLICTED_FAILURES], and also [UnknownCustomerException], the "customer
  *   unknown" answer, which is a valid answer of the backend, not a fault;
  * - the native HttpClient 4, closed with the context.
@@ -75,9 +74,9 @@ class DecoratorConfiguration {
         }
 
     /**
-     * HttpClient 4 with the directory's bounds and nothing it does on its own: no retries (a retried request would
-     * run past the budget unseen, and the default handler retries an interrupted read's `SocketException`), no
-     * redirects, no cookies.
+     * HttpClient 4 with the directory's bounds and nothing it does on its own: no retries, no redirects, no cookies.
+     * A retried request would run past the budget unseen. Assumption: HttpClient 4's default retry handler (4.5.14)
+     * retries an interrupted read's `SocketException`.
      */
     @Bean
     fun legacyDirectoryHttpClient(properties: LegacyDirectoryProperties): CloseableHttpClient =

@@ -18,8 +18,8 @@ import java.time.Duration
  * [ResilientRestClientFactory], the order search reactive, through [ResilientWebClientFactory]. Each factory serves
  * only its own stack's endpoints - asked for the other's, it refuses and names the owner.
  *
- * Its [BaseAdapter] budgets are the ceiling over both clients, as in the single-stack adapters: both stacks derive
- * them from the same ladder, so the two values compare across stacks.
+ * Its [BaseAdapter] budgets are the ceiling over both clients: both stacks derive them from the same ladder, so the
+ * two values compare across stacks.
  */
 @Component
 class MixedCustomerAdapter(
@@ -29,14 +29,14 @@ class MixedCustomerAdapter(
     private val customers = restClients.create(Backends.CUSTOMERS)
     private val orderSearch = webClients.create(Backends.ORDER_SEARCH)
 
-    /** The pessimistic ceiling over both clients, as in the blocking adapter. */
+    /** The pessimistic ceiling over both clients: what one call of this adapter may take at most. */
     override val timeLimiterTimeout: Duration
         get() = maxOf(customers.timeLimiterTimeout, orderSearch.timeLimiterTimeout)
 
     override val responseTimeout: Duration
         get() = maxOf(customers.responseTimeout, orderSearch.responseTimeout)
 
-    /** The customer with [id], or `null` for a 404 - a blocking call, as in the blocking example. */
+    /** The customer with [id], or `null` for a 404 - a blocking call. */
     fun customer(id: String): Customer? =
         try {
             customers.get(Customer::class.java) { it.uri("/v1/customers/{id}", id) }
@@ -44,7 +44,7 @@ class MixedCustomerAdapter(
             null
         }
 
-    /** The orders of [customerId] - a cold [Mono], as in the reactive example. */
+    /** The orders of [customerId] - a cold [Mono]. */
     fun orders(customerId: String): Mono<OrderPage> =
         orderSearch.post(OrderPage::class.java, OrderSearch(customerId)) {
             it.uri("/v1/orders/search").contentType(MediaType.APPLICATION_JSON)

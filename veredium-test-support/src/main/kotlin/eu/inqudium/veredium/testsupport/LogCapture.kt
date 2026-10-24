@@ -9,14 +9,14 @@ import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * A Logback appender that captures the events [accept] lets through, from any thread - Logback's `ListAppender` is not
- * safe for that - and waits, bounded, for the ones a test expects. Attach it with [capturing], which also detaches
- * and stops it.
+ * A Logback appender that captures the events [accept] lets through, from any thread, and waits, bounded, for the ones
+ * a test expects. Attach it with [capturing], which also detaches and stops it. Assumption: Logback's `ListAppender`
+ * (1.5.38) is not safe for appends from several threads.
  *
- * Each event is snapshotted when it is appended (`prepareForDeferredProcessing`): Logback captures the MDC property
- * map LAZILY, on first read, and a scoped MDC (legatium's emission scope) holds its keys only for the duration of the
- * log statement - read later on the test thread, the entries would be gone. A production async appender does the same
- * before it enqueues.
+ * Each event is snapshotted when it is appended (`prepareForDeferredProcessing`). Assumption: Logback (1.5.38)
+ * captures the MDC property map LAZILY, on first read, and a scoped MDC (legatium's emission scope) holds its keys
+ * only for the duration of the log statement - read later on the test thread, the entries would be gone. A production
+ * async appender does the same before it enqueues.
  */
 class CapturingAppender(
     private val accept: (ILoggingEvent) -> Boolean = { true },

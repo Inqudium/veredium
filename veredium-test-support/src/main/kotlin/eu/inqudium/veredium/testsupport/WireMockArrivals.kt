@@ -7,10 +7,10 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 
 /**
- * What a request to a URL triggers once it reached WireMock, per test - behind ONE listener per server: WireMock's
- * `resetAll()` does not remove a request listener, so one added per test would pile up and fire for a later test's
- * request to the same URL. Register it once with the server (`addMockServiceRequestListener`) and [clear] it before
- * every test.
+ * What a request to a URL triggers once it reached WireMock, per test - behind ONE listener per server. Assumption:
+ * WireMock's `resetAll()` (3.13.2) does not remove a request listener, so one added per test would pile up and fire
+ * for a later test's request to the same URL. Register it once with the server (`addMockServiceRequestListener`) and
+ * [clear] it before every test.
  */
 class WireMockArrivals : RequestListener {
     private val actions = ConcurrentHashMap<String, () -> Unit>()
