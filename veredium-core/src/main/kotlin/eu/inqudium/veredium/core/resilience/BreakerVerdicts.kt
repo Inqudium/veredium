@@ -151,17 +151,19 @@ class ClientSideFailurePolicy(
             .log()
     }
 
-    /**
-     * [error] and its causes, outermost first, at most [MAX_CAUSE_DEPTH] of them. The self-cause guard only
-     * catches a throwable that is its OWN cause; a longer cycle is stopped by the depth bound alone.
-     */
-    private fun causeChain(error: Throwable): Sequence<Throwable> =
-        generateSequence(error) { it.cause.takeIf { cause -> cause !== it } }
-            .take(MAX_CAUSE_DEPTH)
-
     companion object {
         /** Bound on the cause walk, so a pathological cause chain cannot spin. */
         const val MAX_CAUSE_DEPTH: Int = 10
+
+        /**
+         * [error] and its causes, outermost first, at most [MAX_CAUSE_DEPTH] of them. The self-cause guard only
+         * catches a throwable that is its OWN cause; a longer cycle is stopped by the depth bound alone. The one
+         * cause walk of the module, offered to the client stacks so that a stack reading its own exception off a
+         * chain walks it with the same bound.
+         */
+        fun causeChain(error: Throwable): Sequence<Throwable> =
+            generateSequence(error) { it.cause.takeIf { cause -> cause !== it } }
+                .take(MAX_CAUSE_DEPTH)
     }
 }
 

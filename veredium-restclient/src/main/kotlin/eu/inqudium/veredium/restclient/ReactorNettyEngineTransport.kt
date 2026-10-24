@@ -7,6 +7,7 @@ import io.micrometer.core.instrument.Meter
 import io.micrometer.core.instrument.MeterRegistry
 import io.netty.channel.ChannelOption
 import io.netty.resolver.DefaultAddressResolverGroup
+import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatusCode
 import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.http.client.ClientHttpResponse
@@ -83,18 +84,18 @@ internal class ReactorNettyEngineTransport(
     private val window = settings.window
     private val logger = settings.logger
 
-    override val name: String = POOL_NAME
+    override val name: String = ENGINE_NAME
 
     /** The pools' statistics for the drain, and their gauges when the host has a registry. */
     private val pools = PoolMeters(settings.meterRegistry)
 
     /** This engine's event loops, daemon threads named after the pool; disposed in [shutdown]. */
-    internal val loops: LoopResources = LoopResources.create(POOL_NAME, LoopResources.DEFAULT_IO_WORKER_COUNT, true)
+    internal val loops: LoopResources = LoopResources.create(ENGINE_NAME, LoopResources.DEFAULT_IO_WORKER_COUNT, true)
 
     /** This engine's connection pool; disposed in [shutdown]. */
     internal val provider: ConnectionProvider =
         ConnectionProvider
-            .builder(POOL_NAME)
+            .builder(ENGINE_NAME)
             .maxConnections(meshTransport.maxConnections)
             .pendingAcquireTimeout(Duration.ofMillis(meshTransport.pendingAcquireTimeoutMs))
             .maxIdleTime(pool.maxIdleTime)
@@ -105,8 +106,13 @@ internal class ReactorNettyEngineTransport(
             .metrics(true) { pools }
             .build()
 
-    /** Spring's request-body writer and the body readers of [HandOffInputStream]; virtual, owned here. */
-    private val offload: ExecutorService = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("$POOL_NAME-io-", 0).factory())
+    /**
+     * The wait for each response head ([handOff] in [requestFactory]), Spring's request-body writer and the body
+     * readers of [HandOffInputStream]; virtual, owned here. The head wait is the user that matters at shutdown:
+     * [shutdown]'s `shutdownNow` of this executor is what ends a head wait the disposed event loops no longer
+     * signal (class KDoc, "The wait for the head").
+     */
+    private val offload: ExecutorService = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("$ENGINE_NAME-io-", 0).factory())
 
     private val httpClient: HttpClient =
         HttpClient
@@ -146,7 +152,7 @@ internal class ReactorNettyEngineTransport(
 
     override val poolMeters: String =
         if (settings.meterRegistry != null) {
-            "${Metrics.CONNECTION_PROVIDER_PREFIX}.*{${Metrics.NAME}=$POOL_NAME}"
+            "${Metrics.CONNECTION_PROVIDER_PREFIX}.*{${Metrics.NAME}=$ENGINE_NAME}"
         } else {
             "none (no MeterRegistry)"
         }
@@ -275,7 +281,7 @@ internal class ReactorNettyEngineTransport(
 
         override fun getBody(): InputStream = body ?: HandOffInputStream(delegate.body, offload).also { body = it }
 
-        override fun getHeaders() = delegate.headers
+        override fun getHeaders(): HttpHeaders = delegate.headers
 
         override fun getStatusCode(): HttpStatusCode = delegate.statusCode
 
@@ -357,7 +363,7 @@ internal class ReactorNettyEngineTransport(
 
     companion object {
         /** The engine's [name]: the pool's `name` tag, the event-loop and offload threads' prefix. */
-        const val POOL_NAME: String = "restclient-reactor-netty"
+        const val ENGINE_NAME: String = "restclient-reactor-netty"
 
         /**
          * Runs [blocking] on a short-lived virtual thread of [offload] while the calling worker waits for it
@@ -394,11 +400,11 @@ internal class ReactorNettyEngineTransport(
                 Thread.currentThread().interrupt()
                 throw InterruptedIOException("$what interrupted").apply { initCause(e) }
             } catch (e: ExecutionException) {
-                when (val cause = e.cause) {
-                    is IOException -> throw cause
-                    is RuntimeException -> throw cause
-                    is Error -> throw cause
-                    else -> throw IOException(cause)
+                throw when (val cause = e.cause) {
+                    is IOException -> cause
+                    is RuntimeException -> cause
+                    is Error -> cause
+                    else -> IOException(cause)
                 }
             }
         }

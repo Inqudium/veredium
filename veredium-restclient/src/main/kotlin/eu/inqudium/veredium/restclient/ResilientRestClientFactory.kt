@@ -37,12 +37,12 @@ import java.util.concurrent.ScheduledExecutorService
  * ## Engines
  *
  * Which HTTP engine carries a backend's exchanges is `app.restclient.engine` ([RestClientProperties.Engine]):
- * Apache HttpClient 5 by default, or the JDK
- * client, Jetty or Reactor Netty, for all backends or per alias. Each engine in use is created ONCE, when the
- * factory is - an engine no backend selects is never created - and shared by the backends on it; the factory
- * owns it and closes it in [shutdown]. Its request factory goes onto the backend's clone of Boot's builder and
- * nowhere else: nothing here reads or writes Boot's `spring.http.clients.*` settings or registers a bean a host's
- * other clients could pick up, so the property changes this module's clients and no other client of the host.
+ * Apache HttpClient 5 by default, or the JDK client, Jetty or Reactor Netty, for all backends or per alias. Each
+ * engine in use is created ONCE, when the factory is - an engine no backend selects is never created - and shared
+ * by the backends on it; the factory owns it and closes it in [shutdown]. Its request factory goes onto the
+ * backend's clone of Boot's builder and nowhere else: nothing here reads or writes Boot's `spring.http.clients.*`
+ * settings or registers a bean a host's other clients could pick up, so the property changes this module's clients
+ * and no other client of the host.
  *
  * Everything above the request factory is the same on every engine: the bounded body read over the response
  * stream, the status mapping, the Host / User-Agent / Accept headers, legatium's interceptor, the observation and
@@ -58,27 +58,34 @@ class ResilientRestClientFactory(
     private val meshProperties: MeshProperties,
     private val resilience: BlockingResilienceDecorator,
     private val objectMapper: ObjectMapper,
-    // Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; Spring injects
-    // the auto-configured factory when a Bean Validation provider is on the classpath. Absent -> validation
-    // cannot run for ANY backend, whatever the properties say, which the startup line reports rather than
-    // leaving it to be discovered. See `ResponseValidation` for why the FACTORY rather than a Validator.
+    /**
+     * Nullable ON PURPOSE: an optional dependency, so tests can construct the factory directly; Spring injects the
+     * auto-configured factory when a Bean Validation provider is on the classpath. Absent -> validation cannot run
+     * for ANY backend, whatever the properties say, which the startup line reports rather than leaving it to be
+     * discovered. See [eu.inqudium.veredium.core.validation.ResponseValidation] for why the FACTORY rather than a
+     * Validator.
+     */
     validatorFactory: ValidatorFactory? = null,
-    // Nullable like the two above: an optional dependency, so a direct (test) construction and a minimal
-    // context both work without one. Absent -> neither the pool meters nor the response-size summary are
-    // registered and the per-call path records nothing; nothing else about the client changes.
+    /**
+     * Nullable like [validatorFactory]: an optional dependency, so a direct (test) construction and a minimal
+     * context both work without one. Absent -> neither the pool meters nor the response-size summary are
+     * registered and the per-call path records nothing; nothing else about the client changes.
+     */
     private val meterRegistry: MeterRegistry? = null,
-    // Boot's auto-configured builder (prototype scope: this factory owns its instance and clones it per
-    // backend). Every RestClientCustomizer the host declares has already been applied to it - Boot's own
-    // (observation registry + convention, message converters, request factory) and the host's.
-    //
-    // REQUIRED on purpose, unlike the optional dependencies above: those are optional because the factory
-    // works sensibly without them. Without this one it would work DIFFERENTLY - a bare builder from the static
-    // factory carries no host customizer and no observation registry, so the http.client.requests span would
-    // vanish without a log line. Spring treats a Kotlin default as an optional dependency and would take exactly
-    // that silent path when the bean is absent; a required parameter makes a missing bean a context-start
-    // failure that names RestClient.Builder. A host that excludes RestClientAutoConfiguration declares its own
-    // RestClient.Builder bean. Tests that construct the factory directly pass a bare builder and say so at the
-    // call site.
+    /**
+     * Boot's auto-configured builder (prototype scope: this factory owns its instance and clones it per backend).
+     * Every `RestClientCustomizer` the host declares has already been applied to it - Boot's own (observation
+     * registry + convention, message converters, request factory) and the host's.
+     *
+     * REQUIRED on purpose, unlike the optional dependencies above: those are optional because the factory works
+     * sensibly without them. Without this one it would work DIFFERENTLY - a bare builder from the static factory
+     * carries no host customizer and no observation registry, so the http.client.requests span would vanish
+     * without a log line. Spring treats a Kotlin default as an optional dependency and would take exactly that
+     * silent path when the bean is absent; a required parameter makes a missing bean a context-start failure that
+     * names [RestClient.Builder]. A host that excludes `RestClientAutoConfiguration` declares its own
+     * [RestClient.Builder] bean. Tests that construct the factory directly pass a bare builder and say so at the
+     * call site.
+     */
     restClientBuilder: RestClient.Builder,
     /**
      * Monotonic clock for the ONE wait this factory makes - the drain deadline in [shutdown]. Injectable so the
@@ -154,6 +161,18 @@ class ResilientRestClientFactory(
             }
         }
 
+    /** The Apache engine's background eviction, when Apache is in use - see [ApacheEngineTransport.evictor]. */
+    internal val evictor: ScheduledExecutorService? get() = (transports.all[RestClientEngine.APACHE] as? ApacheEngineTransport)?.evictor
+
+    /** The engine transports this factory created - for the tests that pin which engines exist and that [shutdown] closes them. */
+    internal val engineTransports: Map<RestClientEngine, EngineTransport> get() = transports.all
+
+    /** Caches one client per logical name so [create] is idempotent - repeated calls return the same instance. */
+    private val cache = ConcurrentHashMap<String, ResilientRestClient>()
+
+    /** The request factory each built client runs on - what a test reads to prove which engine carries a backend. */
+    private val requestFactories = ConcurrentHashMap<String, ClientHttpRequestFactory>()
+
     init {
         // The engine of every backend, and per engine what of the mesh ladder and the pool settings it applies.
         // Worth the lines because an engine without a knob does not complain about the knob: the setting simply
@@ -180,18 +199,6 @@ class ResilientRestClientFactory(
                 aliases = engineByBackend.filterValues { it == engine }.keys,
             )
         }
-
-    /** The Apache engine's background eviction, when Apache is in use - see [ApacheEngineTransport.evictor]. */
-    internal val evictor: ScheduledExecutorService? get() = (transports.all[RestClientEngine.APACHE] as? ApacheEngineTransport)?.evictor
-
-    /** The engine transports this factory created - for the tests that pin which engines exist and that [shutdown] closes them. */
-    internal val engineTransports: Map<RestClientEngine, EngineTransport> get() = transports.all
-
-    /** Caches one client per logical name so [create] is idempotent - repeated calls return the same instance. */
-    private val cache = ConcurrentHashMap<String, ResilientRestClient>()
-
-    /** The request factory each built client runs on - what a test reads to prove which engine carries a backend. */
-    private val requestFactories = ConcurrentHashMap<String, ClientHttpRequestFactory>()
 
     /** The request factory the client of [backendName] was built on, or `null` before [create] built it. */
     internal fun requestFactoryOf(backendName: String): ClientHttpRequestFactory? = requestFactories[backendName]
@@ -237,6 +244,8 @@ class ResilientRestClientFactory(
      * Everything per-endpoint (base URL, Host header, timeouts, engine) comes from the `app.mesh.endpoints[]`
      * entry whose alias equals [backendName] and from its `app.restclient.engine` selection.
      *
+     * @throws IllegalArgumentException if the mesh endpoint with that alias belongs to the other client stack
+     *         (`app.mesh.endpoints[].stack`) - its client is that stack's factory's to build.
      * @throws IllegalStateException if no mesh endpoint with that alias is configured - failing fast at
      *         startup beats a confusing 404/connection error at the first call - or if the factory was already
      *         shut down and the client was not built before.
@@ -328,9 +337,10 @@ object RestClientMetrics {
     const val POOL_TAG: String = "pool"
 
     /**
-     * The Apache engine's pool name: the [POOL_TAG] value on its gauges and the stem of its evictor thread's name. A
-     * constant, not a property: a factory has at most one Apache pool, and no deployment runs two factories in one
-     * registry.
+     * The Apache engine's pool name: the [POOL_TAG] value on its gauges, the engine's name (what the other three
+     * engines call `ENGINE_NAME`) and the stem of its evictor thread's name. Named for the meter vocabulary it
+     * belongs to, being public. A constant, not a property: a factory has at most one Apache pool, and no deployment
+     * runs two factories in one registry.
      */
     const val POOL_NAME: String = "restclient-apache"
 

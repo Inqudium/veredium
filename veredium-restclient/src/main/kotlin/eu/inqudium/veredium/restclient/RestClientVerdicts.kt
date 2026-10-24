@@ -36,11 +36,10 @@ object RestClientVerdicts {
      *   breaker never sees because a cancellation carries no error signal - here it does, and without the entry
      *   a host that cancels callers routinely would open the circuit against a backend that was not even given
      *   the time to answer), and the `RejectedExecutionException` of a worker submitted after shutdown.
-     * - [ResponseBodyLimitExceededException]: the response exceeded `maxInMemorySize` (see
-     *   [RestClientProperties]). The backend answered correctly, with a 200; this process declined to buffer
-     *   the answer. The blocking counterpart of the reactive codec's `DataBufferLimitException`, raised by
-     *   this module's own bounded reader rather than by a Spring codec - which is why it is a type of this
-     *   module and not a Spring one.
+     * - [ResponseBodyLimitExceededException]: the response exceeded [RestClientProperties.maxInMemorySize]. The
+     *   backend answered correctly, with a 200; this process declined to buffer the answer. The blocking
+     *   counterpart of the reactive codec's `DataBufferLimitException`, raised by this module's own bounded reader
+     *   rather than by a Spring codec - which is why it is a type of this module and not a Spring one.
      *
      * The cause walk matters on this stack because Spring's blocking client wraps every `IOException` of the
      * exchange into a `ResourceAccessException`; the limit exception is thrown bare today, but the predicate

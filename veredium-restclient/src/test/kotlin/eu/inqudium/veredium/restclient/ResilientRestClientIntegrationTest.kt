@@ -296,7 +296,7 @@ class ResilientRestClientIntegrationTest {
         }
 
         @Test
-        fun `should surface a non-2xx response as Spring's status exception carrying the status and the body`() {
+        fun `should surface a 4xx response as Spring's status exception carrying the status and the body`() {
             // What is tested: the status handling of the exchange function, which replaces `retrieve()`'s default
             //   status handler - a 404 must surface exactly as Spring's own handler would raise it.
             // Success criteria: the exception is `HttpClientErrorException.NotFound`, carries status 404 and the
@@ -1268,7 +1268,7 @@ class ResilientRestClientIntegrationTest {
         }
 
         @Test
-        fun `should deliver a non-2xx on the future as Spring's status exception, unwrapped`() {
+        fun `should deliver a 4xx on the future as Spring's status exception, unwrapped`() {
             // What is tested: the failure contract of the future - the SAME exception the blocking form throws, so a
             //   handler can match on its type; get() adds only the ExecutionException every CompletableFuture adds.
             // Success criteria: `handle` sees `HttpClientErrorException.NotFound` itself, and `get()` throws an
@@ -1564,8 +1564,8 @@ class ResilientRestClientIntegrationTest {
 
         @Test
         fun `should close a pooled connection past its lifetime from the background evictor and stop it on shutdown`() {
-            // What is tested: the pool's lifecycle settings with non-zero values - `max-life-time` as the
-            //   connections' time-to-live and `evict-in-background` as the factory's own eviction schedule - and
+            // What is tested: the pool's lifecycle settings with non-zero values on the Apache engine - `max-life-time`
+            //   as the connections' time-to-live and `evict-in-background` as that engine's own eviction schedule - and
             //   that shutdown stops that schedule.
             // Success criteria: a keep-alive connection left idle in the pool after a call (the `available` gauge
             //   reads 1 right after it) is closed by the evictor once its 1 s lifetime has passed (the gauge drops

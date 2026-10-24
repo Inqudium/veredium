@@ -4,7 +4,8 @@
 
 The project's architecture decisions are the ADRs in [`docs/adr/`](../../docs/adr/README.md). This module's own
 decisions are recorded where they are argued — the POM
-comment (a self-contained blocking twin, no reactive dependency), `restclient-vs-webclient.md` (what maps to
+comment (the blocking client, no reactive dependency on a consumer's classpath, the optional engine libraries),
+`restclient-vs-webclient.md` (what maps to
 the twin and what deliberately differs, including §8 on the customizer wiring shared through `veredium-core`),
 `timeouts-bulkheads-threads.md`
 (the hand-off, the ladder, the bulkhead over an unbounded executor) and the KDoc of the classes concerned. Three

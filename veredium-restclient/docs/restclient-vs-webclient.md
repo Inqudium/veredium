@@ -20,7 +20,7 @@ so the differences are decisions on record rather than surprises in production.
 | veredium-webclient                    | veredium-restclient                    | Notes |
 |---------------------------------------|----------------------------------------|-------|
 | `ResilientWebClient`                  | `ResilientRestClient`                  | Same per-call pipeline; `get`/`post` return `T` or throw, `getAsync`/`postAsync` return a `CompletableFuture<T>` (§2). |
-| `ResilientWebClientFactory`           | `ResilientRestClientFactory`           | Same optional collaborators, same required `RestClient.Builder` bean from Boot, same startup lines. |
+| `ResilientWebClientFactory`           | `ResilientRestClientFactory`           | Same optional collaborators (`ValidatorFactory`, `MeterRegistry`), the stack's builder bean from Boot as the one required collaborator, same startup lines. The engine-selection checks are seamed differently: the blocking factory takes two injectable lambdas (`engineLibraryPresent`, `jdkAllowsHostHeader`) and checks inline, the reactive one takes the context's `ResourceLoader` and checks in `WebClientEngineChecks`. |
 | `ReactiveResilienceDecorator`         | `BlockingResilienceDecorator` (`veredium-core`) | Same order `CircuitBreaker(TimeLimiter(Bulkhead(call)))`, see §2. The blocking one is a component of the core, usable without this client; this module declares its bean in `VerediumRestClientAutoConfiguration`. |
 | `WebClientVerdicts` / `VerediumWebClientAutoConfiguration` | `RestClientVerdicts` / `VerediumRestClientAutoConfiguration` | Each stack's reading of the shared verdicts (`veredium-core`): the status-carrying exception (`WebClientResponseException` / `RestClientResponseException`), the client-side failures (`DataBufferLimitException` / `ResponseBodyLimitExceededException` + `InterruptedException` + `RejectedExecutionException`), the guard's 404 probe; the auto-configuration that imports the core's `MeshResilienceConfiguration` next to the stack's `MeshResilienceRegistrar` subclass (§8). |
 | `WebClientProperties` (`app.webclient`) | `RestClientProperties` (`app.restclient`) | Same keys except `pool.pending-acquire-max-count` (§3). |
@@ -40,8 +40,10 @@ verdicts object ([ADR-0001](../../docs/adr/ADR-0001-one-stack-neutral-core-modul
 
 The origin project's adapters and DTOs (`AccessProfileAdapter` and its siblings, the `agreement`/`party`/`profile`
 DTOs) did not come along: veredium is the client infrastructure only, and a host writes its adapters over
-`ResilientRestClient` or `ResilientWebClient` and implements `BaseAdapter`. The two client modules are
-alternatives, not companions - each brings its own factory and configuration, and a host picks one stack.
+`ResilientRestClient` or `ResilientWebClient` and implements `BaseAdapter`. Each client module brings its own
+factory and configuration; a host may depend on both and run both stacks in one context, each mesh endpoint then
+naming the stack that owns it in `app.mesh.endpoints[].stack`
+([ADR-0003](../../docs/adr/ADR-0003-each-mesh-endpoint-is-owned-by-one-client-stack.md)).
 
 ---
 
