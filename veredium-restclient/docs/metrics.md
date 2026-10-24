@@ -161,8 +161,9 @@ client recorded on the observation, which for I/O failures is Spring's wrapper, 
 | cancelled — TimeLimiter expiry or interrupted caller | `CLIENT_ERROR` | `UNKNOWN` | `ResourceAccessException` (cause `SocketException: Closed by interrupt`) |
 
 The causes in the last two rows are the Apache engine's; on the other engines the response timeout's cause is
-`HttpTimeoutException` (`jdk`), `TimeoutException` (`jetty`) or `ReadTimeoutException` (`reactor-netty`), and a
-cancellation's an `IOException` over the interrupt - the tags are the same. The last two rows are
+`TimeoutException` (`jetty`), an `IOException` around `ReadTimeoutException` (`reactor-netty`) and, on `jdk`,
+`HttpTimeoutException` while waiting for the head but a plain `IOException` of the closed body stream once the body
+stalls - and a cancellation's an `IOException` over the interrupt. The tags are the same. The last two rows are
 indistinguishable on the timer: `status=CLIENT_ERROR` is the convention's value for "no
 response arrived", and the wrapper hides the cause. To split timeouts from cancellations, use
 `resilience4j.timelimiter.calls{kind=timeout}` (§4) and the exchange event's `adapter_outcome`

@@ -466,9 +466,20 @@ by construction; what it bounds differs:
 | `jetty` | the whole request, from queueing for a connection to the end of the body; the same value bounds silence on the connection | connect ≤ `connect-timeout-ms`; a queued request waits within the rung, not within `pending-acquire-timeout-ms` |
 | `reactor-netty` | the longest silence between reads after the request was sent | lease ≤ `pending-acquire-timeout-ms`, connect ≤ `connect-timeout-ms` |
 
-On `jdk` and `jetty` a dripping body therefore ends at the rung - before the TimeLimiter - as a transport timeout
-(`HttpTimeoutException`, `TimeoutException`) rather than as the `TimeoutException` of §3.2. On `jetty` the
-TimeLimiter margin's share for the lease is unused, because the queue wait is inside the rung.
+On `jdk` and `jetty` a dripping body therefore ends at the rung - before the TimeLimiter - as a transport failure
+under `ResourceAccessException` rather than as the `TimeoutException` of §3.2. What that failure is depends on the
+engine and the phase:
+
+| Engine | Response timeout while waiting for the head | Response timeout while the body stalls |
+|---|---|---|
+| `apache` | `SocketTimeoutException` | `SocketTimeoutException` (a single read that sees nothing for the rung) |
+| `jdk` | `HttpTimeoutException` | an `IOException` of the body stream Spring's deadline closed - **no** `HttpTimeoutException` |
+| `jetty` | `TimeoutException` | `TimeoutException` |
+| `reactor-netty` | an `IOException` around Netty's `ReadTimeoutException` | the same - the module's body read wraps it as Spring wraps it for the head |
+
+`RestClientEngineIntegrationTest` pins both columns for every engine. An alert or a log query that filters on
+`HttpTimeoutException` therefore misses every body-phase timeout on `jdk`. On `jetty` the TimeLimiter margin's
+share for the lease is unused, because the queue wait is inside the rung.
 
 **The interrupted worker.** The guarantee of §3 - the worker ends within milliseconds of the budget, its permit and
 its connection with it - holds on every engine, by its own route (the table in the guide's "Abandoned exchanges"):
