@@ -8,6 +8,7 @@ import org.apache.http.client.methods.HttpGet
 import org.apache.http.client.utils.URIBuilder
 import org.apache.http.impl.client.CloseableHttpClient
 import org.apache.http.util.EntityUtils
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import tools.jackson.databind.ObjectMapper
 import java.time.Duration
@@ -34,6 +35,10 @@ class DirectoryFailureException(
  *
  * [customer] blocks the caller; [customerAsync] returns at once, and cancelling its future abandons the call the
  * same way.
+ *
+ * The lookup logs on the worker, a thread the caller never ran on, and its line still carries the caller's MDC: the
+ * decorator copies the MDC when [customer] or [customerAsync] is called and installs the copy on the worker for the
+ * call ([CorrelatedCustomerLookup] shows the caller's side).
  */
 @Component
 class DecoratorCustomerAdapter(
@@ -68,6 +73,7 @@ class DecoratorCustomerAdapter(
 
     /** The exchange itself, on the worker thread. */
     private fun lookup(id: String): Customer {
+        logger.info("Looking up customer '{}'", id)
         val uri =
             URIBuilder(properties.baseUrl)
                 .setPathSegments("v1", "customers", id)
@@ -90,5 +96,7 @@ class DecoratorCustomerAdapter(
     companion object {
         /** The name of the call's Resilience4j instances. */
         const val NAME = "legacy-directory"
+
+        private val logger = LoggerFactory.getLogger(DecoratorCustomerAdapter::class.java)
     }
 }

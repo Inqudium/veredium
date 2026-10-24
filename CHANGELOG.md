@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exchange on every engine. For Jetty and Reactor Netty on the blocking side, and for Apache on the reactive
   side, this closes gaps in Spring Framework 7.0.9's adapters.
 
+#### Examples - 2026-10-24
+
+- `veredium-examples`: the decorator example shows the MDC hand-off. `CorrelatedCustomerLookup` puts a request id in
+  the caller's MDC, and the adapter's line on the decorator's worker carries it, for `decorate` and `decorateAsync`
+  alike. A fan-out over threads of the host's own hands the caller's MDC on with `CallerMdc.with`, because the
+  decorator copies the MDC of the thread that calls it.
+
 #### Build and project setup - 2026-10-19 to 2026-10-23
 
 - A new build-only module, `veredium-examples`, shows a host using both clients: one Spring Boot
