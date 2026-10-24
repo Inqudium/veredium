@@ -31,9 +31,8 @@ import java.util.concurrent.atomic.AtomicReference
  * breaker carries the mesh customizer with this stack's [WebClientVerdicts] the way the Boot configuration
  * installs it ([CustomizedRegistries]).
  *
- * The first three tests are consequences of the nesting that a different nesting breaks. Checked by running
- * this class against all five other orders of the three `transformDeferred` calls in `decorate()` - every one
- * of them turns at least one test red:
+ * The TimeLimiter, open-breaker and full-bulkhead tests pin consequences of the nesting: each of the five other
+ * orders of the three `transformDeferred` calls in `decorate()` turns at least one of them red -
  * - TimeLimiter OUTSIDE the breaker: the timeout cancels the breaker's subscriber instead of erroring through
  *   it, and the breaker records nothing - the TimeLimiter test fails (and the time limiter now sees the open
  *   breaker's short-circuit, which fails the open-breaker test).

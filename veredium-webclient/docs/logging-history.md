@@ -5,8 +5,10 @@
 > (§4–§8), which was **replaced by `legatium-webclient-logging`** on 2026-09-18. None of it is reviewed against
 > the code, and none of it is published on the documentation site. Where the text says "is", read "was". The
 > classes it names - `DefaultWebClientConfigurer`, `InvolvedPartyAPIReactiveAdapter`, `AsyncLogDispatcher`,
-> `ExchangeDiaryLogging`, `ExchangeDiary`, `LoggingLevelContractTest` and the like - are gone on purpose; the
-> adapters it speaks of were the consumers of the project the modules were ported from.
+> `ExchangeDiaryLogging`, `ExchangeDiary` and the like - are gone on purpose; the adapters it speaks of were the
+> consumers of the project the modules were ported from. `LoggingLevelContractTest` still exists, with a different
+> subject: it now pins the logger names and levels of the configuration for the library's exchange stream, not the
+> diary's `isEnabled()` gate described below.
 >
 > What applies today, and what of the diary the library carries on, is in the
 > [logging guide](logging-guide.md) (§0 and §1 there; a reference below to §0 or §1 means that page). The section

@@ -147,10 +147,9 @@ itself; this flag decides whether it *keeps* it.
 ### 1.4 `validation.*` — response Bean Validation (`ResponseValidationProperties`, shared with the blocking client in `veredium-core`)
 
 Whether a deserialised response DTO is checked against its Bean Validation constraints. **Off by default**,
-because the constraints are generated from the published OpenAPI specs and those specs are demonstrably stricter
-than reality in places — `ProductAgreementsDataResponseV8DTO` declares `@Size(min = 1)` on a result list a lookup
-may legitimately return empty; `AccessProfileAdapter` documents a second, unrelated defect (incident
-INC15288523). Validation is therefore adopted one backend at a time, against real traffic.
+because where a host's DTO constraints are generated from a published OpenAPI spec, that spec can be stricter
+than what the backend actually sends — a `@Size(min = 1)` on a result list a lookup may legitimately return
+empty is the typical case. Validation is therefore adopted one backend at a time, against real traffic.
 
 | Key | Type | Default | Scope | Meaning |
 |---|---|---|---|---|

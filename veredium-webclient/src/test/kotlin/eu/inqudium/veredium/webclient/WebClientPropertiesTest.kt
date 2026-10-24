@@ -43,7 +43,7 @@ class WebClientPropertiesTest {
             //   ResilientWebClientFactory narrows the value to an Int for the codec's `maxInMemorySize`.
             // Success criteria: 3 GB is rejected here, rather than silently becoming a negative Int later.
             // Why it matters: without the guard, a value chosen to be generous would end up at the
-            //   zero case above, by a route nobody would suspect from reading the configured number.
+            //   zero-limit case, by a route nobody would suspect from reading the configured number.
             //
             // Given / When / Then
             assertThatThrownBy { WebClientProperties(maxInMemorySize = DataSize.ofGigabytes(3)) }
