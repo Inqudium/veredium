@@ -386,6 +386,9 @@ internal class ReactorNettyEngineTransport(
                 pending.get()
             } catch (e: InterruptedException) {
                 onInterrupt(pending)
+                // The task may have finished between the interrupt and the cancel, which then changes nothing: a
+                // response it produced holds its pooled connection until it is closed, and nobody else will.
+                if (pending.isDone && !pending.isCancelled) runCatching { (pending.get() as? AutoCloseable)?.close() }
                 Thread.currentThread().interrupt()
                 throw InterruptedIOException("$what interrupted").apply { initCause(e) }
             } catch (e: ExecutionException) {
