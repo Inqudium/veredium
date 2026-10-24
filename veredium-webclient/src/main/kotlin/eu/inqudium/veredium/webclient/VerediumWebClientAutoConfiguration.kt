@@ -115,8 +115,8 @@ class WebClientMeshRegistrar : MeshResilienceRegistrar(STACK, WebClientVerdicts.
  * It lives in its own `@Configuration`, imported by [VerediumWebClientAutoConfiguration], rather than in
  * [ResilientWebClientFactory]'s constructor because its effect is JVM-WIDE and cannot be undone: it must be a
  * deliberate, declared piece of wiring, not a side effect of instantiating a factory (which a test may do
- * repeatedly, and which then silently changes the behaviour of every later context in the same JVM). Gated on the module toggle, so a host that did not opt in gets no
- * global change at all.
+ * repeatedly, and which then silently changes the behaviour of every later context in the same JVM). Gated on
+ * the module toggle, so a host that did not opt in gets no global change at all.
  */
 @Configuration(proxyBeanMethods = false)
 class WebClientReactorContextPropagationConfiguration(

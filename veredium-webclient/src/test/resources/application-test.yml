@@ -157,15 +157,18 @@ resilience4j:
   bulkhead:
     configs:
       mesh-backend:
-        # Bound by the SHARED connection pool, not chosen per backend: every endpoint talks to the same local
-        # sidecar through one Reactor-Netty pool of app.mesh.defaults.transport.max-connections (100). With
-        # four backends, 4 x 25 = 100 - the bulkheads shed load exactly as the pool runs out, rather than
-        # letting callers pile up on pendingAcquire. Raising this without raising max-connections moves the
-        # queueing into the pool, where pending-acquire-timeout-ms (200) fails them anyway, only later and
-        # with a less obvious error - a FAILURE on the breaker of whichever backend is waiting.
-        # ResilienceConfigContractTest enforces sum(max-concurrent-calls) <= max-connections for this file; at
-        # runtime MeshResilienceStartupGuard (veredium-core) logs a WARN naming both numbers when a host's
-        # configuration exceeds it.
+        # Bound by the connection pool, not chosen per backend: every endpoint talks to the same local sidecar,
+        # and a pool holds app.mesh.defaults.transport.max-connections (100). With four backends, 4 x 25 = 100.
+        # On jetty and apache the four backends share one pool, and the sum is exact: the bulkheads shed load
+        # exactly as the pool runs out, rather than letting callers pile up on pendingAcquire. On reactor-netty
+        # (the default) every backend has a sub-pool of its own, each holding max-connections, and the sum is
+        # conservative. Raising this without raising max-connections moves the queueing into a shared pool,
+        # where pending-acquire-timeout-ms (200) fails them anyway, only later and with a less obvious error -
+        # a FAILURE on the breaker of whichever backend is waiting. ResilienceConfigContractTest enforces
+        # sum(max-concurrent-calls) <= max-connections for this file, whatever the engine; at runtime
+        # MeshResilienceStartupGuard (veredium-core) logs a WARN naming both numbers when the bulkheads on one
+        # of the factory's pools exceed it - on reactor-netty, that is one backend's bulkhead against its own
+        # sub-pool.
         max-concurrent-calls: 25
         # Fail fast rather than queue: the same choice the mesh transport already makes for the pool. A waiting
         # caller does not even spend its TimeLimiter budget on the wait - the reactive bulkhead acquires inside

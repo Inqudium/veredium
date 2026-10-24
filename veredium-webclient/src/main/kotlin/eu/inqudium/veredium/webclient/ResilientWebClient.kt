@@ -44,7 +44,7 @@ import java.util.function.Consumer
  * body (a 204, or a 200 with an empty entity) fails with [EmptyResponseBodyException] naming the backend and the
  * expected type; a non-2xx answer fails with the [WebClientResponseException] `retrieve()` raises - a 1xx or 3xx
  * too, which `retrieve()` alone would hand to the decoder: no engine follows a redirect, so it is never the
- * answer the adapter asked for, and the breaker records it like any status that is not a benign 4xx. An empty
+ * answer the caller asked for, and the breaker records it like any status that is not a benign 4xx. An empty
  * `Mono` would give no error line and leave the caller's `awaitSingle()` a `NoSuchElementException` that names
  * nothing, and the blocking twin fails the same answer with the same exception. The failure is raised AFTER the
  * Resilience4j decoration, like a deserialisation failure: the backend answered promptly with a success status,
@@ -100,7 +100,7 @@ class ResilientWebClient(
      * passed, not by how much, and legatium's body capture is bounded by its own `max-body-bytes`, which says
      * nothing about the codec's.
      *
-     * Sampled here rather than at the transport: Reactor-Netty's `data.received` counts bytes off the wire,
+     * Sampled here rather than at the transport: Reactor Netty's `data.received` counts bytes off the wire,
      * which with `compress(true)` is the COMPRESSED size, while the codec limit bounds the decompressed
      * buffer. Sizing the limit from that would under-set it by the compression ratio.
      *
@@ -163,10 +163,10 @@ class ResilientWebClient(
         execute(
             // Stamp the endpoint's low-cardinality path template onto the request so legatium's exchange
             // event (adapter_url_template) and Spring's client observation can record the template next to
-            // the expanded URL. Done centrally so it holds regardless of which uri(...) overload the adapter
-            // used - the builder-lambda form (POST adapters) does not set the attribute, and re-setting it for
-            // the GET adapters is a no-op (same value they already passed via uri(template, vars)). The key
-            // is the library's public constant, the same string Spring's own uri(template, vars) sets.
+            // the expanded URL. Done centrally so it holds regardless of which uri(...) overload the caller
+            // used - the builder-lambda form does not set the attribute, and for a caller that passed the
+            // endpoint's template to uri(template, vars) re-setting it is a no-op (the same value). The key is
+            // the library's public constant, the same string Spring's own uri(template, vars) sets.
             block(webClient.get()).attribute(ClientRequestLoggingFilter.URI_TEMPLATE_ATTRIBUTE, pathTemplate),
             responseType,
             requestBody = null,
@@ -178,9 +178,8 @@ class ResilientWebClient(
      *
      * The serialisation runs INSIDE the returned Mono (`fromCallable`), not while assembling it. A method
      * returning `Mono<T>` promises to report failures as an error SIGNAL; serialising eagerly would instead
-     * throw out of `post()` itself, before any Mono exists to carry the error - invisible to the coroutine
-     * adapters, which subscribe immediately, but a broken contract for any caller that composes the Mono and
-     * subscribes later.
+     * throw out of `post()` itself, before any Mono exists to carry the error - invisible to a caller that
+     * subscribes immediately, but a broken contract for any caller that composes the Mono and subscribes later.
      *
      * It sits OUTSIDE [execute] on purpose, so a serialisation failure never becomes an HTTP exchange: there
      * is no method, no path, no status, nothing on the wire - and therefore no exchange event either, because
@@ -200,9 +199,9 @@ class ResilientWebClient(
             .flatMap { serialized ->
                 // Hand the JSON string straight to bodyValue(): WebClient encodes it as UTF-8, so an explicit
                 // toByteArray() would only allocate a redundant array.
-                // .attribute stamps the path template centrally (see get()): the POST adapters build the URI via
-                // the uri { builder -> ... } overload, which does NOT set the template attribute, so without this
-                // the exchange event and the observation would have no template for these calls.
+                // .attribute stamps the path template centrally (see get()): a caller that builds the URI with
+                // the uri { builder -> ... } overload does NOT set the template attribute, so without this the
+                // exchange event and the observation would have no template for its calls.
                 val spec =
                     block(webClient.post())
                         .bodyValue(serialized)
@@ -217,7 +216,7 @@ class ResilientWebClient(
     ): Mono<T> {
         // Everything that owns per-request state - the attempt's startNanos clock - plus the HTTP exchange
         // itself lives INSIDE this defer, so it is materialised per SUBSCRIPTION, not per assembly. This method
-        // only assembles and returns the cold Mono; subscription is the caller's job (the adapters do it via
+        // only assembles and returns the cold Mono; subscription is the caller's job (directly, or through
         // .awaitSingle()). The defer is what keeps that correct: each subscription gets its OWN startNanos (so
         // the duration measures the attempt, not the time the Mono was held before a late subscription) and
         // its OWN exchange - so a caller that subscribes more than once (e.g. a .retry() on the returned Mono)

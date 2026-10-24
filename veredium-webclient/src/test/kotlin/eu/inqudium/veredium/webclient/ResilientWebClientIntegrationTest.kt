@@ -569,7 +569,7 @@ class ResilientWebClientIntegrationTest {
             // What is tested: the error shape a caller sees for a non-2xx answer.
             // Success criteria: a 404 with a text body fails awaitSingle() with a WebClientResponseException whose
             //   status is 404 - not with a Jackson error about the body, not with an empty result.
-            // Why it matters: the adapters on top branch on the status (a documented 404 is a business answer), and
+            // Why it matters: a caller on top branches on the status (a documented 404 is a business answer), and
             //   the breaker verdicts and the error line's severity read it off this very exception type; another
             //   shape would silently turn every rejection into an unexpected failure.
             //
@@ -1162,14 +1162,14 @@ class ResilientWebClientIntegrationTest {
 
         @Test
         fun `should carry a coroutine MDCContext key onto the line of a TimeLimiter timeout`() {
-            // What is tested: the same promise for a coroutine caller - the shape the adapters on top have - whose
+            // What is tested: the same promise for a coroutine caller - one that bridges with awaitSingle() - whose
             //   keys live in a coroutine MDCContext, and for a line written on yet another thread: the TimeLimiter's
             //   timeout fires on Reactor's timer thread, which carries no MDC of its own either.
             // Success criteria: the error line of the timed-out call is the TimeoutException's, is logged on a
             //   thread other than the caller's, and carries the key the caller's MDCContext set.
             // Why it matters: MDCContext writes the keys onto whichever thread RESUMES the coroutine; the subscription
-            //   inside awaitSingle() happens on it, so the snapshot sees them - this pins that the adapters' calling
-            //   convention reaches the snapshot at all. The timeout line is also the one an operator searches for
+            //   inside awaitSingle() happens on it, so the snapshot sees them - this pins that a coroutine caller's
+            //   keys reach the snapshot at all. The timeout line is also the one an operator searches for
             //   first when a caller reports a slow failure.
             //
             // Given: a backend far slower than a 200 ms budget, and the client logger capturing
@@ -1205,7 +1205,7 @@ class ResilientWebClientIntegrationTest {
             //   IllegalStateException out of block(Duration) would be indistinguishable from a real disposal error,
             //   and the last thing in the log before the process exits. The deadline is therefore an outcome,
             //   reported as a WARN naming the engine - that branch is pinned by "should WARN and complete when the
-            //   pool does not drain within the derived timeout", an in-flight call by "should let an in-flight call
+            //   pool does not drain within the derived drain window", an in-flight call by "should let an in-flight call
             //   finish before the pool is disposed, without the drain WARN".
             //
             // Given: one completed exchange, which leaves its connection in the pool (keep-alive is on)
@@ -1258,12 +1258,12 @@ class ResilientWebClientIntegrationTest {
         }
 
         @Test
-        fun `should WARN and complete when the pool does not drain within the derived timeout`() {
+        fun `should WARN and complete when the pool does not drain within the derived drain window`() {
             // What is tested: the expiry branch of shutdown()'s bounded wait, through the seam that takes the
             //   disposal and the timer as arguments: a disposal that never completes, on a virtual clock.
-            // Success criteria: the timeout is the derived one (the endpoint's response timeout + connect +
+            // Success criteria: the drain window is the derived one (the endpoint's response timeout + connect +
             //   pending-acquire + 1 s); one millisecond before it nothing has happened; at it, the wait COMPLETES
-            //   normally - no exception - and the factory logs one WARN naming the engine and the timeout.
+            //   normally - no exception - and the factory logs one WARN naming the engine and the window.
             // Why it matters: the branch exists so that a pool that will not drain ends shutdown with a statement,
             //   not with an IllegalStateException Spring logs as a failed destroy method - and so that it ends at
             //   all. The real pool drains in milliseconds, so without the seam the branch could only be reached by
@@ -1272,20 +1272,20 @@ class ResilientWebClientIntegrationTest {
             // Given: a factory, a disposal that never ends, a virtual clock, and the factory logger capturing
             val factory = newFactory("stuck-pool")
             val responseTimeout = factory.create("stuck-pool").responseTimeout
-            val timeout = factory.poolDisposeTimeout
-            assertThat(timeout).isEqualTo(responseTimeout.plusMillis(100 + 200).plusSeconds(1))
+            val window = factory.drainWindow
+            assertThat(window).isEqualTo(responseTimeout.plusMillis(100 + 200).plusSeconds(1))
             val clock = VirtualTimeScheduler.create()
             try {
                 capturing(factoryLogger, accept = naming("did not drain")) { factoryLines ->
-                    // When: the wait starts and the clock runs to just before the timeout
+                    // When: the wait starts and the clock runs to just before the window ends
                     val drained = factory.drain(Mono.never(), clock).toFuture()
-                    clock.advanceTimeBy(timeout.minusMillis(1))
+                    clock.advanceTimeBy(window.minusMillis(1))
 
                     // Then: still waiting, nothing said
                     assertThat(drained.isDone).isFalse()
                     assertThat(factoryLines.events).isEmpty()
 
-                    // When: the timeout is reached
+                    // When: the window has passed
                     clock.advanceTimeBy(Duration.ofMillis(1))
 
                     // Then: completed normally, with the WARN
@@ -1293,7 +1293,7 @@ class ResilientWebClientIntegrationTest {
                     assertThat(drained.isCompletedExceptionally).isFalse()
                     val warn = factoryLines.events.single()
                     assertThat(warn.level).isEqualTo(Level.WARN)
-                    assertThat(warn.formattedMessage).contains("HTTP engine 'reactor-netty'", "did not drain within $timeout")
+                    assertThat(warn.formattedMessage).contains("HTTP engine 'reactor-netty'", "did not drain within $window")
                 }
             } finally {
                 clock.dispose()
@@ -1305,14 +1305,14 @@ class ResilientWebClientIntegrationTest {
             // What is tested: the same expiry branch when the engines released before Reactor Netty have spent part
             //   of the shared deadline - the wait bounded by the 300 ms left of it, on a virtual clock.
             // Success criteria: one millisecond before the 300 ms nothing has happened; at them the wait completes
-            //   normally with one WARN naming the drain window (the derived timeout) and NOT the 300 ms.
+            //   normally with one WARN naming the drain window (the derived one) and NOT the 300 ms.
             // Why it matters: every engine's drain line names the configured window an operator can look up; a line
             //   naming the remainder would report a different, smaller number for the same configuration depending
             //   on which engines happened to be released first.
             //
             // Given: a factory, a disposal that never ends, a virtual clock, and the factory logger capturing
             val factory = newFactory("late-pool")
-            val window = factory.poolDisposeTimeout
+            val window = factory.drainWindow
             val left = Duration.ofMillis(300)
             val clock = VirtualTimeScheduler.create()
             try {

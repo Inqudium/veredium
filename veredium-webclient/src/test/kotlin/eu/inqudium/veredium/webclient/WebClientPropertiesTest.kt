@@ -68,17 +68,17 @@ class WebClientPropertiesTest {
         }
 
         @Test
-        fun `should default to 256 KB, the size one oversized access-profile response needed`() {
+        fun `should default to 256 KB, Spring's own ExchangeStrategies default`() {
             // What is tested: the code default of the codec limit, as a value in its own right rather than
             //   as a by-product of the range check above.
             // Success criteria: the default is 256 KB - Spring's own ExchangeStrategies default - and
             //   NOT 8 KB.
             // Why it matters: a bare equality assertion catches an accidental change but says nothing about
-            //   whether the number is right. 8 KB is less than a single access-profile response: the backend
+            //   whether the number is right. 8 KB is too small for an ordinary list response: the backend
             //   answers 200 OK and the codec aborts mid-buffer on every retry, so the call can never succeed.
-            //   The limit applies per concurrently buffered response and the shared pool is bounded at 100
-            //   connections, so this default also bounds the worst case at ~25 MB of response buffers - the
-            //   reason it is not simply raised further.
+            //   The limit applies per concurrently buffered response, and the reference configuration's mesh
+            //   bulkheads admit 100 concurrent calls, so this default also bounds the worst case at ~25 MB of
+            //   response buffers - the reason it is not simply raised further.
             //
             // Given / When / Then
             assertThat(WebClientProperties().maxInMemorySize)
