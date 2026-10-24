@@ -167,7 +167,7 @@ with it - by four different routes:
 
 | Engine | Waiting for the head | Reading the body |
 |---|---|---|
-| `apache` | the JDK closes the socket on interrupt; Apache discards the connection | the same |
+| `apache` | on the virtual worker the JDK closes the socket on interrupt; Apache discards the connection | the same |
 | `jdk` | Spring cancels the JDK's exchange future, which aborts the exchange | the JDK's body stream closes itself and fails the read |
 | `jetty` | Spring stops waiting; the module **aborts the Jetty request**, which Spring leaves in flight | the read fails on interrupt; the module aborts the request |
 | `reactor-netty` | Reactor's `block()` cancels the subscription, which closes the connection | Spring's body stream ignores an interrupt, so the module **hands each read to a short-lived virtual thread** and waits for it interruptibly; on interrupt it closes the stream |

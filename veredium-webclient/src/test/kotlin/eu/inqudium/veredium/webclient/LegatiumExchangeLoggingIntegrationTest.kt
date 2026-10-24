@@ -309,9 +309,9 @@ class LegatiumExchangeLoggingIntegrationTest {
             //   pinned in the library (`ClassificationTest`).
             // Success criteria: the single event is WARN with `adapter_outcome=rejected` and status 429.
             // Why it matters: an operator's query for the operational 4xx (408/429) and the module's own
-            //   breaker policy (`HttpExchangeErrorPolicy`, which counts 408/429 and ignores the other 4xx) both
-            //   read the STATUS, not the outcome - the outcome does not separate a 429 from a 404. This test
-            //   pins that the level does, so `logging.level.adapter-http-exchange: WARN` keeps the 429s.
+            //   breaker policy (`HttpExchangeErrorPolicy`, which counts 408/429 as failures and the other 4xx as
+            //   successes) both read the STATUS, not the outcome - the outcome does not separate a 429 from a 404.
+            //   This test pins that the level does, so `logging.level.adapter-http-exchange: WARN` keeps the 429s.
             //
             // Given: a throttling answer
             wireMock.stubFor(
@@ -664,9 +664,9 @@ class LegatiumExchangeLoggingIntegrationTest {
             //   legatium chooses it by looking up a bean of type `io.micrometer.tracing.Tracer`, so the minimal
             //   `Tracer.NOOP` bean is enough to reach it; nothing else about the context changes.
             // Success criteria: with that one bean added, the same line that read "but no Micrometer
-            //   Tracing" in the case above now reads "with Micrometer Tracing wired", names the correlation
-            //   header as the one that is NOT generated - and the very same call still goes out with that
-            //   header and without a traceparent.
+            //   Tracing" in the without-tracing case (its own correlation header) now reads "with Micrometer
+            //   Tracing wired", names the correlation header as the one that is NOT generated - and the very same
+            //   call still goes out with that header and without a traceparent.
             // Why it matters: the line is a statement about WIRING, decided once at startup by a bean lookup;
             //   the header on the wire is decided PER REQUEST from the outgoing traceparent
             //   (`ClientIdentity.resolve`). They agree in production because the tracing auto-configuration
@@ -850,8 +850,8 @@ class LegatiumExchangeLoggingIntegrationTest {
             // The module's OWN @EnableConfigurationProperties binding, not a hand-made instance - see
             // `BoundWebClientProperties` for why not `VerediumWebClientAutoConfiguration`.
             .withUserConfiguration(BoundWebClientProperties::class.java)
-            // The startup report on the observation toggle, as the context would scan it - the test above reads
-            // its line next to legatium's.
+            // The startup report on the observation toggle, as the context would scan it - the toggle-report test
+            // ("should report the toggle as plain on ...") reads its line next to legatium's.
             .withBean(WebClientObservationReport::class.java)
             .withBean(
                 MeshProperties::class.java,
@@ -917,8 +917,8 @@ class LegatiumExchangeLoggingIntegrationTest {
     /**
      * Runs [block] with a recorder attached to [logger], and returns whatever it returns.
      *
-     * For lines written while the context REFRESHES - the factory's configuration summary, the library's wiring
-     * verdict - the recorder has to be in place around `run(...)` rather than inside the context consumer, where
+     * For lines written while the context REFRESHES - the toggle lines of [WebClientObservationReport], the
+     * library's wiring verdict - the recorder has to be in place around `run(...)` rather than inside the context consumer, where
      * they have already been written. [CapturingAppender.events] is read without awaiting for the same reason:
      * the refresh happens on this thread, so by the time `run(...)` returns the lines are already captured.
      */
@@ -926,7 +926,7 @@ class LegatiumExchangeLoggingIntegrationTest {
         logger: Logger,
         block: (CapturingAppender) -> T,
     ): T =
-        // The wiring verdicts are DEBUG lines (legatium's report, ADR-0014; the factory's summary is INFO) and
+        // The wiring verdicts are DEBUG lines (legatium's report, ADR-0014; the observation report's are INFO) and
         // logback-test.xml roots at INFO, so the logger is opened to DEBUG for the recording and restored after -
         // the same hand-set level the exchange logger gets in setUp, for the same reason: the runner does not
         // initialise Boot's LoggingSystem.

@@ -253,8 +253,8 @@ class MeshResilienceStartupGuardTest {
             // Success criteria: `verify()` throws naming "the bulkhead '<alias>' has no instance in the registry",
             //   as the only problem.
             // Why it matters: a declared bulkhead the registry does not hold means the registry was not built
-            //   from the properties - the same hand-made-registry case as above, seen on the one layer without a
-            //   customizer.
+            //   from the properties - the hand-made-registry case of the unreached breaker and time limiter, seen on
+            //   the one layer without a customizer.
             //
             // Given: everything wired, then the bulkhead's registry instance removed
             val props = propsFor()

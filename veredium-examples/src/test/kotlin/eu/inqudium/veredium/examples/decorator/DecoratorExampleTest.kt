@@ -86,7 +86,8 @@ class DecoratorExampleTest(
     fun `should count a server error as a failure of the backend`() {
         // What is tested: DecoratorCustomerAdapter.customer for an id the directory answers with 500.
         // Success criteria: the caller gets DirectoryFailureException; the breaker counts one failure.
-        // Why it matters: the other side of the previous case - the breaker must still see the faults it exists for.
+        // Why it matters: the counterpart of the unknown-customer case, whose 404 the breaker ignores - the breaker
+        //   must still see the faults it exists for.
         //
         // Given
         Sidecar.server.stubFor(get(urlEqualTo("/v1/customers/c-500")).willReturn(serverError()))
@@ -123,13 +124,15 @@ class DecoratorExampleTest(
 
     @Test
     fun `should release the caller at the budget and end the worker's read at once`() {
-        // What is tested: a lookup against a directory whose body drips in, one byte every 200 ms for 30 s - every
-        //   read well inside the 700 ms socket timeout, the whole call far past the 2 s budget.
-        // Success criteria: the caller gets a TimeoutException after at least 2 s and well before the 30 s; within
-        //   2 s after that the client has dropped the connection and the bulkhead has all its permits back.
+        // What is tested: a lookup against a directory whose body drips in, one byte every
+        //   `DrippingBackend.DRIP_INTERVAL` for `DrippingBackend.RUN_TIME` - every read well inside the 700 ms
+        //   socket timeout, the whole call far past the 2 s budget.
+        // Success criteria: the caller gets a TimeoutException after at least 2 s and under 6 s; within 2 s after
+        //   that the client has dropped the connection and the bulkhead has all its permits back.
         // Why it matters: HttpClient 4 bounds each read, not a whole call; the decorator's TimeLimiter is that
         //   bound. The dropped connection proves that the interrupt ended the worker's blocked read - with
-        //   `cancel-running-future: false` the worker would read on for 30 s, holding its permit and connection.
+        //   `cancel-running-future: false` the worker would read on for `DrippingBackend.RUN_TIME`, holding its
+        //   permit and connection.
         //
         // Given
         DrippingBackend().use { backend ->
@@ -153,7 +156,8 @@ class DecoratorExampleTest(
     @Test
     fun `should deliver the customer on a future, and end the call when the future is cancelled`() {
         // What is tested: DecoratorCustomerAdapter.customerAsync for a known customer, and against a directory
-        //   whose body drips in for 30 s, cancelled once the head and the first chunk are on the wire.
+        //   whose body drips in for `DrippingBackend.RUN_TIME`, cancelled once the head and the first chunk are on
+        //   the wire.
         // Success criteria: the first future completes with the customer within 5 s; within 2 s after the cancel
         //   the client has dropped the dripping connection and the bulkhead has all its permits back; the breaker
         //   recorded the cancelled call as ignored, not as a failure.

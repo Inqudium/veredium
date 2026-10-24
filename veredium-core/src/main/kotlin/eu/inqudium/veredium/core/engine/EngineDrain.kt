@@ -20,8 +20,8 @@ object EngineDrain {
      * overflow-safe form `System.nanoTime` prescribes.
      *
      * The wait also ends when the calling thread is INTERRUPTED - a container tearing the context down under a deadline
-     * of its own: `parkNanos` returns at once on a thread whose interrupt flag is set and leaves the flag set, so without
-     * this exit the loop would spin hot until the deadline instead of waiting. The flag is left for the caller.
+     * of its own. Assumption: `parkNanos` returns at once on a thread whose interrupt flag is set and leaves the flag
+     * set, so without this exit the loop would spin hot until the deadline instead of waiting. The flag is left for the caller.
      */
     fun await(
         inFlight: () -> Int,

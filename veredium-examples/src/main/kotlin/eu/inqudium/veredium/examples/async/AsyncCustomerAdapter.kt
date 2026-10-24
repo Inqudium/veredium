@@ -23,10 +23,10 @@ import java.util.concurrent.Future
  * the blocking form would have thrown - arrives on the future.
  *
  * `cancel` is the only thing that reaches a running call: it abandons the exchange and frees its bulkhead permit.
- * A future derived with `thenApply`, `handle` or `thenCombine` does not pass a cancel on to the one it came from,
- * so each method that returns a derived future hands it on itself ([cancelling]); [orders] returns the client's own
- * future, which needs no such step. Nor does `thenCombine` fail before both inputs are done, so [overview] fails on
- * the first failure itself ([failingFast]), and its cancel then stops the other call.
+ * Assumption: a future derived with `thenApply`, `handle` or `thenCombine` does not pass a cancel on to the one it
+ * came from, so each method that returns a derived future hands it on itself ([cancelling]); [orders] returns the
+ * client's own future, which needs no such step. [overview] fails on the first failure ([failingFast]), and its
+ * cancel then stops the other call.
  */
 @Component
 class AsyncCustomerAdapter(
@@ -35,7 +35,7 @@ class AsyncCustomerAdapter(
     private val customers = factory.create(Backends.CUSTOMERS)
     private val orderSearch = factory.create(Backends.ORDER_SEARCH)
 
-    /** The pessimistic ceiling over both clients, as in the blocking adapter. */
+    /** The pessimistic ceiling over both clients: what one call of this adapter may take at most. */
     override val timeLimiterTimeout: Duration
         get() = maxOf(customers.timeLimiterTimeout, orderSearch.timeLimiterTimeout)
 
@@ -76,7 +76,10 @@ class AsyncCustomerAdapter(
     }
 
     private companion object {
-        /** A derived stage fails with a [CompletionException] around the cause; the client's own future does not. */
+        /**
+         * Assumption: a derived stage fails with a [CompletionException] around the cause; the client's own future
+         * does not.
+         */
         fun Throwable.unwrapped(): Throwable = if (this is CompletionException) cause ?: this else this
 
         /**
@@ -86,8 +89,8 @@ class AsyncCustomerAdapter(
         fun <T> CompletableFuture<T>.cancelling(vararg calls: Future<*>): CompletableFuture<T> = also { it.whenComplete { _, _ -> calls.forEach { call -> call.cancel(true) } } }
 
         /**
-         * Fails this future with the first of [calls] to fail. `thenCombine` alone waits for both inputs, even after
-         * one has failed: the result would stay open until the other call ended, at the latest on its budget, and
+         * Fails this future with the first of [calls] to fail. Assumption: `thenCombine` alone waits for both inputs,
+         * even after one has failed: the result would stay open until the other call ended, at the latest on its budget, and
          * would then fail with whichever of the two it looks at first. The first failure wins here, wrapped as
          * `thenCombine` wraps it; what completes the future later is a no-op.
          */

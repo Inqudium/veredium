@@ -20,15 +20,15 @@ import org.springframework.core.env.Environment
  *
  * One implementation for both stacks: the three switches and the four verdicts are the same whether Boot's
  * `ObservationRestClientCustomizer` or its `ObservationWebClientCustomizer` put the registry on the builder.
- * Each stack subclasses it with its name and its property key (`RestClientObservationReport`,
- * `WebClientObservationReport`), which is also what gives the lines their logger name.
+ * Each stack subclasses it with its name and its property key, which is also what gives the lines their logger
+ * name.
  *
  * @param stackName The name the toggle line opens with (`RestClient`, `WebClient`).
  * @param toggleProperty The stack's toggle key, named verbatim on the line so an operator can find it.
  * @param observationEnabled The toggle's bound value.
  * @param environment Read ONLY for the two central disable-filter values; `null` reads as their default `true`.
- * @param observationRegistry Read ONLY to make the toggle line truthful: Boot puts the host's registry on the
- *   builder when a bean exists; this parameter tells whether there WAS one, and whether it records anything.
+ * @param observationRegistry Read ONLY to make the toggle line truthful. Assumption: Boot puts the host's registry
+ *   on the builder when a bean exists; this parameter tells whether there WAS one, and whether it records anything.
  */
 open class HttpObservationReport(
     stackName: String,
@@ -44,8 +44,8 @@ open class HttpObservationReport(
     /**
      * Whether the host has an ObservationRegistry that will actually RECORD something.
      *
-     * Deliberately `isNoop` rather than a null check alone, because Micrometer defines it as more than identity:
-     * `SimpleObservationRegistry.isNoop()` is `this == NOOP || observationConfig().getObservationHandlers()
+     * Deliberately `isNoop` rather than a null check alone. Assumption: Micrometer (1.17.1) defines it as more
+     * than identity - `SimpleObservationRegistry.isNoop()` is `this == NOOP || observationConfig().getObservationHandlers()
      * .isEmpty()`. A registry bean with no `ObservationHandler` is therefore reported as noop - correctly, since
      * it records nothing - and a bean-presence check would have called that case "wired" and been wrong.
      */
@@ -79,8 +79,9 @@ open class HttpObservationReport(
     /**
      * The central Micrometer observation DEACTIVATION filter: `management.observations.enable.<name>` (default
      * true) is the ONLY central Spring switch and a name-prefixed DISABLE - `all` scopes everything,
-     * `http.client.requests` just the client observation. When present, Spring applies it through the registry's
-     * filter predicate, so a `false` here suppresses the observation even though the stack's toggle is on.
+     * `http.client.requests` just the client observation. Assumption: when present, Spring Boot applies it through
+     * the registry's filter predicate, so a `false` here suppresses the observation even though the stack's toggle
+     * is on.
      */
     private val centralEnableAll: Boolean =
         environment?.getProperty(CENTRAL_ENABLE_ALL, Boolean::class.java, true) ?: true

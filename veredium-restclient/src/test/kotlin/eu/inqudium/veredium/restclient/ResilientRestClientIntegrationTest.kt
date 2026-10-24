@@ -417,7 +417,7 @@ class ResilientRestClientIntegrationTest {
             // Success criteria: a GET records no observation at all against the registry the builder carried.
             // Why it matters: the toggle is the operator's way to switch the client spans off for this module
             //   without touching Boot's wiring for every other client; without this case a toggle that did nothing
-            //   would pass the test above.
+            //   would pass the case with observation enabled.
             //
             // Given: a factory-built client with observation OFF (registry on the builder, replaced by NOOP)
             val handler = RecordingObservationHandler()
@@ -467,7 +467,7 @@ class ResilientRestClientIntegrationTest {
 
         @Test
         fun `should nest the http client observation under an active parent observation for a POST`() {
-            // What is tested: the POST counterpart of the nesting test above - the parent observation crosses the
+            // What is tested: the POST counterpart of the GET nesting case - the parent observation crosses the
             //   hand-off for a request that is built and executed by the POST path.
             // Success criteria: the `http.client.requests` context of the POST has `inbound.server` as its parent.
             // Why it matters: the POST serialises its body and builds its spec differently; a propagation that held
@@ -635,7 +635,7 @@ class ResilientRestClientIntegrationTest {
         @Test
         fun `should name the limit and the declared Content-Length on the buffer-limit line`() {
             // What is tested: the one line that carries the two numbers an operator needs - the configured limit and
-            //   the wire size the peer declared - for a response the size meter cannot sample.
+            //   the length the peer declared - for a response the size meter cannot sample.
             // Success criteria: after an oversized answer, the client logger holds a WARN line naming
             //   `limit=200 bytes` and the body's Content-Length.
             // Why it matters: the size meter only sees bodies that fit, so this line is the only record of how far a
@@ -643,7 +643,7 @@ class ResilientRestClientIntegrationTest {
             //
             // Given: a client that declines compression, so the response arrives with the Content-Length the peer
             // declared. Under the default `Accept-Encoding: gzip` Apache decodes the body and STRIPS the header, and
-            // the line then reads `Content-Length=unknown` - the documented lower-bound caveat, not a defect.
+            // the line then reads `Content-Length=unknown` - the documented reading for a decoded body, not a defect.
             val body = """{"message":"${"X".repeat(4000)}"}"""
             wireMock.stubFor(get(urlEqualTo("/big")).willReturn(okJson(body)))
             capturingLinesNaming(clientLogger, "backend 'limit-line'", Level.DEBUG) { appender ->
@@ -898,7 +898,7 @@ class ResilientRestClientIntegrationTest {
             // What is tested: the error line for a 500.
             // Success criteria: WARN, with the server-error exception as its throwable, and without the
             //   `expected client error` marker.
-            // Why it matters: the counterpart that keeps the test above honest - without it, a line that lost its
+            // Why it matters: the counterpart that keeps the benign-4xx case honest - without it, a line that lost its
             //   severity AND its cause for every failure would satisfy the DEBUG/no-stack-trace assertions.
             //
             // Given / When: the backend answers 500
@@ -935,7 +935,7 @@ class ResilientRestClientIntegrationTest {
             // What is tested: that the boundary INSIDE the 4xx range holds on this side too - 408 Request Timeout
             //   is an operational signal, not a business case.
             // Success criteria: the line is WARN with a stack trace, i.e. treated exactly like a 5xx, while the
-            //   404 above proves the same code path does demote a benign status.
+            //   404 of the benign-4xx case proves the same code path does demote a benign status.
             // Why it matters: a demoted 408 would hide a backend timing out under load in DEBUG, the one level
             //   nobody runs in production - and it would do so silently, because the exchange still "fails
             //   correctly" from the caller's point of view. The same status set drives the circuit breaker's record
@@ -1164,7 +1164,8 @@ class ResilientRestClientIntegrationTest {
             //   pool is closed.
             // Why it matters: shutdown() runs as a @PreDestroy, where Spring can only catch what it
             //   throws and log it as a destroy method that failed. The drain deadline is an outcome, reported as a
-            //   WARN naming the engine; that branch is covered by the two cases above, on an injected clock.
+            //   WARN naming the engine; that branch is covered by the case of a pool that does not drain within the
+            //   deadline, on an injected clock.
             //
             // Given: one completed exchange, which leaves its connection in the pool (keep-alive is on)
             wireMock.stubFor(get(urlEqualTo("/bye")).willReturn(okJson("""{"message":"bye"}""")))
@@ -1188,9 +1189,9 @@ class ResilientRestClientIntegrationTest {
         fun `should wait for an in-flight exchange to finish before closing the pool`() {
             // What is tested: the drain loop of shutdown() on a real clock - a connection leased by a call still
             //   waiting for its answer keeps shutdown() waiting until the exchange completes and returns the lease.
-            // Success criteria: the in-flight call, whose backend answers 500 ms after shutdown() was entered,
-            //   SUCCEEDS with the backend's value; shutdown() took at least until then; and no "did not drain" WARN
-            //   was written.
+            // Success criteria: the in-flight call, whose backend delays its answer by 500 ms and has its connection
+            //   leased when shutdown() is entered, SUCCEEDS with the backend's value; the pool holds no leased
+            //   connection afterwards; shutdown() waited more than 100 ms; and no "did not drain" WARN was written.
             // Why it matters: Apache's close discards leased connections on the spot, so without the wait a graceful
             //   shutdown would cut off every call in flight - the other drain cases (deadline passed, interrupted,
             //   nothing leased) all pass with the loop deleted, this one does not.

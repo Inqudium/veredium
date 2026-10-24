@@ -40,7 +40,8 @@ import java.util.function.Supplier
  * entry. A configuration that declares fewer TimeLimiter instances than mesh derives endpoints leaves the
  * undeclared ones on the library default without a word. Only a real context shows that the keys, the derived
  * aliases, the customizer names and the guard agree - and that the guard fails the start when they do not. Each
- * client module boots its own fixture the same way (`MeshResilienceShippedConfigTest`), with its real verdicts.
+ * client module boots its reference configuration the same way (`MeshResilienceShippedConfigTest`), with its real
+ * verdicts.
  *
  * Determinism: a real context, no I/O beyond the classpath, no HTTP stack - nothing is called, only configured.
  */

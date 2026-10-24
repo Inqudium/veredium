@@ -475,6 +475,55 @@ Part of these entries resolve the findings of `docs/assessment/CODE_STYLE-2026-1
     `takeIf`/`?.let` chains, `@Nested` groups, links instead of backticks, and a bounded cause walk shared from the
     core (`ClientSideFailurePolicy.causeChain`).
   - `MixedCustomerAdapter` implements `BaseAdapter`; `CHANGELOG.md` has its `## [Unreleased]` heading.
+- Comment audit of 2026-10-24 (`docs/assessment/COMMENT_AUDIT-2026-10-24T20-44-11.md`, 71 findings):
+  - **Public KDoc that contradicted the code:**
+    - `requestBudget` (both decorators) is the configured TimeLimiter budget, published and logged. Nothing
+      derives a transport timeout from it.
+    - `RestClientProperties.Pool` states the pending-queue bound per engine. Only Apache bounds the wait in time
+      alone.
+    - `ResponseBodyLimitExceededException.contentLength` is the declared length or `-1`, never the compressed wire
+      size.
+    - `RestClientMetrics` lists the pool gauges per engine, the Reactor Netty family included.
+    - `Veredium.NAME` no longer claims to be the root of the logger names; the loggers live under
+      `eu.inqudium.veredium`.
+    - `MeshProperties` states each value range once, on the property that binds it, including the bounds that
+      were missing. The transport bound is attributed to the Reactor Netty engine on either stack.
+    - The Apache engine's cancellation names its real precondition, a virtual worker thread (JEP 444). The
+      engine's startup line, `BlockingResilienceDecorator` and the blocking timeout guide say so too.
+  - **One vocabulary for the breaker:** three outcomes (ignored / success / failure) and two verdicts (the
+    policies), defined on `BreakerVerdicts`. The tests no longer call a benign 4xx "ignored" - it is a success.
+  - **Prefixes:** CONTRIBUTING's prefix rule holds for KDoc too, and it tells `Workaround:` (goes when the
+    dependency is fixed) apart from `Assumption:` (to recheck on a bump). About 120 statements about Spring,
+    Resilience4j, Apache, Jetty, Reactor Netty, the JDK, legatium and the test libraries now carry the prefix and,
+    where version-bound, the checked version. `grep -rn "Assumption:\|Workaround:"` is the checklist of a
+    dependency bump again.
+  - **One place per concept:**
+    - The webclient decorator links the core for the aspect order and the breaker outcomes instead of copying
+      them.
+    - `WebClientEngine` is the one place for why Boot's reactive connector setting is not read (ADR-0004).
+    - The engine transports keep only the reasons a knob has no equivalent. What each engine applies is the
+      startup line's job.
+    - The URI-template stamp of the blocking client is one helper.
+    - Range and failure mode of `maxInMemorySize` are in the KDoc, not in a code comment Dokka does not render.
+  - **References:**
+    - The reference YAMLs point at `veredium-core/docs/mesh-timeout.md` and qualify legatium's ADRs.
+    - Prose names the guide file it means.
+    - Production KDoc no longer names test classes or enumerates the client stacks that use a core type.
+    - The last words of the project the modules were ported from are gone.
+  - **Test rationales follow their assertions:** nine success criteria and "what is tested" lines now say what
+    the test checks. Each of about 45 "the previous / next / above test" references names its test, because the
+    test-evidence page sorts tests alphabetically.
+  - **New tests behind statements that were prose:**
+    - A 5xx with an oversized error body is a breaker failure through the real reactive pipeline.
+    - The decorator's nesting matches Resilience4j's aspect-order defaults.
+    - The worked ladder example of `ResolvedTimeouts` is what the code derives.
+    - Every blocking engine counts a gzip body after decompression.
+    - An Apache body read on the virtual worker ends with the socket the interrupt closes.
+    - The decorator example's shipped `application.yml` keeps its pool at least the bulkhead and its socket
+      timeout below the TimeLimiter budget.
+    - `DrippingBackend` publishes its shape as named constants.
+  - `veredium-restclient`: the JDK engine switches Spring's response decompression on explicitly
+    (`enableCompression(true)`, Spring's default until now), so the body limit counts decoded bytes by construction.
 
 #### Build and CI - 2026-10-23
 

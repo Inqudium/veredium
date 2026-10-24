@@ -28,7 +28,7 @@ class ReactiveCustomerAdapter(
     private val customers = factory.create(Backends.CUSTOMERS)
     private val orderSearch = factory.create(Backends.ORDER_SEARCH)
 
-    /** The pessimistic ceiling over both clients, as in the blocking adapter. */
+    /** The pessimistic ceiling over both clients: what one call of this adapter may take at most. */
     override val timeLimiterTimeout: Duration
         get() = maxOf(customers.timeLimiterTimeout, orderSearch.timeLimiterTimeout)
 

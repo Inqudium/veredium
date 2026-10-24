@@ -31,8 +31,9 @@ class DirectoryFailureException(
  * `CircuitBreaker( TimeLimiter( Bulkhead( call ) ) )`, configured under `resilience4j.*.instances.legacy-directory`.
  *
  * The decorator adds what the client cannot do itself: a hard budget for the whole call, after which the caller is
- * released with a `TimeoutException` and the worker interrupted. On a virtual thread the interrupt closes the
- * socket HttpClient 4 is blocked on, so the worker ends at once and its permit and connection come back.
+ * released with a `TimeoutException` and the worker interrupted. Assumption: on a virtual thread (JDK 21 and later)
+ * the interrupt closes the socket HttpClient 4 is blocked on, so the worker ends at once and its permit and connection
+ * come back.
  *
  * [customer] blocks the caller; [customerAsync] returns at once, and cancelling its future abandons the call the
  * same way.
@@ -86,7 +87,7 @@ class DecoratorCustomerAdapter(
                 setHeader(HttpHeaders.HOST, properties.host)
                 setHeader(HttpHeaders.ACCEPT, "application/json")
             }
-        // Assumption: HttpClient 4's response handler form releases the connection whatever the handler does.
+        // Assumption: HttpClient 4's response handler form (4.5.14) releases the connection whatever the handler does.
         return httpClient.execute(request) { response ->
             when (val status = response.statusLine.statusCode) {
                 200 -> objectMapper.readValue(EntityUtils.toString(response.entity, Charsets.UTF_8), Customer::class.java)

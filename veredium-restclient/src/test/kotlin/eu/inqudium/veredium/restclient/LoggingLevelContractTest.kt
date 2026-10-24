@@ -140,9 +140,9 @@ class LoggingLevelContractTest {
             // Success criteria: both directions `on-failure`, `max-body-bytes` 16384.
             // Why it matters: logging every body of every call would put customer data on every line;
             //   `on-failure` keeps the error body an operator needs and drops the rest, and 16384 - the library
-            //   default - is written out so the cap is reviewable. The body mode of the REFERENCE file is a
-            //   rollout posture and a value an operator tunes, which is why it is not pinned there
-            //   (LegatiumExchangeLoggingIntegrationTest reads the reference mode as it is).
+            //   default - is written out so the cap is reviewable. The REFERENCE file's body mode is a rollout
+            //   posture and pinned with its other values in LegatiumExchangeLoggingIntegrationTest, by the case
+            //   binding the reference adapter-logging block as written.
             //
             // Given / When / Then
             assertThat(adapterLogging).containsEntry("log-request-body", "on-failure")

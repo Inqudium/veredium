@@ -50,7 +50,7 @@ class RestClientPropertiesTest {
             //   ResilientRestClientFactory narrows the value to an Int for the bounded reader.
             // Success criteria: 3 GB is rejected here, rather than silently becoming a negative Int later.
             // Why it matters: without the guard, a value chosen to be generous would end up at the
-            //   zero case above, by a route nobody would suspect from reading the configured number.
+            //   zero case, by a route nobody would suspect from reading the configured number.
             //
             // Given / When / Then
             assertThatThrownBy { RestClientProperties(maxInMemorySize = DataSize.ofGigabytes(3)) }
@@ -63,8 +63,8 @@ class RestClientPropertiesTest {
             // What is tested: the admitted range of the buffer limit.
             // Success criteria: the code default, one byte and Int.MAX_VALUE bytes all construct without an
             //   exception.
-            // Why it matters: a guard that rejects everything would satisfy the two tests above; this states
-            //   where the line actually runs.
+            // Why it matters: a guard that rejects everything would satisfy the zero and the past-Int.MAX_VALUE
+            //   cases; this states where the line actually runs.
             //
             // Given / When / Then
             assertThatCode {
@@ -77,13 +77,13 @@ class RestClientPropertiesTest {
         @Test
         fun `should default to 256 KB, the twin's ceiling, large enough for a typical JSON list response`() {
             // What is tested: the code default of the buffer limit, as a value in its own right rather than
-            //   as a by-product of the range check above.
+            //   as a by-product of the range-check cases.
             // Success criteria: the default is 256 KB and NOT 8 KB.
             // Why it matters: the two modules front the SAME backends, and a response that fits one
             //   client's buffer and not the other's would be a difference nobody expects from a twin. 8 KB is
             //   too small for a typical JSON payload; the limit applies per concurrently buffered response and
-            //   the mesh bulkheads admit 100 calls in all, so this default also bounds the worst case at
-            //   ~25 MB of response buffers - the reason it is not simply raised further.
+            //   the reference configuration holds the mesh bulkheads' sum at 100 calls, so this default also bounds
+            //   the worst case there at ~25 MB of response buffers - the reason it is not simply raised further.
             //
             // Given / When / Then
             assertThat(RestClientProperties().maxInMemorySize)

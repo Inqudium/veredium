@@ -62,7 +62,7 @@ class WebClientReactorContextPropagationConfigurationTest {
     fun `should leave Reactor's context propagation alone when HTTP observation is off`() {
         // What is tested: the OFF branch - the code default - changes nothing JVM-wide.
         // Success criteria: after constructing the configuration with the toggle off, Reactor still reports
-        //   automatic propagation as disabled, and the same round-trip as above sees no value on the other
+        //   automatic propagation as disabled, and the same round-trip as in the ON test sees no value on the other
         //   thread - which is also what makes the ON test's round-trip evidence of the hook rather than of the
         //   accessor alone.
         // Why it matters: the hook cannot be undone by the library and changes how EVERY Reactor pipeline of the

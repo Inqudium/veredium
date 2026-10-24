@@ -52,10 +52,11 @@ import java.util.function.Supplier
  * connector. On THIS module's side, where every request carries Veredium's own User-Agent, by the THREAD the
  * response arrives on, which a filter on Boot's builder (a `WebClientCustomizer`, as a host would declare one)
  * records per path: each engine of this module answers on threads it owns and names - the factory's own Reactor
- * Netty loops, Jetty's and Apache's named pools, the common fork-join pool the JDK client completes on - so the thread says which engine
- * actually carried the exchange, whatever the factory believes it configured. The factory's own record of the
- * connector it built is checked as well, but only as a supplement: it is written before the connector is put
- * on the client, so it cannot tell a connector that was set from one that was not.
+ * Netty loops, Jetty's and Apache's named pools, and for the JDK client either its own executor's worker threads or
+ * the common fork-join pool - so the thread says which engine actually carried the exchange, whatever the factory
+ * believes it configured. The factory's own record of the connector it built is checked as well, but only as a
+ * supplement: it is written before the connector is put on the client, so it cannot tell a connector that was set
+ * from one that was not.
  *
  * The context holds Boot's `HttpClientAutoConfiguration`, `ReactiveHttpClientAutoConfiguration` (Boot's
  * `ClientHttpConnector`, its builder and the `ReactorResourceFactory`) and `WebClientAutoConfiguration` (the
@@ -92,9 +93,9 @@ class WebClientEngineIsolationTest {
                 WebClientEngine.REACTOR_NETTY to "${ResilientWebClientFactory.POOL_NAME}-.*",
                 WebClientEngine.JETTY to "${JettyEngineTransport.THREAD_NAME_PREFIX}-.*",
                 WebClientEngine.APACHE to "${ApacheEngineTransport.THREAD_NAME_PREFIX}-.*",
-                // The JDK client delivers on its default executor's threads (`HttpClient-<n>-Worker-<m>`) or hands a
-                // completion to the common fork-join pool, depending on timing - both seen; no other engine, Boot's
-                // included, delivers a response on either.
+                // Assumption: the JDK client delivers on its default executor's threads (`HttpClient-<n>-Worker-<m>`)
+                // or hands a completion to the common fork-join pool, depending on timing - both seen on JDK 21+; no
+                // other engine, Boot's included, delivers a response on either.
                 WebClientEngine.JDK to "HttpClient-\\d+-Worker-\\d+|ForkJoinPool\\.commonPool-worker-\\d+",
             )
 

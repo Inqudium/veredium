@@ -32,8 +32,8 @@ import java.util.concurrent.atomic.AtomicReference
  * call, the three instances) and a `() -> T`, and the call runs guarded. `veredium-restclient` is its one
  * consumer in this repository; a host that has a blocking call of its own to bound - a JDBC lookup, a legacy
  * SDK, a file system - decorates it the same way. There is no Spring annotation on the class: a host that wants
- * it as a bean declares one (the blocking client does, in its auto-configuration
- * `VerediumRestClientAutoConfiguration`), which is also where the worker-thread name of that host is chosen.
+ * it as a bean declares one (the blocking client's auto-configuration does), which is also where the worker-thread
+ * name of that host is chosen.
  *
  * ## Why THIS order - it is Resilience4j's own
  *
@@ -50,16 +50,16 @@ import java.util.concurrent.atomic.AtomicReference
  * | TimeLimiter    | `LOWEST_PRECEDENCE - 2`   |          | yes       |
  * | Bulkhead       | `LOWEST_PRECEDENCE - 1`   | innermost| yes       |
  *
- * (Read off the `*ConfigurationProperties.get*AspectOrder()` defaults in `resilience4j-spring6`, the version
- * this module resolves. Should a future upgrade change them, this table - not the reasoning above - is what
- * needs rechecking.)
+ * Assumption: the order column is the `*ConfigurationProperties.get*AspectOrder()` defaults of
+ * `resilience4j-spring6` (checked against 2.4.0, and re-read by a test on every build). Should an upgrade change
+ * them, that test turns red, and this table - not the reasoning above - is what needs rechecking.
  *
  * ## The thread hand-off the TimeLimiter needs
  *
  * A blocking call cannot time itself out: the thread that would notice the deadline is the one stuck in the
- * socket read. Resilience4j's blocking TimeLimiter therefore works on a `Future` - the call runs on ANOTHER
- * thread, the caller waits on the future for at most the budget, and on expiry the caller is released with a
- * `TimeoutException` while the future is cancelled (`cancelRunningFuture`). That hand-off is the one structural
+ * socket read. Assumption: Resilience4j's blocking TimeLimiter (2.4.0) works on a `Future` for that reason - the
+ * call runs on ANOTHER thread, the caller waits on the future for at most the budget, and on expiry the caller is
+ * released with a `TimeoutException` while the future is cancelled (`cancelRunningFuture`). That hand-off is the one structural
  * difference to a reactive pipeline, where the TimeLimiter operator simply cancels the subscription, and it has
  * three consequences this class owns:
  *
@@ -67,8 +67,8 @@ import java.util.concurrent.atomic.AtomicReference
  *    so there is no pool to size and no pool that could become a second, undeclared bulkhead. The bulkhead
  *    permit is taken ON the worker, so it still counts what is actually in flight at the backend.
  *
- *    This is why the executor is deliberately UNBOUNDED and why Resilience4j's `ThreadPoolBulkhead` - which
- *    bundles a bounded platform-thread pool with the hand-off - is not used, although it looks made for the
+ *    Rationale: this is why the executor is deliberately UNBOUNDED and why Resilience4j's `ThreadPoolBulkhead` -
+ *    which bundles a bounded platform-thread pool with the hand-off - is not used, although it looks made for the
  *    job. Its `CompletableFuture` cannot be interrupted (`cancel(true)` ignores its argument by specification),
  *    so a TimeLimiter expiry would leave the pool thread blocked in the socket until the transport timeout,
  *    holding its slot and its connection for calls nobody waits for; its queue (default 100) admits calls that
@@ -76,8 +76,7 @@ import java.util.concurrent.atomic.AtomicReference
  *    count pool and queue depth rather than calls at the backend, which is what a pool is sized against; and it
  *    would be a second hand-off next to the one the TimeLimiter already needs. The semaphore with a zero wait
  *    rejects at once, the virtual worker is interruptible, and the only concurrency limits in the call path stay
- *    the configured, named and metered ones. The long form is `veredium-restclient/docs/timeouts-bulkheads-threads.md`,
- *    "Why a semaphore bulkhead over an unbounded executor, and not a `ThreadPoolBulkhead`".
+ *    the configured, named and metered ones.
  * 2. **The caller's context.** The worker starts with an empty MDC and no current observation, so everything
  *    logged there would lose the caller's correlation keys, and an observation opened on the worker would start
  *    a detached root instead of nesting under the caller's span. [propagate] carries both across: the caller's
@@ -85,10 +84,11 @@ import java.util.concurrent.atomic.AtomicReference
  *    (when the host hands in a registry) is reopened as a scope there. Both are undone before the worker is
  *    released. A reactive pipeline solves the same problem with Reactor's context-propagation hook; here the
  *    thread IS the context, and a copy is enough.
- * 3. **What cancellation does.** Cancelling the future interrupts the worker, and since JDK 13 a blocking socket
- *    read DOES react to that: the JDK's socket implementation closes the socket and the read fails at once with
- *    `SocketException: Closed by interrupt` (the connect and a pool lease are interruptible too). The worker is
- *    therefore released promptly in every phase, its bulkhead permit with it. The CALLER is released at the
+ * 3. **What cancellation does.** Cancelling the future interrupts the worker. Assumption: on a VIRTUAL thread
+ *    (JDK 21) a blocking `java.net.Socket` read DOES react to that: the JDK closes the socket and the read fails
+ *    at once with `SocketException: Closed by interrupt` (the connect and a pool lease are interruptible too). On a
+ *    platform thread the same read ignores the interrupt - which is why the worker is virtual (consequence 1), not
+ *    merely cheap. The worker is therefore released promptly in every phase, its bulkhead permit with it. The CALLER is released at the
  *    budget regardless, which is the property its end-to-end budget depends on. What the abandoned worker sees
  *    is whatever its blocking operation throws on interrupt; a call that ignores interruption runs on until it
  *    returns, which is the one thing this class cannot change - decorate only calls that honour it.
@@ -114,23 +114,23 @@ import java.util.concurrent.atomic.AtomicReference
  * The breaker sits OUTSIDE the bulkhead, so a `BulkheadFullException` - this pipeline's own load shedding,
  * not a backend fault - reaches the breaker's error hook like any other error and would be counted as a
  * backend failure. The same goes for the two faults the hand-off itself can raise: the caller's
- * `InterruptedException` (rethrown out of the decorated call, and `CircuitBreaker.decorateCallable` records
- * every `Exception`) and the `RejectedExecutionException` of a worker submitted after [shutdown]. Nothing in
- * Resilience4j's defaults prevents any of it; it takes an explicit ignore predicate on every breaker this class
- * is used with. [SELF_INFLICTED_FAILURES] names the three so a host can configure them, and the mesh customizer
+ * `InterruptedException` (rethrown out of the decorated call) and the `RejectedExecutionException` of a worker
+ * submitted after [shutdown]. Assumption: nothing in Resilience4j's defaults (2.4.0) prevents any of it -
+ * `CircuitBreaker.decorateCallable` records every `Exception` - so it takes an explicit ignore predicate on every
+ * breaker this class is used with. [SELF_INFLICTED_FAILURES] names the three so a host can configure them, and the mesh customizer
  * of this module installs them - through the stack's [ClientSideFailurePolicy] - on every mesh alias while
  * Resilience4j builds the instance. A breaker constructed outside that wiring never receives the invariant and
  * has to carry its own predicate; a standalone user passes [SELF_INFLICTED_FAILURES] to
- * `CircuitBreakerConfig.ignoreExceptions`. (The TimeLimiter unwraps the worker's `ExecutionException`, so the
- * breaker sees every failure as itself, not as a wrapper - pinned by `BlockingResilienceDecoratorTest`.)
+ * `CircuitBreakerConfig.ignoreExceptions`. Assumption: the TimeLimiter (2.4.0) unwraps the worker's
+ * `ExecutionException`, so the breaker sees every failure as itself, not as a wrapper - a test pins it.
  *
  * @property observationRegistry The host's observation registry, read for ONE purpose: the caller's current
  *   observation, so the worker can reopen it (consequence 2 above). Nullable on purpose - an optional
  *   dependency, so a direct construction and a host without Micrometer observation both work; absent, nothing
  *   is propagated and an observation opened on the worker, if any, starts as its own root.
  * @property workerNamePrefix The name prefix of the virtual worker threads (`<prefix><n>`), which is what a
- *   thread dump and a log line's thread name show. A host names its own calls; the blocking client uses
- *   `restclient-call-`.
+ *   thread dump and a log line's thread name show. A host names its own calls, as each client stack names its
+ *   own.
  */
 class BlockingResilienceDecorator(
     private val circuitBreakerRegistry: CircuitBreakerRegistry,
@@ -165,8 +165,8 @@ class BlockingResilienceDecorator(
         decorate(
             circuitBreakerRegistry.circuitBreaker(name),
             timeLimiterRegistry.timeLimiter(name),
-            // Only the semaphore Bulkhead applies here; a ThreadPoolBulkhead would be a second hand-off on top of
-            // the TimeLimiter's and would hide the one this class declares.
+            // Rationale: only the semaphore Bulkhead applies here; a ThreadPoolBulkhead would be a second hand-off
+            // on top of the TimeLimiter's and would hide the one this class declares.
             bulkheadRegistry.bulkhead(name),
             call,
         )
@@ -203,9 +203,10 @@ class BlockingResilienceDecorator(
                 try {
                     timeLimiter.decorateFutureSupplier<T, Future<T>> { future }.call()
                 } catch (e: InterruptedException) {
-                    // The CALLER went away. Resilience4j cancels the future on ITS timeout only, so the worker
-                    // would otherwise run on, holding a bulkhead permit, for a result nobody waits for. The
-                    // interrupt reaches the worker's blocking operation (consequence 3 in the class KDoc).
+                    // The CALLER went away. Assumption: Resilience4j (2.4.0) cancels the future on ITS timeout
+                    // only, so the worker would otherwise run on, holding a bulkhead permit, for a result nobody
+                    // waits for. The interrupt reaches the worker's blocking operation (consequence 3 in the class
+                    // KDoc).
                     future.cancel(true)
                     throw e
                 }
@@ -281,9 +282,10 @@ class BlockingResilienceDecorator(
     }
 
     /**
-     * The configured TimeLimiter timeout for [name] - the end-to-end budget of a call decorated under that name.
-     * Exposed so a transport can derive a *tighter* response-phase guard from it, rather than a second
-     * independent timeout that could drift past the budget.
+     * The configured TimeLimiter budget for [name] - the end-to-end budget of a call decorated under that name -
+     * published by adapters and named on the call lines. Nothing derives from it: the transport's response timeout
+     * is its own rung of the ladder ([eu.inqudium.veredium.core.mesh.ResolvedTimeouts]), and on a mesh alias the
+     * budget is derived from that rung, not the other way round.
      */
     fun requestBudget(name: String): Duration = timeLimiterRegistry.timeLimiter(name).timeLimiterConfig.timeoutDuration
 
@@ -295,8 +297,8 @@ class BlockingResilienceDecorator(
      *
      * Restoration is unconditional and in `finally` ([CallerMdc.with] for the MDC): the virtual workers of this class
      * are never reused, but the wrapper must not depend on that - a thread that runs it twice must not carry one
-     * caller's keys or scope into the next call. `internal` so `BlockingResilienceDecoratorTest` can prove exactly that on a REUSED
-     * thread of its own, which the decorator's fresh-thread executor never offers.
+     * caller's keys or scope into the next call. `internal` so a test can prove exactly that on a REUSED thread of
+     * its own, which the decorator's fresh-thread executor never offers.
      */
     internal fun <T : Any> propagate(call: () -> T): Callable<T> {
         val callerMdc: Map<String, String>? = MDC.getCopyOfContextMap()

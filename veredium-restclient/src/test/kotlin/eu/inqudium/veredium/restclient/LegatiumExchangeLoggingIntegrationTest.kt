@@ -350,7 +350,8 @@ class LegatiumExchangeLoggingIntegrationTest {
                     client.get(Greeting::class.java) { it.uri("/things/200") }
 
                     // Then: the 5xx is a WARN failure carrying its body; the 200 carries its body too, because
-                    // the reference file logs bodies in `always` mode (the configuration case below pins that)
+                    // the reference file logs bodies in `always` mode (pinned by the case binding the reference
+                    // adapter-logging block)
                     val events = appender.awaitEvents(count = 2)
                     val failure = events.single { it.field("adapter_response_status_code") == 500 }
                     assertThat(failure.level).isEqualTo(Level.WARN)
@@ -371,7 +372,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // Success criteria: a backend slower than the response timeout yields one WARN event with
             //   `adapter_outcome=timeout` and no status.
             // Why it matters: this is the outcome an alert on a slow backend has to key on; the two cancellation
-            //   cases below produce a different one.
+            //   cases produce a different one.
             //
             // Given: a backend slower than the 1400 ms response timeout
             wireMock.stubFor(get(urlEqualTo("/things/slow")).willReturn(okJson("{}").withFixedDelay(3_000)))

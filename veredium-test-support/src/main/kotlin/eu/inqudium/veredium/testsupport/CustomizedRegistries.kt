@@ -16,16 +16,16 @@ import java.time.Duration
  * Resilience4j's Boot configuration applies them to the registry it builds - so a test can exercise the customized
  * instance through the real decorator without a Spring context.
  *
- * The Boot configuration seeds a builder from the instance's YAML (named base config plus instance properties), hands
- * it to the customizer registered under the instance name, and registers the result BEFORE the instance exists. Here
+ * Assumption: Resilience4j's Boot configuration (2.4.0) seeds a builder from the instance's YAML (named base config
+ * plus instance properties), hands it to the customizer registered under the instance name, and registers the result
+ * BEFORE the instance exists. Here
  * the seed is the config already registered under the alias - which is how a test states "the operator's YAML said
  * this" - or the registry default; the customizer runs; the result replaces whatever was there. The replacement is the
  * one thing the real path never does (it never has a prior instance), and it is what lets a test register a marker
  * config first and assert what survives the customizer.
  *
- * The same object exists in veredium-core's tests, which cannot depend on this module (see its pom). There it also
- * customizes single instances and the time limiters, which only the core's own tests exercise; the verdicts differ as
- * well: here a caller passes its stack's, there they default to the core's test verdicts.
+ * A twin of this object lives in veredium-core's tests, which cannot use this module: it depends on the core, so a
+ * test dependency back would be a cycle.
  */
 object CustomizedRegistries {
     /** Every circuit breaker of [mesh], customized with [verdicts]. */

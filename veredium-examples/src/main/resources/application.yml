@@ -7,8 +7,8 @@ spring:
   application:
     name: veredium-examples
   main:
-    # The examples call backends; they serve nothing. Without this, spring-webflux on the classpath would start a
-    # reactive web server.
+    # The examples call backends; they serve nothing. Assumption: without this, Spring Boot (4.1.1) starts a reactive
+    # web server because spring-webflux is on the classpath.
     web-application-type: none
 
 # legatium: one structured exchange event per call on the adapter-http-exchange logger.
@@ -24,7 +24,9 @@ legacy-directory:
   base-url: "http://localhost:8042"
   host: customers.example.com
   connect-timeout: 100ms
+  # Invariant: below the TimeLimiter budget (resilience4j.timelimiter.instances.legacy-directory) - it trips first.
   response-timeout: 700ms
+  # Invariant: at least the bulkhead's max-concurrent-calls (resilience4j.bulkhead.instances.legacy-directory).
   max-connections: 10
 
 app:
@@ -67,6 +69,7 @@ resilience4j:
       order-search:
         base-config: mesh-backend
       legacy-directory:
+        # Invariant: above legacy-directory.response-timeout.
         timeout-duration: 1s
         # Required by BlockingResilienceDecorator: without it the worker is not interrupted at the budget.
         cancel-running-future: true
@@ -81,6 +84,7 @@ resilience4j:
       order-search:
         base-config: mesh-backend
       legacy-directory:
+        # Invariant: at most legacy-directory.max-connections, so a permit always finds a connection.
         max-concurrent-calls: 10
         max-wait-duration: 0
   circuitbreaker:

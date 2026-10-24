@@ -2,10 +2,10 @@ package eu.inqudium.veredium.examples
 
 /**
  * The payloads the examples exchange with their two backends: a customer directory, read by id, and an order
- * search, queried by a POSTed body. Plain data classes, (de)serialised by Jackson. That a required property the
- * backend leaves out fails the call instead of arriving as `null` needs Jackson's Kotlin module
- * (`jackson-module-kotlin`) on the classpath: the reactive client brings it, a host with only the blocking client
- * or the decorator declares it itself, as this module's pom does.
+ * search, queried by a POSTed body. Plain data classes, (de)serialised by Jackson. Assumption: that a required
+ * property the backend leaves out fails the call instead of arriving as `null` needs Jackson's Kotlin module
+ * (`jackson-module-kotlin`, 3.1.7) on the classpath. The reactive client brings it; a host with only the blocking
+ * client or the decorator declares it itself, as this module's pom does.
  */
 data class Customer(
     val id: String,

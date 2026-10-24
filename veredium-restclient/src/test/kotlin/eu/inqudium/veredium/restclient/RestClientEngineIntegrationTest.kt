@@ -50,6 +50,7 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 import org.slf4j.LoggerFactory
 import org.springframework.http.MediaType
+import org.springframework.http.client.ClientHttpResponse
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory
 import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.util.unit.DataSize
@@ -61,8 +62,12 @@ import org.springframework.web.client.RestClientResponseException
 import reactor.core.publisher.Mono
 import reactor.netty.http.HttpResources
 import tools.jackson.databind.json.JsonMapper
+import java.io.ByteArrayOutputStream
+import java.io.FilterInputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.Socket
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.http.HttpTimeoutException
 import java.time.Duration
@@ -74,6 +79,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.GZIPOutputStream
 
 /**
  * The selectable HTTP engines (`app.restclient.engine`), each driven end to end against a real (WireMock) backend
@@ -239,7 +245,7 @@ class RestClientEngineIntegrationTest {
             //   the engine's own timeout type - each one legatium classifies as `timeout`.
             // Why it matters: the rung is what releases the WORKER under normal conditions; an engine that did not
             //   apply it would hold every slow call until the TimeLimiter, with its permit and its connection. The
-            //   cause type is what the guide's failure table names per engine.
+            //   cause type is what the table of GUIDE.md's section "What each engine applies" names per engine.
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/stalled")).willReturn(okJson("{}").withFixedDelay(3_000)))
@@ -279,9 +285,9 @@ class RestClientEngineIntegrationTest {
             //   (the head's types); over an IOException of the cancelled body on the JDK, whose timeout in the body
             //   phase is Spring's handler closing the stream - no HttpTimeoutException; and over an IOException
             //   around Netty's ReadTimeoutException on Reactor Netty, as during the head wait.
-            // Why it matters: every other response-timeout case delays the head. The guide promises the rung for
-            //   the body as well - over head and body (JDK, Jetty), until the response is complete (Reactor Netty),
-            //   per read (Apache); an upgrade that made one of them a head-only bound would leave a stalled body to
+            // Why it matters: every other response-timeout case delays the head. GUIDE.md's section "What each
+            //   engine applies" promises the rung for the body as well - over head and body (JDK, Jetty), until the
+            //   response is complete (Reactor Netty), per read (Apache); an upgrade that made one of them a head-only bound would leave a stalled body to
             //   the TimeLimiter, and the breaker would see a TimeoutException instead of the transport failure.
             //
             // Given
@@ -381,11 +387,51 @@ class RestClientEngineIntegrationTest {
 
         @ParameterizedTest
         @EnumSource(RestClientEngine::class)
+        fun `should count a gzip-encoded body after its decompression`(engine: RestClientEngine) {
+            // What is tested: the decompression each engine applies to a gzip-encoded body, as the bounded read and
+            //   the size meter above the engine see it.
+            // Success criteria: with a 1 KiB limit, a `Content-Encoding: gzip` body that decodes to some 500 bytes
+            //   is deserialised, and the size meter holds one sample of exactly its decoded size; a body that
+            //   decodes to some 4 KiB - far below 1 KiB on the wire - fails with ResponseBodyLimitExceededException
+            //   whose contentLength is -1.
+            // Why it matters: the limit and the meter are documented in decoded bytes on every engine, and each
+            //   engine decodes by a route of its own - Apache's and Reactor Netty's compression, Spring's JDK
+            //   request, the decoder Jetty discovers on its classpath. One that stopped decoding would hand the
+            //   reader the compressed bytes: the limit would bound the wire size, and the meter would size the
+            //   buffer from it.
+            //
+            // Given: two gzip bodies, compressed by the stub itself so they reach the client encoded on every engine
+            val small = """{"message":"${"s".repeat(480)}"}"""
+            val large = """{"message":"${"l".repeat(4_096)}"}"""
+            wireMock.stubFor(get(urlEqualTo("/gzip-small")).willReturn(gzipJson(small)))
+            wireMock.stubFor(get(urlEqualTo("/gzip-large")).willReturn(gzipJson(large)))
+            assertThat(gzip(large).size).`as`("the large body must fit the limit on the wire").isLessThan(1_024)
+            val meters = SimpleMeterRegistry()
+            val client =
+                newFactory(RestClientProperties.Engine(default = engine), maxInMemorySize = DataSize.ofKilobytes(1), meterRegistry = meters)
+                    .create("limited")
+
+            // When
+            val decoded = client.get(Greeting::class.java) { it.uri("/gzip-small") }
+            val refused = catchThrowable { client.get(Greeting::class.java) { it.uri("/gzip-large") } }
+
+            // Then
+            assertThat(decoded.message).hasSize(480)
+            val sizes = meters.get(RestClientMetrics.RESPONSE_BODY_SIZE).summary()
+            assertThat(sizes.count()).isEqualTo(1)
+            assertThat(sizes.totalAmount()).isEqualTo(small.toByteArray().size.toDouble())
+            assertThat(refused).isInstanceOf(ResponseBodyLimitExceededException::class.java)
+            assertThat((refused as ResponseBodyLimitExceededException).contentLength).isEqualTo(-1L)
+        }
+
+        @ParameterizedTest
+        @EnumSource(RestClientEngine::class)
         fun `should refuse a dripping body past the buffer limit at once, without reading the rest`(engine: RestClientEngine) {
             // What is tested: what closing an over-limit response does on each engine when the rest of the body
             //   is still on its way - read to the end, or the exchange dropped.
-            // Success criteria: against a backend that sends the head and 4 KiB of a declared 1 MiB body at once
-            //   and then one byte every 200 ms, a 1 KiB limit and a generous 30 s budget, the call fails with
+            // Success criteria: against a backend that sends the head and `DrippingBackend.FIRST_CHUNK_BYTES` of a
+            //   declared `DrippingBackend.DECLARED_LENGTH` body at once and then one byte every
+            //   `DrippingBackend.DRIP_INTERVAL`, a 1 KiB limit and a generous 30 s budget, the call fails with
             //   ResponseBodyLimitExceededException within 2 s; the backend sees its connection dropped within 2 s;
             //   the bulkhead permit and the engine's connection (where it counts them) are back as well.
             // Why it matters: Apache's close READS the rest of a body to keep its connection. For a large or slow
@@ -422,7 +468,8 @@ class RestClientEngineIntegrationTest {
         @EnumSource(RestClientEngine::class)
         fun `should fail a body the peer cuts off as a transport failure`(engine: RestClientEngine) {
             // What is tested: a transport failure in the BODY phase on each engine - the head arrived, the peer
-            //   closes the connection 4 KiB into a body that declared 1 MiB.
+            //   closes the connection `DrippingBackend.FIRST_CHUNK_BYTES` into a body that declared
+            //   `DrippingBackend.DECLARED_LENGTH`.
             // Success criteria: the call fails within 2 s with Spring's ResourceAccessException whose cause is an
             //   IOException - the shape every other transport fault has - and the permit and the connection come
             //   back.
@@ -459,7 +506,8 @@ class RestClientEngineIntegrationTest {
             //   or one pool (Apache) serves both backends and the timeout travels per request factory.
             // Success criteria: against a 4 s backend, `quick` (300 ms anchor, 700 ms response timeout) fails with
             //   a ResourceAccessException in under 1.5 s, `patient` (1500 ms anchor, 1.9 s response timeout) fails
-            //   the same way, but not before 1.5 s - each at its own rung, after one warm-up call each.
+            //   the same way in under 3.5 s - each not before its own response timeout minus the timer slack, so
+            //   each at its own rung, after one warm-up call each.
             // Why it matters: a request factory that carried the first backend's timeout, or the largest one, to
             //   every backend of the engine would put a backend's transport rung above its own TimeLimiter or
             //   below its own anchor - with one backend per test, nothing would show it.
@@ -591,8 +639,9 @@ class RestClientEngineIntegrationTest {
         fun `should release the worker promptly when the budget expires while the body is still arriving`(engine: RestClientEngine) {
             // What is tested: the same contract while the worker is in the BODY read - the head arrived, the body
             //   drips, each byte well inside the response timeout.
-            // Success criteria: against a backend that sends the head and 4 KiB of a declared 1 MiB body the moment
-            //   the request arrives and then one byte every 200 ms, with a 1.5 s budget, an 8.4 s response timeout
+            // Success criteria: against a backend that sends the head and `DrippingBackend.FIRST_CHUNK_BYTES` of a
+            //   declared `DrippingBackend.DECLARED_LENGTH` body the moment the request arrives and then one byte
+            //   every `DrippingBackend.DRIP_INTERVAL`, with a 1.5 s budget, an 8.4 s response timeout
             //   and a 256 KiB limit the body stays under, the caller gets a TimeoutException within 3 s; the
             //   backend sees its connection dropped, and the permit and the connection come back, within 2 s of
             //   that.
@@ -695,6 +744,57 @@ class RestClientEngineIntegrationTest {
             // Then
             assertThat(future.isCancelled).isTrue()
             awaitReleased(factory, engine, bulkheads, "cancelled")
+        }
+
+        @Test
+        fun `should end an Apache body read on the virtual worker by the socket the interrupt closes`() {
+            // What is tested: the mechanism the Apache engine's cancellation rests on - the TimeLimiter interrupts
+            //   the decorator's worker while it waits in a socket read of a stalled body, and the JDK closes that
+            //   socket because the worker is a virtual thread.
+            // Success criteria: against a backend that sends the head and 4 KiB of a declared 1 MiB body and then
+            //   nothing, with a 1 s budget and an 8.4 s response timeout, the caller gets a TimeoutException; the
+            //   backend sent the head; the exchange ran on a virtual thread; its body read failed with a
+            //   SocketException "Closed by interrupt" within 2 s of the caller's release; the permit and the
+            //   connection are back within 2 s.
+            // Why it matters: nothing in Apache ends a read on an interrupt - on a platform thread a silent socket
+            //   holds the read until the socket timeout. A worker moved to a platform pool would keep every
+            //   abandoned Apache call on its permit and its connection for the whole response timeout, and the
+            //   other abandoned-exchange cases would only say THAT the release came late, not why.
+            //
+            // Given: the worker and the failure of its body read, recorded where the exchange runs
+            StallingBackend().use { backend ->
+                val worker = AtomicReference<Thread>()
+                val readFailure = AtomicReference<IOException>()
+                val recording =
+                    RestClient.builder().requestInterceptor { request, body, execution ->
+                        worker.set(Thread.currentThread())
+                        FailureRecordingResponse(execution.execute(request, body), readFailure)
+                    }
+                val bulkheads = BulkheadRegistry.ofDefaults()
+                val factory =
+                    newFactory(
+                        RestClientProperties.Engine(default = RestClientEngine.APACHE),
+                        mesh = meshAt(backend.authority, "stalled", individualRequestTimeoutMs = 8_000),
+                        timeLimiter = budget(Duration.ofSeconds(1)),
+                        bulkheads = bulkheads,
+                        restClientBuilder = recording,
+                    )
+                val client = factory.create("stalled")
+                assertThat(client.responseTimeout).isEqualTo(Duration.ofMillis(8_400))
+
+                // When
+                val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/stall") } }
+
+                // Then
+                assertThat(failure).isInstanceOf(TimeoutException::class.java)
+                assertThat(backend.headSent.count).`as`("the backend must have sent the head").isZero()
+                assertThat(worker.get().isVirtual).`as`("the exchange must run on a virtual worker").isTrue()
+                assertThat(eventually(PROMPTLY) { readFailure.get() != null })
+                    .`as`("the interrupted body read must fail within %s", PROMPTLY)
+                    .isTrue()
+                assertThat(readFailure.get()).isInstanceOf(SocketException::class.java).hasMessage("Closed by interrupt")
+                awaitReleased(factory, RestClientEngine.APACHE, bulkheads, "stalled")
+            }
         }
     }
 
@@ -804,8 +904,9 @@ class RestClientEngineIntegrationTest {
         @EnumSource(RestClientEngine::class)
         fun `should let an in-flight exchange finish before closing the engine`(engine: RestClientEngine) {
             // What is tested: the drain of shutdown() on each engine, on a real clock.
-            // Success criteria: a call whose backend answers 500 ms after shutdown() was entered SUCCEEDS with the
-            //   backend's value; shutdown() waited at least 100 ms; no "did not drain" WARN.
+            // Success criteria: a call whose backend delays its answer by 500 ms and that is in flight when
+            //   shutdown() is entered SUCCEEDS with the backend's value; shutdown() waited more than 100 ms; no
+            //   "did not drain" WARN.
             // Why it matters: closing an engine cuts its in-flight exchanges; without the wait a graceful shutdown
             //   would fail every call still on the wire. Apache's drain has its own cases; the other three engines
             //   drain by other routes (Jetty's and Reactor Netty's counters, the JDK's awaitTermination).
@@ -896,7 +997,8 @@ class RestClientEngineIntegrationTest {
             //   real clock short of a call longer than every response timeout. And a cut-off call must fail then,
             //   not hold its worker and its permit on to its response timeout or the TimeLimiter budget - which
             //   only a case that looks at the call can tell. (Reactor Netty's own way out, for loops that no longer
-            //   signal the exchange's end, has a case of its own below: here the loops still close the channel.)
+            //   signal the exchange's end, has a case of its own, with the event loops held: here the loops still
+            //   close the channel.)
             //
             // Given
             wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("{}").withFixedDelay(10_000)))
@@ -982,8 +1084,8 @@ class RestClientEngineIntegrationTest {
             //   deadline disposes the loops, and an exchange whose end they no longer signal holds its worker and its
             //   permit until the TimeLimiter budget. Only the head wait running on the
             //   offload executor, and that executor's shutdownNow, end it; held loops are what makes that the only
-            //   way out on demand - with live loops the channel's close ends the call anyway, and the shutdown
-            //   cases above stay green without either.
+            //   way out on demand - with live loops the channel's close ends the call anyway, and the other shutdown
+            //   cases stay green without either.
             //
             // Given: a call waiting for its head, and every event loop of the engine held
             wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("{}").withFixedDelay(10_000)))
@@ -1293,7 +1395,7 @@ class RestClientEngineIntegrationTest {
             //   and max pending = Reactor Netty's 2 x max-connections (200); after it active = 0 and idle = 1.
             // Why it matters: the engine registers its own gauges instead of Reactor Netty's, so each reads one
             //   number off the pool by hand - a gauge wired to the wrong number (active reading the idle count)
-            //   would report a full pool as empty, and only the registration was pinned before.
+            //   would report a full pool as empty.
             //
             // Given: a call held for a second by the backend
             wireMock.stubFor(get(urlEqualTo("/held")).willReturn(okJson("""{"message":"held"}""").withFixedDelay(1_000)))
@@ -1481,6 +1583,7 @@ class RestClientEngineIntegrationTest {
         engineLibraryPresent: (RestClientEngine) -> Boolean = { it.isPresent() },
         jdkAllowsHostHeader: () -> Boolean = EngineSelection::jdkAllowsHostHeader,
         nanoTime: () -> Long = System::nanoTime,
+        restClientBuilder: RestClient.Builder = RestClient.builder(),
     ): ResilientRestClientFactory {
         val resilience =
             BlockingResilienceDecorator(circuitBreakers, TimeLimiterRegistry.of(timeLimiter), bulkheads)
@@ -1493,7 +1596,7 @@ class RestClientEngineIntegrationTest {
             meterRegistry = meterRegistry,
             // Deliberately no Spring context: a bare builder stands in for Boot's bean (the isolation test runs
             // the factory in a context).
-            restClientBuilder = RestClient.builder(),
+            restClientBuilder = restClientBuilder,
             engineLibraryPresent = engineLibraryPresent,
             jdkAllowsHostHeader = jdkAllowsHostHeader,
             nanoTime = nanoTime,
@@ -1568,12 +1671,49 @@ class RestClientEngineIntegrationTest {
                 (cause is SocketTimeoutException && cause.message == "Connect Timeout")
         }
 
+    /** A 200 whose body is [json], gzip-compressed and declared so with `Content-Encoding: gzip`. */
+    private fun gzipJson(json: String) =
+        aResponse()
+            .withHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+            .withHeader("Content-Encoding", "gzip")
+            .withBody(gzip(json))
+
+    private fun gzip(text: String): ByteArray = ByteArrayOutputStream().also { bytes -> GZIPOutputStream(bytes).use { it.write(text.toByteArray()) } }.toByteArray()
+
     /** Runs [call], returning what it threw (or `null`) and how long it took. */
     private fun timed(call: () -> Unit): Pair<Throwable?, Duration> {
         val startNanos = System.nanoTime()
         val failure = catchThrowable(call)
         return failure to Duration.ofNanos(System.nanoTime() - startNanos)
     }
+}
+
+/** [delegate], recording into [failure] the [IOException] a read of its body fails with first. */
+private class FailureRecordingResponse(
+    private val delegate: ClientHttpResponse,
+    private val failure: AtomicReference<IOException>,
+) : ClientHttpResponse by delegate {
+    private val recordingBody: InputStream by lazy {
+        object : FilterInputStream(delegate.body) {
+            override fun read(): Int = recording { super.read() }
+
+            override fun read(
+                b: ByteArray,
+                off: Int,
+                len: Int,
+            ): Int = recording { super.read(b, off, len) }
+        }
+    }
+
+    override fun getBody(): InputStream = recordingBody
+
+    private fun recording(read: () -> Int): Int =
+        try {
+            read()
+        } catch (e: IOException) {
+            failure.compareAndSet(null, e)
+            throw e
+        }
 }
 
 /**

@@ -14,8 +14,8 @@ import org.springframework.core.io.ClassPathResource
  *
  * [REFERENCE] is the module's `src/test/resources/application.yml`, its REFERENCE configuration: the documented,
  * worked example of how a host configures the client - every key with its reasoning, the shape the docs quote. It is
- * a TEST resource. The modules are libraries and have no `src/main/resources`; no consumer receives this file, and a
- * host writes its own. What the tests bound to it pin is therefore the documentation's truth, not an artefact's
+ * a TEST resource. The client modules are libraries and ship no `application.yml`; no consumer receives this file,
+ * and a host writes its own. What the tests bound to it pin is therefore the documentation's truth, not an artefact's
  * runtime behaviour. [FIXTURE] is the test-owned `src/test/resources/application-test.yml`, a copy an edit of the
  * reference never reaches.
  *

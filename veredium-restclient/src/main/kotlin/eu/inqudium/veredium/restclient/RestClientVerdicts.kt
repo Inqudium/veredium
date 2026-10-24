@@ -41,12 +41,11 @@ object RestClientVerdicts {
      *   counterpart of the reactive codec's `DataBufferLimitException`, raised by this module's own bounded reader
      *   rather than by a Spring codec - which is why it is a type of this module and not a Spring one.
      *
-     * The cause walk matters on this stack because Spring's blocking client wraps every `IOException` of the
-     * exchange into a `ResourceAccessException`; the limit exception is thrown bare today, but the predicate
-     * must keep matching if a wrapper ever gets in between. A 5xx whose error body exceeds the buffer limit
-     * yields a plain `HttpServerErrorException` - the reader TRUNCATES an error body instead of rejecting it -
-     * so it is still recorded; `RestClientVerdictsTest` pins exactly that, and `ResilientRestClientIntegrationTest`
-     * pins it against the real reader's output.
+     * The cause walk matters on this stack. Assumption: Spring's blocking client wraps every `IOException` of the
+     * exchange into a `ResourceAccessException` (spring-web 7.0); the limit exception is thrown bare today, but the
+     * predicate must keep matching if a wrapper ever gets in between. A 5xx whose error body exceeds the buffer
+     * limit yields a plain `HttpServerErrorException` - the reader TRUNCATES an error body instead of rejecting
+     * it - so it is still recorded.
      */
     val clientSideFailure: ClientSideFailurePolicy =
         ClientSideFailurePolicy(

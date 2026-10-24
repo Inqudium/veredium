@@ -1,10 +1,7 @@
 # REFERENCE configuration of veredium-webclient: the documented example a host copies from. It is a TEST
-# resource - a library ships no application.yml, so nothing here reaches a consumer of the artefact. The tests
-# pin it so the example stays true: ResilienceConfigContractTest (aliases declared, bulkheads within the pool),
-# MeshResilienceShippedConfigTest (Resilience4j's auto-configuration booted on it), and
-# LegatiumExchangeLoggingIntegrationTest / WebClientPropertiesTest (the adapter-logging and app.webclient
-# blocks), LoggingLevelContractTest (the logger names and levels). ResilienceConfigContractTest and
-# LoggingLevelContractTest check the test-owned fixture application-test.yml as well.
+# resource - a library ships no application.yml, so nothing here reaches a consumer of the artefact. It is
+# pinned by the tests that load ConfigurationFiles.REFERENCE, so the example stays true; the test-owned fixture
+# application-test.yml is ConfigurationFiles.FIXTURE.
 
 logging:
   level:
@@ -51,7 +48,7 @@ adapter-logging:
     masked: ["X-Access-Token"]
     #  - Content-Type
 
-  # Body logging per direction - a MODE, not a switch (ADR-0006): `never` (the default), `on-failure`
+  # Body logging per direction - a MODE, not a switch (legatium ADR-0006): `never` (the default), `on-failure`
   # or `always`. `on-failure` is the volume switch: the body is logged only when `adapter_outcome` is
   # not `success` (failure, timeout, cancelled) or the status is a 4xx - orders of magnitude fewer bytes
   # than `always`
@@ -149,8 +146,8 @@ app:
     validation:
       enabled: true
       fail-on-violation: false
-  # The single per-endpoint tree (see docs/mesh-timeout.md). Each endpoint drives BOTH the WebClient target
-  # (baseUrl = the sidecar; the Host header is derived from the triplet host) AND the full timeout ladder
+  # The single per-endpoint tree (see veredium-core/docs/mesh-timeout.md). Each endpoint drives BOTH the WebClient
+  # target (baseUrl = the sidecar; the Host header is derived from the triplet host) AND the full timeout ladder
   # (connect / response / pending-acquire / max-connections + the per-endpoint TimeLimiter and slow-call).
   # No explicit alias: the logical backend name (R4j instance + metric label) is DERIVED from the triplet
   # (host-METHOD-path), so it is the single source of the endpoint identity. A host's adapters pass that derived

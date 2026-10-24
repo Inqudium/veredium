@@ -1,8 +1,9 @@
 package eu.inqudium.veredium.testsupport
 
 /**
- * The response body of the client tests. A no-arg constructor and a mutable property: the clients' Jackson mapper has
- * no Kotlin module, so it binds through the setter.
+ * The response body of the client tests. A no-arg constructor and a mutable property, because the clients' Jackson
+ * mapper has no Kotlin module. Assumption: without it, Jackson (3.1.7) binds this class through the no-arg constructor
+ * and the setter.
  */
 class Greeting {
     var message: String? = null

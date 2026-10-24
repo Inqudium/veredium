@@ -20,14 +20,11 @@ import java.util.concurrent.Executors
  *
  * ## What maps, and what the JDK client cannot express
  *
- * | Setting                          | Here                                                                         |
- * |----------------------------------|------------------------------------------------------------------------------|
- * | `connect-timeout-ms`             | `HttpClient.Builder.connectTimeout`                                          |
- * | per-endpoint response timeout    | Spring's read timeout - a deadline from sending the request until the response body is closed, i.e. head AND body together (Spring arms it because `HttpRequest.timeout` does not cover the body) |
- * | `max-connections`                | none - the JDK pool has no size limit; a connection is opened per concurrent exchange |
- * | `pending-acquire-timeout-ms`     | none - nothing waits for a connection, so there is nothing to bound          |
- * | `pool.max-idle-time` / `max-life-time` / `evict-in-background` | none - the JDK's keep-alive timeout is the JVM-wide system property `jdk.httpclient.keepalive.timeout` |
- * | pool meters                      | none - the JDK exposes no pool statistics                                    |
+ * The settings it applies are [applied], the ones it cannot express [notApplied] - both on the engine's startup
+ * line. The response timeout is Spring's read timeout: a deadline from sending the request until the response body
+ * is closed, i.e. head AND body together (Spring arms it because `HttpRequest.timeout` does not cover the body). The
+ * JDK pool has no size limit - a connection is opened per concurrent exchange, so nothing waits for one and there is
+ * no wait to bound - and it exposes no statistics for pool meters.
  *
  * The JDK knobs that DO exist are JVM-wide system properties (`jdk.httpclient.keepalive.timeout`,
  * `jdk.httpclient.connectionPoolSize`, `jdk.httpclient.disableRetryConnect`, ...). Setting one would change every
@@ -37,24 +34,29 @@ import java.util.concurrent.Executors
  * What the JDK client does by default and the Apache engine does not is switched off where the JDK lets a client
  * decide: HTTP/1.1 only (the default would offer an h2c upgrade on every plaintext connection), no redirects, no
  * proxy (the default would honour the `http.proxyHost` family of system properties; the sidecar is on loopback).
- * Two JDK behaviours have only JVM-wide switches and stay as the JDK has them: a refused connect is retried once
- * (within the same connect timeout), and an idempotent GET whose pooled connection the peer had closed is re-sent
- * on a fresh one.
+ * Assumption: two JDK behaviours have only JVM-wide switches and stay as the JDK has them (JDK 21) - a refused
+ * connect is retried once (within the same connect timeout), and an idempotent GET whose pooled connection the peer
+ * had closed is re-sent on a fresh one.
+ *
+ * Decompression is switched on explicitly ([JdkClientHttpRequestFactory.enableCompression], Spring's default
+ * too): the JDK client itself decodes nothing, and [BoundedBodyReader] counts decoded bytes. Spring's request then
+ * offers `Accept-Encoding: gzip, deflate`, decodes such a body and drops its `Content-Length`.
  *
  * ## The Host header
  *
- * `Host` is a RESTRICTED header of the JDK client: Spring's request drops it and the JDK sends the authority of
+ * Assumption: `Host` is a RESTRICTED header of the JDK client (JDK 21): Spring's request drops it and the JDK sends the authority of
  * the request URI instead, unless the JVM was started with `-Djdk.httpclient.allowRestrictedHeaders=host`
  * ([EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS], read once, by the JDK and by Spring). Behind the sidecar that
  * would route every call by `localhost:<port>` - so the factory refuses to start with this engine for a backend
  * whose Host header differs from the authority of its base URL ([hostHeaderConflict]). The system property is the
  * host's decision, never this module's: it changes every `java.net.http` client of the JVM.
  *
- * **Cancellation.** Both blocking points honour an interrupt: waiting for the response head, Spring cancels the
- * JDK's response future, which aborts the exchange; reading the body, the JDK's stream closes itself and fails
- * the read. The worker ends at once either way.
+ * **Cancellation.** Assumption: both blocking points honour an interrupt (spring-web 7.0, JDK 21) - waiting for
+ * the response head, Spring cancels the JDK's response future, which aborts the exchange; reading the body, the
+ * JDK's stream closes itself and fails the read. The worker ends at once either way.
  *
- * **A body not read to its end.** Spring's response DRAINS the rest of the body in its close, for as long as the
+ * **A body not read to its end.** Assumption: Spring's response DRAINS the rest of the body in its close
+ * (spring-web 7.0), for as long as the
  * peer takes, up to the response deadline - for a body refused at the buffer limit, the rest of a body nobody
  * wants, read on the worker with its permit. [requestFactory] therefore hands out an [AbortingRequest] whose abort
  * closes the JDK's body stream first, which cancels the exchange and drops its connection.
@@ -87,7 +89,11 @@ internal class JdkEngineTransport(
             .executor(executor)
             .build()
 
-    override fun requestFactory(endpoint: ResolvedTimeouts): ClientHttpRequestFactory = AbortingRequestFactory(httpClient, executor).apply { setReadTimeout(endpoint.responseTimeout) }
+    override fun requestFactory(endpoint: ResolvedTimeouts): ClientHttpRequestFactory =
+        AbortingRequestFactory(httpClient, executor).apply {
+            setReadTimeout(endpoint.responseTimeout)
+            enableCompression(true)
+        }
 
     override val applied: List<String> =
         listOf(

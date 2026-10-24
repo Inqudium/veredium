@@ -8,16 +8,15 @@ import org.junit.jupiter.params.provider.NullAndEmptySource
 import org.junit.jupiter.params.provider.ValueSource
 
 /**
- * Pins the identity the client presents to its peers, and with it the test conventions the generated
- * test-evidence page relies on (the rationale block, the Given/When/Then stages).
+ * Pins the identity the client presents to its peers.
  */
 class VerediumTest {
     @Test
     fun `should name itself veredium`() {
-        // What is tested: the NAME constant every logger name and artifact id derives from.
+        // What is tested: the NAME constant the artifact ids and the User-Agent token derive from.
         // Success criteria: the constant equals the lowercase project name.
-        // Why it matters: the name is part of the operator-facing contract (logger names, artifact
-        //   ids, the User-Agent token); a drift would rename what dashboards and log filters key on.
+        // Why it matters: the name is part of the operator-facing contract (artifact ids, the User-Agent
+        //   token); a drift would rename what dependency declarations and access-log filters key on.
         //
         // Given / When / Then
         assertThat(Veredium.NAME).isEqualTo("veredium")

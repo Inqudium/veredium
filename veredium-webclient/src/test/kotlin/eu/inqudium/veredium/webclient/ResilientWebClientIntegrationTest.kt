@@ -190,9 +190,9 @@ class ResilientWebClientIntegrationTest {
      * Waits for this test's reactive work to finish BEFORE disposing anything, then tears down.
      *
      * The wait is the point. A test method returning is not the same as its calls being over: the client's
-     * closing line is written in `doFinally`, and Reactor propagates the terminal signal DOWNSTREAM FIRST - so
-     * `block()`/`awaitSingle()` releases the test thread while the event loop still has that emission ahead
-     * of it. The logger is process-wide, so without this barrier a test's last line can land inside the NEXT
+     * closing line is written in `doFinally`. Assumption: Reactor propagates the terminal signal DOWNSTREAM FIRST
+     * (reactor-core 3.8.7) - so `block()`/`awaitSingle()` releases the test thread while the event loop still has
+     * that emission ahead of it. The logger is process-wide, so without this barrier a test's last line can land inside the NEXT
      * test's capture, where a test that asserts on its own backend's events finds a line of a call it never
      * made.
      *
@@ -403,7 +403,8 @@ class ResilientWebClientIntegrationTest {
         @Test
         fun `should NOT open an http client observation when observation is disabled`() {
             // What is tested: the OFF branch of the same toggle - the registry arrives on the builder exactly as in
-            //   the test above, and the factory replaces it with NOOP on its clone.
+            //   the ON test (an observation per request when enabled), and the factory replaces it with NOOP on its
+            //   clone.
             // Success criteria: a GET through the client records no observation in the registry that was on the
             //   builder.
             // Why it matters: it is the counterpart that keeps the ON test honest - a factory that ignored the toggle
@@ -510,8 +511,7 @@ class ResilientWebClientIntegrationTest {
             //
             // Given: a registry wired into the factory and a response of a known, non-trivial size
             val registry = SimpleMeterRegistry()
-            // Umlauts on purpose: two UTF-8 bytes each, so byte size and String.length cannot coincide. Account
-            // names are customer-set free text, which is exactly where these turn up in the real payload.
+            // Umlauts on purpose: two UTF-8 bytes each, so byte size and String.length cannot coincide.
             val body = """{"message":"${"\u00e4".repeat(200)}${"y".repeat(300)}"}"""
             wireMock.stubFor(get(urlEqualTo("/sized")).willReturn(okJson(body)))
             val client = newClient("sized", meterRegistry = registry)
@@ -910,6 +910,74 @@ class ResilientWebClientIntegrationTest {
         }
 
         @Test
+        fun `should record a 5xx whose error body exceeds the buffer limit as a breaker failure`() {
+            // What is tested: the boundary of the buffer-limit exemption, through the REAL pipeline - a 500 whose
+            //   error body is larger than maxInMemorySize, so the exception is the one Spring actually produces for
+            //   it, not one written by hand.
+            // Success criteria: the call fails with a WebClientResponseException reporting 500 with no
+            //   DataBufferLimitException anywhere in its cause chain, and the breaker - customized with this
+            //   stack's verdicts - records exactly one failed call and no successful one.
+            // Why it matters: a 5xx stays a failure, whatever its body size. Should Spring ever attach the buffer
+            //   failure to an oversized error body, the cause walk that exempts the limit would silently discount
+            //   genuine outages - the breaker's most dangerous failure mode, which the predicate-level test in
+            //   WebClientVerdictsTest cannot see because it builds the exception itself.
+            //
+            // Given: a 500 whose body is twenty times the buffer limit, and a breaker carrying the mesh verdicts
+            val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
+            val backendName = "oversized-error"
+            val bufferLimit = DataSize.ofBytes(200)
+            val errorBody = """{"error":"${"X".repeat(4000)}"}"""
+            assertThat(errorBody.length.toLong()).`as`("the error body must exceed the limit").isGreaterThan(bufferLimit.toBytes())
+            wireMock.stubFor(
+                get(urlEqualTo("/big-error")).willReturn(
+                    aResponse().withStatus(500).withHeader("Content-Type", "application/json").withBody(errorBody),
+                ),
+            )
+            val meshProperties =
+                MeshProperties(
+                    defaults = MeshProperties.Defaults(individualRequestTimeoutMs = 1000),
+                    endpoints =
+                        listOf(
+                            MeshProperties.EndpointConfig(
+                                triplet = "/endpoint/localhost/GET/$backendName",
+                                alias = backendName,
+                                baseUrl = wireMock.baseUrl(),
+                            ),
+                        ),
+                )
+            val client =
+                ResilientWebClientFactory(
+                    WebClientProperties(maxInMemorySize = bufferLimit),
+                    meshProperties,
+                    ReactiveResilienceDecorator(
+                        circuitBreakerRegistry,
+                        // Generous, so a slow call under load cannot turn into a TimeoutException, which the breaker
+                        // would record as well and so pass this test for the wrong reason.
+                        TimeLimiterRegistry.of(TimeLimiterConfig.custom().timeoutDuration(GENEROUS_BUDGET).build()),
+                        BulkheadRegistry.ofDefaults(),
+                    ),
+                    objectMapper,
+                    // Deliberately no Spring context here: a bare builder stands in for Boot's bean.
+                    webClientBuilder = WebClient.builder(),
+                ).also { factories += it }.create(backendName)
+            CustomizedRegistries.circuitBreakers(circuitBreakerRegistry, meshProperties, WebClientVerdicts.breakerVerdicts)
+
+            // When
+            val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/big-error") }.block() }
+
+            // Then: the 500 as itself, with no buffer failure underneath ...
+            assertThat(failure).isInstanceOf(WebClientResponseException::class.java)
+            assertThat((failure as WebClientResponseException).statusCode.value()).isEqualTo(500)
+            assertThat(generateSequence<Throwable>(failure) { it.cause }.none { it is DataBufferLimitException })
+                .`as`("no DataBufferLimitException in the cause chain of %s", failure)
+                .isTrue()
+            // ... and charged to the backend
+            val metrics = circuitBreakerRegistry.circuitBreaker(backendName).metrics
+            assertThat(metrics.numberOfFailedCalls).isEqualTo(1)
+            assertThat(metrics.numberOfSuccessfulCalls).isZero()
+        }
+
+        @Test
         fun `should expose the time-limiter timeout as the request budget`() {
             // What is tested: ResilientWebClient.timeLimiterTimeout - the budget read back from the TimeLimiter
             //   registry rather than held as a copy.
@@ -1015,8 +1083,9 @@ class ResilientWebClientIntegrationTest {
             // Why it matters: at WARN this line would make every routine 404 look like an outage. The stack trace
             //   is the second half of that: legatium's exchange event already reports the same exchange with its
             //   status, URL and body, and a trace here would add, per business case, a reactive stack that explains
-            //   nothing the status and URL do not. The breaker's ignore predicate and this line derive from ONE
-            //   predicate precisely so they cannot disagree; the breaker end is pinned in WebClientVerdictsTest.
+            //   nothing the status and URL do not. The breaker (which records a benign 4xx as a success) and this
+            //   line read ONE predicate, `HttpExchangeErrorPolicy.isExpectedClientError`, precisely so they cannot
+            //   disagree; the breaker end is pinned in WebClientVerdictsTest.
             //
             // Given / When: the backend answers "not found"
             val line = errorLineFor(status = 404, backendName = "benign-4xx")
@@ -1034,8 +1103,9 @@ class ResilientWebClientIntegrationTest {
             // What is tested: the severity of the client's error line for a server error.
             // Success criteria: the line is WARN, carries the 500's exception as its cause, and has no
             //   `expected client error` marker.
-            // Why it matters: the counterpart that keeps the test above honest - without it, a line that lost its
-            //   severity AND its cause for every failure would satisfy the DEBUG/no-stack-trace assertions.
+            // Why it matters: the counterpart that keeps the benign-4xx severity test honest - without it, a line
+            //   that lost its severity AND its cause for every failure would satisfy the DEBUG/no-stack-trace
+            //   assertions.
             //
             // Given / When: the backend answers 500
             val line = errorLineFor(status = 500, backendName = "server-error")
@@ -1051,11 +1121,12 @@ class ResilientWebClientIntegrationTest {
             // What is tested: that the boundary INSIDE the 4xx range holds on this side too - 408 Request Timeout
             //   is an operational signal, not a business case.
             // Success criteria: the line is WARN with a stack trace, i.e. treated exactly like a 5xx, while the
-            //   404 above proves the same code path does demote a benign status.
+            //   benign-4xx severity test proves the same code path does demote a 404.
             // Why it matters: a demoted 408 would hide a backend timing out under load in DEBUG, the one level
             //   nobody runs in production - and it would do so silently, because the exchange still "fails
-            //   correctly" from the caller's point of view. The same status set drives the circuit breaker's ignore
-            //   predicate, so a drift here would mean the logs and the breaker disagree about what an outage is.
+            //   correctly" from the caller's point of view. The circuit breaker reads the same predicate
+            //   (`HttpExchangeErrorPolicy.isExpectedClientError`: a benign 4xx is a success, a 408 a failure), so a
+            //   drift here would mean the logs and the breaker disagree about what an outage is.
             //
             // Given / When: the backend answers 408
             val line = errorLineFor(status = 408, backendName = "request-timeout")
@@ -1074,8 +1145,8 @@ class ResilientWebClientIntegrationTest {
             // Success criteria: the error line for a 500 carries both key-values with the backend alias and
             //   the endpoint's template; and `adapter_target_name`, a name of the module's own, is absent.
             // Why it matters: these names leave the process and are a contract with the log index (an operator's
-            //   queries group by them). The module writes only these two, taken from the
-            //   library's ClientLogField, so this line is the whole pin.
+            //   queries group by them). The module spells them out rather than importing them from the library
+            //   (`ClientCallLog.ADAPTER_NAME_FIELD`, `URL_TEMPLATE_FIELD`), so this line is the whole pin.
             //
             // Given / When: the backend answers 500
             val line = errorLineFor(status = 500, backendName = "joined")
@@ -1349,14 +1420,12 @@ class ResilientWebClientIntegrationTest {
             //   this test wrote for it.
             // Success criteria: after one genuine call, a barrier attached to the client's own logger reports
             //   exactly one started and one finished subscription.
-            // Why it matters: it is the only thing tying `EXECUTING_PREFIX` to production. The sibling
-            //   self-tests below drive the barrier with log lines they build from that same constant, so they stay
-            //   green if the client renames its line - the constant moves on both sides at once and they never
-            //   notice. The barrier would then count 0 started against N finished, `finished >= started` would hold
-            //   from the outset, and tearDown would wave every test through while the class leaked events into its
-            //   successors - silently, with nothing red. (SIGNAL_PREFIX is additionally pinned by
-            //   `errorLineFor` and the cancellation test, which await it after real calls; this covers the other
-            //   half.) Renaming either constant fails this test and only this test.
+            // Why it matters: this test is the only binding of `EXECUTING_PREFIX` to production. The other barrier
+            //   self-tests build their lines from that same constant and stay green if the client renames its line;
+            //   the barrier would then count 0 started, `finished >= started` would hold from the outset, and
+            //   tearDown would wave every test through while the class leaked events - with nothing red.
+            //   (`SIGNAL_PREFIX` needs no such binding: `awaitCall` waits for it after real calls, so renaming it
+            //   fails much of the class.)
             //
             // Given: a backend, and a barrier watching the client's own logger
             wireMock.stubFor(get(urlEqualTo("/hello")).willReturn(okJson("""{"message":"hi"}""")))
