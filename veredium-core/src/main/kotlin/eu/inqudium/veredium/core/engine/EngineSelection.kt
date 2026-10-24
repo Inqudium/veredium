@@ -5,8 +5,8 @@ import java.net.URI
 import java.net.http.HttpRequest
 
 /**
- * One selectable HTTP engine of a client stack - the stack-neutral face of `RestClientEngine` and `WebClientEngine`,
- * which the start-time checks of [EngineSelection] read.
+ * One selectable HTTP engine of a client stack - the stack-neutral face of each stack's engine type, which the
+ * start-time checks of [EngineSelection] read.
  *
  * @property key The engine's value under `<prefix>.default` and `<prefix>.endpoints.<alias>`, and its name in the
  *   startup lines.
@@ -91,8 +91,8 @@ object EngineSelection {
 
     /**
      * Whether this JVM's `java.net.http` lets a request carry an explicit `Host` header - asked of the JDK itself rather
-     * than read off [JDK_ALLOW_RESTRICTED_HEADERS], because the JDK reads the property once, when its HTTP client classes
-     * initialise: a value set later is visible in `System.getProperty` and ignored by the client.
+     * than read off [JDK_ALLOW_RESTRICTED_HEADERS]. Assumption: the JDK reads the property once, when its HTTP client
+     * classes initialise - a value set later is visible in `System.getProperty` and ignored by the client.
      */
     fun jdkAllowsHostHeader(): Boolean =
         runCatching {

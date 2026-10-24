@@ -28,14 +28,14 @@ object ResponseBodyMetrics {
     /**
      * The UTF-8 encoded size of [text], counted in one pass and without allocating.
      *
-     * Equivalent to `text.toByteArray(Charsets.UTF_8).size` for every input, including unpaired surrogates -
-     * `ResponseBodyMetricsTest` pins that against the JDK encoder rather than against hand-written
-     * expectations. The point of not simply calling `toByteArray` is the copy: on the hot path that is a second
-     * full buffer per response, up to `max-in-memory-size` each, to produce a single number.
+     * Equivalent to `text.toByteArray(Charsets.UTF_8).size` for every input, including unpaired surrogates - pinned
+     * against the JDK encoder rather than against hand-written expectations. The point of not simply calling
+     * `toByteArray` is the copy: on the hot path that is a second full buffer per response, up to
+     * `max-in-memory-size` each, to produce a single number.
      *
      * The surrogate handling is the part worth reading. A valid high/low pair is ONE code point in four bytes
-     * and consumes two UTF-16 units; an UNPAIRED surrogate is not encodable, and the JDK encoder substitutes
-     * `?` - one byte - rather than failing. Both cases are counted the way the encoder counts them, so the
+     * and consumes two UTF-16 units; an UNPAIRED surrogate is not encodable. Assumption: the JDK encoder
+     * substitutes `?` - one byte - rather than failing. Both cases are counted the way the encoder counts them, so the
      * meter can never disagree with the reader or the codec about the same body.
      */
     fun utf8Size(text: String): Int {

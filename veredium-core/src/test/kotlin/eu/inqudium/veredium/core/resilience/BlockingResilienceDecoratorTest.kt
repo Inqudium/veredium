@@ -9,6 +9,11 @@ import io.github.resilience4j.circuitbreaker.CallNotPermittedException
 import io.github.resilience4j.circuitbreaker.CircuitBreaker
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
+import io.github.resilience4j.spring6.bulkhead.configure.BulkheadConfigurationProperties
+import io.github.resilience4j.spring6.circuitbreaker.configure.CircuitBreakerConfigurationProperties
+import io.github.resilience4j.spring6.ratelimiter.configure.RateLimiterConfigurationProperties
+import io.github.resilience4j.spring6.retry.configure.RetryConfigurationProperties
+import io.github.resilience4j.spring6.timelimiter.configure.TimeLimiterConfigurationProperties
 import io.github.resilience4j.timelimiter.TimeLimiter
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
@@ -22,6 +27,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.slf4j.MDC
+import org.springframework.core.Ordered
 import java.time.Duration
 import java.util.Optional
 import java.util.concurrent.CountDownLatch
@@ -66,6 +72,44 @@ class BlockingResilienceDecoratorTest {
     fun tearDown() {
         callers.shutdownNow()
         decorators.forEach { it.shutdown() }
+    }
+
+    @Nested
+    inner class `The nesting order` {
+        @Test
+        fun `should nest the primitives in the order of Resilience4j's own aspect defaults`() {
+            // What is tested: the default aspect orders of Resilience4j's Spring integration - the
+            //   `get*AspectOrder()` defaults of the five `*ConfigurationProperties` in resilience4j-spring6 - against
+            //   the order the class KDoc's table states for the decorator's nesting.
+            // Success criteria: Retry, CircuitBreaker, RateLimiter, TimeLimiter and Bulkhead default to
+            //   `Ordered.LOWEST_PRECEDENCE` - 5, - 4, - 3, - 2 and - 1, so sorted ascending (a lower value binds
+            //   further out) they read Retry, CircuitBreaker, RateLimiter, TimeLimiter, Bulkhead.
+            // Why it matters: the class KDoc claims the nesting is Resilience4j's own composition, read off these
+            //   defaults; an upgrade that changed them would leave the claim and the table wrong with nothing red.
+            //
+            // Given: the property beans as Resilience4j's Boot configuration creates them, before any YAML binds
+            val orders =
+                linkedMapOf(
+                    "Retry" to RetryConfigurationProperties().retryAspectOrder,
+                    "CircuitBreaker" to CircuitBreakerConfigurationProperties().circuitBreakerAspectOrder,
+                    "RateLimiter" to RateLimiterConfigurationProperties().rateLimiterAspectOrder,
+                    "TimeLimiter" to TimeLimiterConfigurationProperties().timeLimiterAspectOrder,
+                    "Bulkhead" to BulkheadConfigurationProperties().bulkheadAspectOrder,
+                )
+
+            // When
+            val outermostFirst = orders.entries.sortedBy { it.value }.map { it.key }
+
+            // Then
+            assertThat(orders).containsExactly(
+                entry("Retry", Ordered.LOWEST_PRECEDENCE - 5),
+                entry("CircuitBreaker", Ordered.LOWEST_PRECEDENCE - 4),
+                entry("RateLimiter", Ordered.LOWEST_PRECEDENCE - 3),
+                entry("TimeLimiter", Ordered.LOWEST_PRECEDENCE - 2),
+                entry("Bulkhead", Ordered.LOWEST_PRECEDENCE - 1),
+            )
+            assertThat(outermostFirst).containsExactly("Retry", "CircuitBreaker", "RateLimiter", "TimeLimiter", "Bulkhead")
+        }
     }
 
     @Nested
@@ -114,7 +158,7 @@ class BlockingResilienceDecoratorTest {
             //   visible on the worker while the call runs.
             // Success criteria: the call reads the key on the worker and gets the caller's value. (That the
             //   worker's MDC is put back afterwards cannot be observed here - every worker is a fresh virtual
-            //   thread; the restoration test below runs the same wrapper on a reused thread.)
+            //   thread; the MDC-restoration test runs the same wrapper on a reused thread.)
             // Why it matters: legatium's exchange event is written on the worker. Without the copy, the one
             //   field that joins the outbound line to the inbound request - the caller's correlation id - would
             //   be missing from every exchange event this module produces.

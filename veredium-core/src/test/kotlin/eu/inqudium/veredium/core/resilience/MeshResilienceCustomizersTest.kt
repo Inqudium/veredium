@@ -147,8 +147,9 @@ class MeshResilienceCustomizersTest {
 
         @Test
         fun `should keep a benign 4xx unrecorded when the operator's record predicate matches it`() {
-            // What is tested: the same composition through the other configuration route - a record-exception
-            //   PREDICATE (`record-exception-predicate` in YAML) that matches every RuntimeException.
+            // What is tested: the record-side composition through a record-exception PREDICATE
+            //   (`record-exception-predicate` in YAML) that matches every RuntimeException, rather than through the
+            //   record-exceptions list.
             // Success criteria: the 404 is not recorded, a 503 is, an IOException (outside the predicate) is not.
             // Why it matters: the predicate is the half the customizer AND-s directly; pinned so that dropping the
             //   `&& configured...` term, or the benign-4xx term, turns a test red.

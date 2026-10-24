@@ -119,9 +119,8 @@ data class ResolvedTimeouts(
                 "must be <= $MAX_LADDER_MS ms, but was ${timeLimiterMs ?: "more than ${Long.MAX_VALUE}"} " +
                 "(max-retries=$maxRetries, individual-request-timeout-ms=$individualRequestTimeoutMs; a unit mix-up?)"
         }
-        // Invariant: timeLimiter margin > connect + pendingAcquire, which needs no runtime check here:
-        // transport.timeLimiterMargin IS connect + pendingAcquire + a positive headroom, so it can never race the
-        // responseTimeout regardless of how the transport caps are configured.
+        // Invariant: timeLimiter margin > connect + pendingAcquire - held by construction, see
+        // `MeshProperties.Transport.timeLimiterMargin`.
     }
 
     /**
@@ -170,9 +169,8 @@ data class ResolvedTimeouts(
     val slowCallInverted: Boolean = slowCallDuration < Duration.ofMillis(individualRequestTimeoutMs)
 
     /**
-     * The TimeLimiter budget, `timeLimiter = responseTimeout + transport.timeLimiterMargin`. The margin is a
-     * COMPUTED property of [transport] (connect + pendingAcquire + headroom), so it ALWAYS exceeds the worst-case
-     * pre-response phases by construction - no runtime guard needed.
+     * The TimeLimiter budget, `timeLimiter = responseTimeout + transport.timeLimiterMargin` - the margin
+     * ([MeshProperties.Transport.timeLimiterMargin]) covers the pre-response phases the response timeout does not.
      */
     val timeLimiterTimeout: Duration = responseTimeout.plusMillis(transport.timeLimiterMargin)
 

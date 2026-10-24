@@ -12,16 +12,14 @@ import java.util.Locale
  *
  * A shared [enabled] default plus per-backend overrides in [endpoints] (keyed by the backend ALIAS, i.e. the
  * mesh-derived R4j instance name): a per-alias entry wins in BOTH directions - it can switch a single backend
- * on above an off default, or off above an on default. This granularity is load-bearing, not cosmetic: the
- * constraints are generated from published OpenAPI specs, and those specs are demonstrably stricter than
- * reality in places, differently per endpoint. Validation is therefore adopted one backend at a time, against
- * real traffic - which is exactly what the per-alias override is for.
+ * on above an off default, or off above an on default. This granularity is load-bearing, not cosmetic: where a
+ * DTO's constraints are generated from a published specification, they can be stricter than the backend's real
+ * answers in places, and differently per endpoint. Validation is therefore adopted one backend at a time, against
+ * real traffic - which is exactly what the per-alias override is for. Where the check runs, and why outside the
+ * Resilience4j decoration: [eu.inqudium.veredium.core.client.ClientCallLog.validate].
  *
- * The check itself lives OUTSIDE the Resilience4j decoration in both clients: a response that violates its
- * own schema is a contract problem, not an outage, and must not open the circuit breaker.
- *
- * @property enabled Default `false`: the constraints promise a guarantee the specs do not keep everywhere, so
- *   the safe default is off and each backend opts in deliberately.
+ * @property enabled Default `false`: a backend's constraints may promise more than its answers keep, so the safe
+ *   default is off and each backend opts in deliberately.
  * @property endpoints Per-backend-alias overrides; an alias not present inherits [enabled].
  * @property failOnViolation Whether a detected violation FAILS the call (a
  *   [jakarta.validation.ConstraintViolationException]) or is only REPORTED (logged at WARN, the response
@@ -59,8 +57,8 @@ class ResponseValidation(
     /**
      * The validator the clients use: the host's, but with its messages pinned to [Locale.ENGLISH].
      *
-     * Constraint messages are interpolated against `Locale.getDefault()`, so the text of a violation otherwise
-     * depends on the locale of the machine the process happens to run on - the same defect would read
+     * Assumption: Bean Validation interpolates constraint messages against `Locale.getDefault()`, so the text of a
+     * violation otherwise depends on the locale of the machine the process happens to run on - the same defect would read
      * "size must be between 1 and ..." on one host and "Groesse muss zwischen 1 und ... sein" on the next.
      * That belongs nowhere near a log line: this codebase is English throughout, and log consumers, alert
      * rules and anyone searching for a message have to be able to rely on its wording.
@@ -102,13 +100,13 @@ class ResponseValidation(
  * A [MessageInterpolator] that renders every constraint message in English, whatever locale is asked for or
  * ambient.
  *
- * Bean Validation interpolates against `Locale.getDefault()` unless told otherwise, which makes the text of a
+ * Assumption: Bean Validation interpolates against `Locale.getDefault()` unless told otherwise, which makes the text of a
  * violation a property of the host the process runs on rather than of the defect. These messages end up in log
  * lines and exception texts that people search and alert on, so they have to read the same everywhere.
  *
- * The locale-taking overload deliberately ignores its argument too. It is not called on this path - the engine
- * uses the other one - so honouring it would achieve nothing except leaving a way for the guarantee to be
- * bypassed later.
+ * The locale-taking overload deliberately ignores its argument too. Assumption: it is not called on this path -
+ * the validation engine uses the other one - so honouring it would achieve nothing except leaving a way for the
+ * guarantee to be bypassed later.
  */
 private class EnglishMessageInterpolator(
     private val delegate: MessageInterpolator,

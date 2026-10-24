@@ -23,7 +23,7 @@ import java.util.concurrent.TimeoutException
  * stack's `Resilient*Client`, pinned by its own log-level assertions) and this breaker record predicate. A
  * policy whose consumers drift apart is worse than no policy: the log would call an exchange benign while the
  * breaker charges it against the backend. (The exchange event legatium writes is not a consumer - it
- * classifies a 4xx answer as `rejected` with its status on its own terms.)
+ * classifies on its own terms, legatium ADR-0012.)
  *
  * The distinction that carries the most risk is 408/429. They are 4xx, so a naive "ignore all client errors"
  * would discount them - and a run of request timeouts or rate-limit rejections is exactly what a breaker must
@@ -124,8 +124,9 @@ class HttpExchangeErrorPolicyTest {
             // What is tested: the record side of the customized breaker for a genuine backend fault - 500, 503 and
             //   a resilience TimeoutException.
             // Success criteria: the record predicate accepts all three, so each counts as a failure.
-            // Why it matters: the counterpart that keeps the tests above honest: the verdict must discount ONLY
-            //   benign 4xx, not disable failure recording - a breaker that recorded nothing would never open.
+            // Why it matters: the counterpart that keeps the benign-4xx and the 408/429 tests honest: the verdict must
+            //   discount ONLY benign 4xx, not disable failure recording - a breaker that recorded nothing would never
+            //   open.
             //
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
@@ -141,11 +142,12 @@ class HttpExchangeErrorPolicyTest {
 
         @Test
         fun `should preserve an operator's own ignore list instead of replacing it`() {
-            // What is tested: that the verdict is ADDITIVE on the record side. `recordException(predicate)`
-            //   REPLACES the predicate the builder holds, so a naive customizer drops whatever the operator
-            //   configured; the customizer reads the configured predicates first and folds them back in.
-            // Success criteria: after the customizer both the operator's exception and a benign 4xx are
-            //   discounted, and an unrelated failure is still recorded.
+            // What is tested: that installing the benign-4xx verdict keeps an ignore list the operator configured -
+            //   the customizer replaces the builder's predicates, so it has to fold the configured ones back in. The
+            //   record-side fold is pinned by the MeshResilienceCustomizersTest cases on an operator's
+            //   record-exceptions list and record predicate.
+            // Success criteria: after the customizer the operator's exception is still ignored, a benign 4xx is not
+            //   recorded, and a 500 is recorded.
             // Why it matters: the customizer shapes a config it does not own. Clobbering the operator's list
             //   would silently re-arm the breaker against errors they deliberately excluded - visible to them
             //   only as unexplained open circuits.
@@ -210,7 +212,9 @@ class HttpExchangeErrorPolicyTest {
             // What is tested: the one customizer per alias installs BOTH verdicts, and neither widened into a
             //   blanket ignore: a benign 4xx is a success (not recorded, not ignored), a client-side failure is
             //   ignored, and a 5xx or a 429 is recorded.
-            // Success criteria: four probes, each landing in its own row of the three-verdict table.
+            // Success criteria: a 404 is neither recorded nor ignored (success), a bulkhead rejection and a
+            //   buffer-limit exception are ignored, and a 500 and a 429 are recorded (failure) - five probes, each
+            //   in its outcome of the customizer's three.
             // Why it matters: the two verdicts answer different questions ("did the backend answer?" versus
             //   "does the call carry evidence at all?"); one customizer installs both, and it must not fold the
             //   answers into one.

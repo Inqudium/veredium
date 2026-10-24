@@ -217,7 +217,8 @@ class ClientSideFailurePolicyTest {
         fun `should stop looking one layer beyond the bound`() {
             // What is tested: that the bound is real - a client-side failure buried DEEPER than the walk goes is
             //   not found, and the failure is therefore recorded.
-            // Success criteria: the same chain as above with one more wrapper is NOT ignored.
+            // Success criteria: a TestBufferLimitException behind MAX_CAUSE_DEPTH wrappers - one more than the walk
+            //   reaches - is NOT ignored.
             // Why it matters: this documents the accepted limitation rather than leaving it to be discovered.
             //   Discounting is the exception to normal breaker behaviour, so falling back to "record it" past
             //   the bound is the safe direction - a breaker that counts a client-side failure trips slightly

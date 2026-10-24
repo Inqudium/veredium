@@ -14,7 +14,7 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry
  * applies them to the registry it builds - so a test can exercise the customized instance without a Spring
  * context. The verdicts are [TestVerdicts]' unless a test hands in its own.
  *
- * The Boot configuration seeds a builder from the instance's YAML (named base config plus instance properties),
+ * Assumption: Resilience4j's Boot configuration (2.4.0) seeds a builder from the instance's YAML (named base config plus instance properties),
  * hands it to the customizer registered under the instance name, and registers the result BEFORE the instance
  * exists. Here the seed is the config already registered under the alias - which is how a test states "the
  * operator's YAML said this" - or the registry default; the customizer runs; the result replaces whatever was

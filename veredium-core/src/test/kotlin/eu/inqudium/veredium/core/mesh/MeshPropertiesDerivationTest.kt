@@ -174,13 +174,14 @@ class MeshPropertiesDerivationTest {
         }
 
         @Test
-        fun `should reject a transport timeout the reactive stack could not narrow to an Int`() {
+        fun `should reject a transport timeout the Reactor Netty engine could not narrow to an Int`() {
             // What is tested: the top of the two transport timeouts - Int.MAX_VALUE + 1 against Int.MAX_VALUE.
             // Success criteria: one past Int.MAX_VALUE throws for each key, naming it and the value; Int.MAX_VALUE
             //   itself binds.
-            // Why it matters: the reactive factory hands connect-timeout-ms to Reactor Netty as an Int via toInt(),
-            //   which wraps instead of failing - 2147483648 ms would become a NEGATIVE connect timeout. Nobody types
-            //   25 days on purpose, but a unit mix-up (micros for millis) does, and nothing downstream says so.
+            // Why it matters: the Reactor Netty engine, on either stack, hands connect-timeout-ms to Netty as an Int
+            //   via toInt(), which wraps instead of failing - 2147483648 ms would become a NEGATIVE connect timeout.
+            //   Nobody types 25 days on purpose, but a unit mix-up (micros for millis) does, and nothing downstream
+            //   says so.
             //
             // Given
             val tooLarge = Int.MAX_VALUE.toLong() + 1
@@ -266,8 +267,8 @@ class MeshPropertiesDerivationTest {
             timeLimiter: Long,
             slowCall: Long,
         ) {
-            // What is tested: the same derivation as the sweep above, but on margins that are pairwise DISTINCT
-            //   (global 50, response-timeout 130, p99 170, slow-call-backoff 90), a non-default healthy-retries (2)
+            // What is tested: the same derivation as the default-margin sweep, but on margins that are pairwise
+            //   DISTINCT (global 50, response-timeout 130, p99 170, slow-call-backoff 90), a non-default healthy-retries (2)
             //   and slow-call-cap-fraction (0.75), and a non-default transport (connect 30 + pending-acquire 70 +
             //   headroom 100 = timeLimiter margin 200).
             // Success criteria: every rung equals a literal computed by hand (the rows of
@@ -275,8 +276,8 @@ class MeshPropertiesDerivationTest {
             //   of the slow-call min (the cap at maxRetries 0/1 and at 2500/2; the healthy ceiling at maxRetries 3)
             //   and both sides of the healthy-retries cap (min(1, 2) = 1 and min(3, 2) = 2).
             // Why it matters: the default margins are all 200, so on them a rung computed from the WRONG margin
-            //   field gives the right number - the sweep above passes even if responseTimeout adds the p99 margin, or
-            //   the healthy ceiling multiplies the p99 margin instead of the backoff. Here each such swap moves at
+            //   field gives the right number - the default-margin sweep passes even if responseTimeout adds the p99
+            //   margin, or the healthy ceiling multiplies the p99 margin instead of the backoff. Here each such swap moves at
             //   least one rung, and a mirrored oracle would only repeat the swap.
             //
             // Given
@@ -302,6 +303,41 @@ class MeshPropertiesDerivationTest {
             assertThat(t.slowCallDuration.toMillis()).`as`("slowCall").isEqualTo(slowCall)
         }
 
+        @ParameterizedTest(name = "individual={0}ms -> global={1} responseTimeout={2} slowCall={3} timeLimiter={4}")
+        @MethodSource("eu.inqudium.veredium.core.mesh.MeshPropertiesDerivationTest#workedExampleRows")
+        fun `should derive the worked example the ResolvedTimeouts KDoc publishes`(
+            individualMs: Long,
+            global: Long,
+            responseTimeout: Long,
+            slowCall: Long,
+            timeLimiter: Long,
+        ) {
+            // What is tested: the five rows of the worked example in the class KDoc of ResolvedTimeouts - anchor
+            //   1s..5s at maxRetries 0, every margin and the transport at their defaults - copied here as literals.
+            // Success criteria: each derived rung (global, responseTimeout, slowCall, timeLimiter) equals the
+            //   literal of its column, and every row is inverted (slowCall < individual), as the table's prose says.
+            // Why it matters: the table is public API documentation and hangs on six DEFAULT_* constants; the
+            //   default-margin sweep recomputes with those constants and follows a changed default silently, so only
+            //   literals turn red when the published numbers go stale.
+            //
+            // Given: one endpoint on the row's anchor, no retries, everything else at its default
+            val props =
+                MeshProperties(
+                    defaults = MeshProperties.Defaults(individualRequestTimeoutMs = individualMs, maxRetries = 0),
+                    endpoints = listOf(MeshProperties.EndpointConfig(TRIPLET)),
+                )
+
+            // When
+            val t = props.resolveAll().getValue(TRIPLET)
+
+            // Then
+            assertThat(t.sidecarGlobalMs).`as`("global").isEqualTo(global)
+            assertThat(t.responseTimeout.toMillis()).`as`("responseTimeout").isEqualTo(responseTimeout)
+            assertThat(t.slowCallDuration.toMillis()).`as`("slowCall").isEqualTo(slowCall)
+            assertThat(t.timeLimiterTimeout.toMillis()).`as`("timeLimiter").isEqualTo(timeLimiter)
+            assertThat(t.slowCallInverted).`as`("slowCall < individual").isTrue()
+        }
+
         @ParameterizedTest(name = "{0}")
         @MethodSource("eu.inqudium.veredium.core.mesh.MeshPropertiesDerivationTest#ladderGuardViolations")
         fun `should reject a ladder that cannot form, naming the key, the endpoint and the value`(
@@ -312,7 +348,7 @@ class MeshPropertiesDerivationTest {
             // What is tested: each init guard of ResolvedTimeouts - anchor, retries and every margin - reached the
             //   way a configuration reaches it: bound under app.mesh, resolved through resolveAll().
             // Success criteria: resolving throws IllegalArgumentException whose message carries the YAML key, the
-            //   triplet and the offending value. The accepting side of each boundary is the next test.
+            //   triplet and the offending value. The accepting side of each boundary is the edge-of-range test.
             // Why it matters: these guards are the only place a broken ladder is caught before Resilience4j or the
             //   transport sees it; without them a negative global margin passes silently and a zero slow-call
             //   surfaces as a keyless builder error. The messages are what an operator has to act on, so each one is
@@ -330,12 +366,12 @@ class MeshPropertiesDerivationTest {
 
         @Test
         fun `should accept every guarded value at the edge of its range`() {
-            // What is tested: the accepting side of every boundary the previous test rejects - global margin 0,
+            // What is tested: the accepting side of every boundary the ladder-guard test rejects - global margin 0,
             //   response-timeout margin 1, p99 margin individual - 1 and 0, healthy-retries 0, backoff 0, retries 0.
             // Success criteria: the endpoint resolves, and the extreme values derive the expected rungs (global =
             //   individual, responseTimeout = global + 1, p99 = 1 ms).
-            // Why it matters: a guard that is off by one rejects a legitimate configuration - and the previous test
-            //   alone would pass against guards that reject everything.
+            // Why it matters: a guard that is off by one rejects a legitimate configuration - and the ladder-guard
+            //   test alone would pass against guards that reject everything.
             //
             // Given
             val edgeMargins =
@@ -368,8 +404,9 @@ class MeshPropertiesDerivationTest {
         fun `should derive a ladder whose top rung sits exactly on the bound`() {
             // What is tested: the accepting side of the ladder bound - the largest anchor at 0 retries, and the largest
             //   retry count on a 1 s anchor, whose timeLimiter still fits MAX_LADDER_MS.
-            // Success criteria: both resolve; every rung is positive and the ladder keeps its order, slowCall < global
-            //   < responseTimeout < timeLimiter = MAX_LADDER_MS.
+            // Success criteria: both resolve; on both, slowCall is positive and the ladder keeps its order, slowCall <
+            //   global < responseTimeout < timeLimiter <= MAX_LADDER_MS - with timeLimiter = MAX_LADDER_MS for the
+            //   anchor case, while the retry case lands below it (the integer division leaves it at 2147482800).
             // Why it matters: the rejecting cases alone would pass against a guard that rejects every large value. A
             //   long but legitimate budget must still derive, and derive without wrapping.
             //
@@ -445,6 +482,20 @@ class MeshPropertiesDerivationTest {
                 Arguments.of(1000L, 3, 4050L, 4180L, 4380L, 2670L),
                 Arguments.of(2000L, 3, 8050L, 8180L, 8380L, 5670L),
                 Arguments.of(2500L, 2, 7550L, 7680L, 7880L, 5662L),
+            )
+
+        /**
+         * The worked example of the [ResolvedTimeouts] class KDoc, row by row: individual, global, responseTimeout,
+         * slowCall, timeLimiter - the table's columns, as literals.
+         */
+        @JvmStatic
+        fun workedExampleRows(): Stream<Arguments> =
+            Stream.of(
+                Arguments.of(1000L, 1200L, 1400L, 800L, 1800L),
+                Arguments.of(2000L, 2200L, 2400L, 1760L, 2800L),
+                Arguments.of(3000L, 3200L, 3400L, 2560L, 3800L),
+                Arguments.of(4000L, 4200L, 4400L, 3360L, 4800L),
+                Arguments.of(5000L, 5200L, 5400L, 4160L, 5800L),
             )
 
         /** One violation per init guard of [ResolvedTimeouts], each with the fragments its message must carry. */

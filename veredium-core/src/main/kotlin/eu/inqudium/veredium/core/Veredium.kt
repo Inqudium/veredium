@@ -5,7 +5,10 @@ package eu.inqudium.veredium.core
  * product token built from both.
  */
 object Veredium {
-    /** The project name, also the Maven artifact prefix and the root of every logger name. */
+    /**
+     * The project name: the Maven artifact prefix and the product of the `User-Agent` token ([userAgent]). Not a
+     * logger name - the library's loggers are named after their classes, under `eu.inqudium.veredium`.
+     */
     const val NAME: String = "veredium"
 
     /**

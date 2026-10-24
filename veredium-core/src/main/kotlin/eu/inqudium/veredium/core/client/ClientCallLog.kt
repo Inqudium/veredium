@@ -27,15 +27,15 @@ import java.time.Duration
  * ([BreakerVerdicts.httpExchangeError]), so the two never disagree: a documented 4xx - which the adapter
  * contract declares as a normal outcome and the caller handles - is logged at DEBUG WITHOUT a stack trace,
  * everything else at WARN with one. Logging every non-2xx at ERROR would make routine "not found" answers
- * indistinguishable from real outages. (legatium's exchange event classifies on its own terms: a 4xx answer is
- * `rejected` with its status there, INFO except for 401/403/408/429.) The cause is attached ONLY to the
- * unexpected branch: a benign 4xx must not carry a stack trace that explains nothing the status and URL do not
- * - so the two branches must not be folded into a shared helper that takes the cause unconditionally.
+ * indistinguishable from real outages. Assumption: legatium classifies its exchange event itself (legatium
+ * ADR-0012); this severity does not reach into it. The cause is attached ONLY to the unexpected branch: a benign
+ * 4xx must not carry a stack trace that explains nothing the status and URL do not - so the two
+ * branches must not be folded into a shared helper that takes the cause unconditionally.
  *
  * A cancellation - the caller going away, its budget expired or its scope cancelled - is DEBUG, deliberately:
  * normal, correlated with load, and under a disturbance arriving all at once, which is exactly when WARN must
- * not fill up with the one class of event that says nothing about the client's health. The operator-facing
- * signal lives in legatium's exchange event for the cancelled exchange.
+ * not fill up with the one class of event that says nothing about the client's health. Assumption: the
+ * operator-facing signal lives in legatium's exchange event for the cancelled exchange.
  *
  * @property propertiesPrefix The stack's properties tree (`app.restclient` / `app.webclient`), named on the
  *   lines that tell an operator which key to change.
@@ -268,9 +268,9 @@ class ClientCallLog(
 
     companion object {
         /**
-         * The backend-name wire name the transport lines share with legatium's exchange event
-         * (`ClientLogField.NAME` there). Spelled out because that enum is internal to the library; it is a
-         * contract with the log index and with the operators' log queries, and each stack's integration test
+         * The backend-name wire name the transport lines share with legatium's exchange event. Assumption:
+         * legatium spells it as `ClientLogField.NAME`, an enum internal to the library - hence spelled out here. It
+         * is a contract with the log index and with the operators' log queries, and each stack's integration test
          * pins it.
          */
         const val ADAPTER_NAME_FIELD: String = "adapter_name"
