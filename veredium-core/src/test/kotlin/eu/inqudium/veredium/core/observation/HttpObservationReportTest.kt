@@ -144,7 +144,7 @@ class HttpObservationReportTest {
             // Success criteria: the line names `http-observation-enabled=true` and the plain "on (Boot's
             //   registry stays on the builder)", without any "nothing is observed" qualification.
             // Why it matters: the healthy case must read as healthy; a qualification here would make the
-            //   warning of the degraded cases below meaningless.
+            //   warning of the degraded cases (no registry bean, a registry that records nothing) meaningless.
             //
             // Given: the toggle on AND a registry that will actually record - i.e. one with a handler
             // When
@@ -260,7 +260,7 @@ class HttpObservationReportTest {
 
         /**
          * A registry that reports itself as live: a plain [ObservationRegistry.create] would not, because
-         * Micrometer counts a handler-less registry as noop (see the handler case above). The handler accepts
+         * Micrometer counts a handler-less registry as noop (see the test of a registry without a handler). The handler accepts
          * every context and does nothing - what it RECORDS is irrelevant here, only that one is present.
          */
         private fun recordingRegistry(): ObservationRegistry =
