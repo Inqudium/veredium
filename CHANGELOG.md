@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-24
+
 ### Added
 
 #### Modules - 2026-10-19
@@ -538,4 +540,5 @@ Part of these entries resolve the findings of `docs/assessment/CODE_STYLE-2026-1
   state the constraint instead of history - and no longer describe removed code (the exchange diary, a shipped
   `application.yml`, the origin project's tickets). The orphaned `traceparent/conformance.txt` fixture is gone.
 
-[Unreleased]: https://github.com/Inqudium/veredium/commits/main
+[Unreleased]: https://github.com/Inqudium/veredium/compare/1.0.0...HEAD
+[1.0.0]: https://github.com/Inqudium/veredium/releases/tag/1.0.0
