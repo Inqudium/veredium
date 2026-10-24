@@ -363,10 +363,47 @@ class MeshPropertiesDerivationTest {
             assertThat(t.p99SingleMs).isEqualTo(1)
             assertThat(atZero.p99SingleMs).isEqualTo(1000)
         }
+
+        @Test
+        fun `should derive a ladder whose top rung sits exactly on the bound`() {
+            // What is tested: the accepting side of the ladder bound - the largest anchor at 0 retries, and the largest
+            //   retry count on a 1 s anchor, whose timeLimiter still fits MAX_LADDER_MS.
+            // Success criteria: both resolve; every rung is positive and the ladder keeps its order, slowCall < global
+            //   < responseTimeout < timeLimiter = MAX_LADDER_MS.
+            // Why it matters: the rejecting cases alone would pass against a guard that rejects every large value. A
+            //   long but legitimate budget must still derive, and derive without wrapping.
+            //
+            // Given
+            val maxAnchor = ResolvedTimeouts.MAX_LADDER_MS - DEFAULT_LADDER_OVERHEAD_MS
+            val anchored = MeshProperties(MeshProperties.Defaults(individualRequestTimeoutMs = maxAnchor), listOf(MeshProperties.EndpointConfig(TRIPLET)))
+            // (1 + r) * 1000 + 800 <= MAX_LADDER_MS
+            val maxRetries = ((ResolvedTimeouts.MAX_LADDER_MS - DEFAULT_LADDER_OVERHEAD_MS) / 1000 - 1).toInt()
+            val retried =
+                MeshProperties(
+                    MeshProperties.Defaults(individualRequestTimeoutMs = 1000, maxRetries = maxRetries),
+                    listOf(MeshProperties.EndpointConfig(TRIPLET)),
+                )
+
+            // When
+            val atBound = anchored.resolveAll().getValue(TRIPLET)
+            val manyRetries = retried.resolveAll().getValue(TRIPLET)
+
+            // Then
+            assertThat(atBound.timeLimiterTimeout.toMillis()).isEqualTo(ResolvedTimeouts.MAX_LADDER_MS)
+            listOf(atBound, manyRetries).forEach { t ->
+                assertThat(t.slowCallDuration.toMillis()).isPositive().isLessThan(t.sidecarGlobalMs)
+                assertThat(t.sidecarGlobalMs).isLessThan(t.responseTimeout.toMillis())
+                assertThat(t.responseTimeout).isLessThan(t.timeLimiterTimeout)
+                assertThat(t.timeLimiterTimeout.toMillis()).isLessThanOrEqualTo(ResolvedTimeouts.MAX_LADDER_MS)
+            }
+        }
     }
 
     companion object {
         private const val TRIPLET = "/endpoint/api.example.com/GET/accounts/{accountId}"
+
+        /** What the default margins and transport add on top of a 0-retry anchor: global 200 + response 200 + 400. */
+        private const val DEFAULT_LADDER_OVERHEAD_MS: Long = 800
 
         /** Cross product: individual 1000..10000ms (1s steps) x maxRetries 0..3 -> 40 cases. */
         @JvmStatic
@@ -455,7 +492,7 @@ class MeshPropertiesDerivationTest {
                 Arguments.of(
                     "negative slow-call backoff",
                     margins(MeshProperties.Margins(slowCallBackoffMs = -1)),
-                    listOf("margins.slow-call-backoff-ms must be >= 0", "but was -1"),
+                    listOf("margins.slow-call-backoff-ms must be in 0..${ResolvedTimeouts.MAX_LADDER_MS}", "but was -1"),
                 ),
                 Arguments.of(
                     "cap fraction 0",
@@ -466,6 +503,31 @@ class MeshPropertiesDerivationTest {
                     "cap fraction 1",
                     margins(MeshProperties.Margins(slowCallCapFraction = 1.0)),
                     listOf("margins.slow-call-cap-fraction must be in (0,1)", "but was 1.0"),
+                ),
+                Arguments.of(
+                    "slow-call backoff past the ladder bound",
+                    margins(MeshProperties.Margins(slowCallBackoffMs = ResolvedTimeouts.MAX_LADDER_MS + 1)),
+                    listOf("margins.slow-call-backoff-ms must be in 0..${ResolvedTimeouts.MAX_LADDER_MS}", "but was ${ResolvedTimeouts.MAX_LADDER_MS + 1}"),
+                ),
+                Arguments.of(
+                    "Int.MAX_VALUE retries, where 1 + retries wrapped negative",
+                    endpoint(MeshProperties.EndpointConfig(TRIPLET, maxRetries = Int.MAX_VALUE)),
+                    listOf("the derived timeLimiter", "must be <= ${ResolvedTimeouts.MAX_LADDER_MS} ms", "but was 2147483648800", "max-retries=${Int.MAX_VALUE}"),
+                ),
+                Arguments.of(
+                    "Long.MAX_VALUE anchor, past what a Long holds",
+                    endpoint(MeshProperties.EndpointConfig(TRIPLET, individualRequestTimeoutMs = Long.MAX_VALUE)),
+                    listOf("the derived timeLimiter", "but was more than ${Long.MAX_VALUE}", "individual-request-timeout-ms=${Long.MAX_VALUE}"),
+                ),
+                Arguments.of(
+                    "Long.MAX_VALUE global margin on a small anchor",
+                    margins(MeshProperties.Margins(globalMarginMs = Long.MAX_VALUE)),
+                    listOf("the derived timeLimiter", "margins.global-margin-ms", "but was more than ${Long.MAX_VALUE}"),
+                ),
+                Arguments.of(
+                    "one ms past the ladder bound",
+                    endpoint(MeshProperties.EndpointConfig(TRIPLET, individualRequestTimeoutMs = ResolvedTimeouts.MAX_LADDER_MS - DEFAULT_LADDER_OVERHEAD_MS + 1)),
+                    listOf("the derived timeLimiter", "but was ${ResolvedTimeouts.MAX_LADDER_MS + 1}"),
                 ),
             )
         }

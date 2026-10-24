@@ -69,58 +69,8 @@ data class ResolvedTimeouts(
     val circuitBreakerEnabled: Boolean,
     val stack: String? = null,
 ) {
-    /**
-     * The sidecar's `global` budget, DERIVED from the measured per-endpoint anchor rather than configured: the
-     * worst-case sequential run of `1 + maxRetries` attempts plus the folded global margin,
-     * `global = (1 + maxRetries) * individual + globalMarginMs`.
-     */
-    val sidecarGlobalMs: Long = (1 + maxRetries) * individualRequestTimeoutMs + margins.globalMarginMs
-
-    /**
-     * The transport's response timeout for the app->sidecar hop, one rung above the sidecar's `global`, applied by
-     * whichever engine carries the call - on the default engines as Apache's `RequestConfig.responseTimeout` and
-     * Reactor Netty's `responseTimeout`; how the other engines map it is in `docs/engine-behaviour.md` (ADR-0004).
-     * Same rung, same number, whichever stack and engine the host runs on.
-     */
-    val responseTimeout: Duration = Duration.ofMillis(sidecarGlobalMs + margins.responseTimeoutMarginMs)
-
-    /**
-     * The p99 latency of a single healthy attempt. Not a separate input: the anchor is `p99 + margin`, so p99 is
-     * recovered from it (and thus tracks the anchor automatically).
-     */
-    val p99SingleMs: Long = individualRequestTimeoutMs - margins.p99MarginMs
-
-    /**
-     * The circuit breaker's slow-call threshold, `slowCall = min(healthy ceiling, global * slowCallCapFraction)`.
-     * The healthy ceiling is the latency of a healthy call incl. a couple of routine retries,
-     * `p99 * (1 + eff) + eff * slowCallBackoffMs` with `eff = min(maxRetries, healthyRetries)`; the cap bounds it
-     * safely below global.
-     */
-    val slowCallDuration: Duration =
-        run {
-            // healthyRetries can never exceed the actual retry budget: capping it at maxRetries means with 0
-            // retries none fold in (ceiling = a single attempt p99), and it never assumes more retries than
-            // the endpoint permits - more robust than an explicit maxRetries >= 1 guard.
-            val effectiveHealthyRetries = minOf(maxRetries, margins.healthyRetries)
-            val healthyCeiling = p99SingleMs * (1 + effectiveHealthyRetries) + effectiveHealthyRetries * margins.slowCallBackoffMs
-            val cap = (sidecarGlobalMs * margins.slowCallCapFraction).toLong()
-            Duration.ofMillis(minOf(healthyCeiling, cap))
-        }
-
-    /**
-     * The "inversion": the derived slow-call sits BELOW the sidecar's per-attempt timeout. An enabled circuit
-     * breaker then pins its slow-call rate to 100 % (see [eu.inqudium.veredium.core.resilience.circuitBreakerCustomizer]) - the derived duration is only
-     * safe against a healthy-but-slow endpoint when the rate demands total degradation before opening.
-     */
-    val slowCallInverted: Boolean = slowCallDuration < Duration.ofMillis(individualRequestTimeoutMs)
-
-    /**
-     * The TimeLimiter budget, `timeLimiter = responseTimeout + transport.timeLimiterMargin`. The margin is a
-     * COMPUTED property of [transport] (connect + pendingAcquire + headroom), so it ALWAYS exceeds the worst-case
-     * pre-response phases by construction - no runtime guard needed.
-     */
-    val timeLimiterTimeout: Duration = responseTimeout.plusMillis(transport.timeLimiterMargin)
-
+    // The guards run BEFORE the rungs below: Kotlin initialises in declaration order, and a rung computed from an
+    // unchecked value can overflow before any guard sees it.
     init {
         // Every message names the YAML key, the endpoint and the offending value: a ladder that cannot form is
         // reported at the first resolveAll(), far from the file the value came from. A margin comes from
@@ -150,16 +100,101 @@ data class ResolvedTimeouts(
         require(margins.healthyRetries >= 0) {
             "[$triplet] margins.healthy-retries must be >= 0, but was ${margins.healthyRetries} ($MARGIN_SOURCES)"
         }
-        require(margins.slowCallBackoffMs >= 0) {
-            "[$triplet] margins.slow-call-backoff-ms must be >= 0, but was ${margins.slowCallBackoffMs} ($MARGIN_SOURCES)"
+        require(margins.slowCallBackoffMs in 0..MAX_LADDER_MS) {
+            "[$triplet] margins.slow-call-backoff-ms must be in 0..$MAX_LADDER_MS, but was ${margins.slowCallBackoffMs} " +
+                "($MARGIN_SOURCES)"
         }
         require(margins.slowCallCapFraction > 0.0 && margins.slowCallCapFraction < 1.0) {
             "[$triplet] margins.slow-call-cap-fraction must be in (0,1) (else the slowCall cap is <= 0 or >= global, " +
                 "making detection inert), but was ${margins.slowCallCapFraction} ($MARGIN_SOURCES)"
         }
+        // The top of the ladder bounds every rung below it (slowCall < global < responseTimeout < timeLimiter), so
+        // one check covers them all. Exact arithmetic, because the inputs alone allow `Int.MAX_VALUE` retries and
+        // `Long.MAX_VALUE` ms: plain arithmetic wraps to a negative or a small budget that passes every guard and
+        // reaches the transports and Resilience4j as something nobody configured.
+        val timeLimiterMs = exactTimeLimiterMs()
+        require(timeLimiterMs != null && timeLimiterMs <= MAX_LADDER_MS) {
+            "[$triplet] the derived timeLimiter, (1 + max-retries) * individual-request-timeout-ms + " +
+                "margins.global-margin-ms + margins.response-timeout-margin-ms + the transport's timeLimiter margin, " +
+                "must be <= $MAX_LADDER_MS ms, but was ${timeLimiterMs ?: "more than ${Long.MAX_VALUE}"} " +
+                "(max-retries=$maxRetries, individual-request-timeout-ms=$individualRequestTimeoutMs; a unit mix-up?)"
+        }
         // Invariant: timeLimiter margin > connect + pendingAcquire, which needs no runtime check here:
         // transport.timeLimiterMargin IS connect + pendingAcquire + a positive headroom, so it can never race the
         // responseTimeout regardless of how the transport caps are configured.
+    }
+
+    /**
+     * The sidecar's `global` budget, DERIVED from the measured per-endpoint anchor rather than configured: the
+     * worst-case sequential run of `1 + maxRetries` attempts plus the folded global margin,
+     * `global = (1 + maxRetries) * individual + globalMarginMs`.
+     */
+    val sidecarGlobalMs: Long = (1L + maxRetries) * individualRequestTimeoutMs + margins.globalMarginMs
+
+    /**
+     * The transport's response timeout for the app->sidecar hop, one rung above the sidecar's `global`, applied by
+     * whichever engine carries the call - on the default engines as Apache's `RequestConfig.responseTimeout` and
+     * Reactor Netty's `responseTimeout`; how the other engines map it is in `docs/engine-behaviour.md` (ADR-0004).
+     * Same rung, same number, whichever stack and engine the host runs on.
+     */
+    val responseTimeout: Duration = Duration.ofMillis(sidecarGlobalMs + margins.responseTimeoutMarginMs)
+
+    /**
+     * The p99 latency of a single healthy attempt. Not a separate input: the anchor is `p99 + margin`, so p99 is
+     * recovered from it (and thus tracks the anchor automatically).
+     */
+    val p99SingleMs: Long = individualRequestTimeoutMs - margins.p99MarginMs
+
+    /**
+     * The circuit breaker's slow-call threshold, `slowCall = min(healthy ceiling, global * slowCallCapFraction)`.
+     * The healthy ceiling is the latency of a healthy call incl. a couple of routine retries,
+     * `p99 * (1 + eff) + eff * slowCallBackoffMs` with `eff = min(maxRetries, healthyRetries)`; the cap bounds it
+     * safely below global.
+     */
+    val slowCallDuration: Duration =
+        run {
+            // healthyRetries can never exceed the actual retry budget: capping it at maxRetries means with 0
+            // retries none fold in (ceiling = a single attempt p99), and it never assumes more retries than
+            // the endpoint permits - more robust than an explicit maxRetries >= 1 guard.
+            val effectiveHealthyRetries = minOf(maxRetries, margins.healthyRetries)
+            val healthyCeiling = p99SingleMs * (1L + effectiveHealthyRetries) + effectiveHealthyRetries * margins.slowCallBackoffMs
+            val cap = (sidecarGlobalMs * margins.slowCallCapFraction).toLong()
+            Duration.ofMillis(minOf(healthyCeiling, cap))
+        }
+
+    /**
+     * The "inversion": the derived slow-call sits BELOW the sidecar's per-attempt timeout. An enabled circuit
+     * breaker then pins its slow-call rate to 100 % (see [eu.inqudium.veredium.core.resilience.circuitBreakerCustomizer]) - the derived duration is only
+     * safe against a healthy-but-slow endpoint when the rate demands total degradation before opening.
+     */
+    val slowCallInverted: Boolean = slowCallDuration < Duration.ofMillis(individualRequestTimeoutMs)
+
+    /**
+     * The TimeLimiter budget, `timeLimiter = responseTimeout + transport.timeLimiterMargin`. The margin is a
+     * COMPUTED property of [transport] (connect + pendingAcquire + headroom), so it ALWAYS exceeds the worst-case
+     * pre-response phases by construction - no runtime guard needed.
+     */
+    val timeLimiterTimeout: Duration = responseTimeout.plusMillis(transport.timeLimiterMargin)
+
+    /** The top rung, [timeLimiterTimeout], in ms - or `null` where it does not fit a `Long`. */
+    private fun exactTimeLimiterMs(): Long? =
+        try {
+            var ms = Math.multiplyExact(1L + maxRetries, individualRequestTimeoutMs)
+            ms = Math.addExact(ms, margins.globalMarginMs)
+            ms = Math.addExact(ms, margins.responseTimeoutMarginMs)
+            Math.addExact(ms, transport.timeLimiterMargin)
+        } catch (_: ArithmeticException) {
+            null
+        }
+
+    companion object {
+        /**
+         * The largest rung the ladder may derive, in ms - the bound of the transport timeouts
+         * ([MeshProperties.Transport.MAX_TRANSPORT_TIMEOUT_MS], about 24.8 days). No endpoint waits that long on
+         * purpose; past it the value is a unit mix-up, and below it every rung stays representable wherever it is
+         * applied, in nanoseconds included.
+         */
+        const val MAX_LADDER_MS: Long = MeshProperties.Transport.MAX_TRANSPORT_TIMEOUT_MS
     }
 }
 

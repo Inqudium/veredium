@@ -96,7 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Most entries resolve the findings of the defect analyses in `docs/assessment/`
 (`DEFECT_ANALYSIS-2026-10-21T20-14-02.md`, `-2026-10-22T14-01-49.md`, `-2026-10-23T05-20-01.md`,
-`-2026-10-24T10-08-59.md`).
+`-2026-10-24T10-08-59.md`, `-2026-10-24T19-38-36.md`).
 
 #### Shutdown and engine release - 2026-10-22 to 2026-10-24
 
@@ -193,7 +193,14 @@ Most entries resolve the findings of the defect analyses in `docs/assessment/`
   backend: Reactor Netty keeps a sub-pool per remote address and client configuration, and every backend's
   client has its own. The startup guard sizes the bulkheads accordingly.
 
-#### Resilience and the mesh ladder - 2026-10-21 to 2026-10-22
+#### Resilience and the mesh ladder - 2026-10-21 to 2026-10-24
+
+- `veredium-core`: `ResolvedTimeouts` no longer derives a wrapped ladder from extreme values. `1 + max-retries` was
+  an `Int` and the rungs plain `Long` arithmetic, computed before the guards ran: `max-retries: 2147483647` or an
+  anchor near `Long.MAX_VALUE` (a unit mix-up) gave a negative or tiny `global`, response timeout, slow-call and
+  TimeLimiter budget. The guards now run first, the top rung is computed with exact arithmetic, and the start fails
+  when it exceeds `Int.MAX_VALUE` ms (about 24.8 days, the bound of the transport timeouts), naming the endpoint,
+  the keys and the value. `margins.slow-call-backoff-ms` has the same bound.
 
 - `veredium-core`: the startup guard checks the bulkheads against each connection pool the client factories
   report (`MeshConnectionPools`, one pool per engine; the JDK client has no bound and is not checked), instead
@@ -239,6 +246,14 @@ Most entries resolve the findings of the defect analyses in `docs/assessment/`
 - Jackson 3 is pinned to 3.1.7, above the Spring Boot 4.1.1 BOM's 3.1.5, to clear seven OSV advisories
   against `jackson-core`/`jackson-databind` 3.1.5 (five High, two Medium). Drop the pin once Boot manages
   3.1.7 or later itself.
+
+#### Examples - 2026-10-24
+
+- `veredium-examples`: the async example's `overview` fails as soon as one of its two calls fails, with that call's
+  error, and cancels the other. `thenCombine` waits for both inputs, so a failed order search left the future open
+  until the customers call ended on its TimeLimiter budget, failed it with that timeout instead of the search's
+  error, and cancelled the customers call only after it had ended. Tests for both directions; the cancellation
+  test's comment no longer claims what nothing tested.
 
 #### Tests - 2026-10-21 to 2026-10-24
 
