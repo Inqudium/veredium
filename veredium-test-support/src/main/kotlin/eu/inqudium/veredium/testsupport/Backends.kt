@@ -6,17 +6,17 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.LockSupport
 import kotlin.concurrent.thread
 
 /**
  * A raw-socket HTTP peer on the loopback ADDRESS - never `localhost`, which may resolve to `::1` first, where nothing
- * listens. WireMock cannot stand in for these: it reports requests, not connections, and it hands a delayed or
- * dribbled body to its output buffer, so the head reaches the wire only once that buffer is full.
+ * listens. WireMock cannot stand in for these. Assumption: WireMock (3.13.2) reports requests, not connections, and
+ * hands a delayed or dribbled body to its output buffer, so the head reaches the wire only once that buffer is full.
  *
  * Every accepted connection is served on a daemon thread of its own and closed with the backend, so an exchange the
  * client kept open ends with the test.
@@ -62,8 +62,8 @@ abstract class SocketBackend(
                 while (true) {
                     val socket = server.accept()
                     connections.incrementAndGet()
-                    // Safety: a socket accepted while close() runs would be missed by its sweep and served on - for 30 s
-                    // on a dripping backend - so registering and the closed check are one step.
+                    // Safety: a socket accepted while close() runs would be missed by its sweep and served on (by a
+                    // dripping backend, for `DrippingBackend.RUN_TIME`), so registering and the closed check are one step.
                     val registered =
                         synchronized(lifecycle) {
                             if (!closing) accepted += socket
@@ -148,15 +148,16 @@ class AnsweringBackend(
 }
 
 /**
- * Answers every request with a 200 declaring a 1 MiB body, sends the head and the first 4 KiB at once ([headSent]) and
- * then one byte every 200 ms - a body that is still arriving long after any test is over, unless the client drops the
- * connection, which [connectionDropped] reports. With [cutAfterFirstChunk] it closes the connection after the first
- * 4 KiB instead: a peer that cuts the body off.
+ * Answers every request with a 200 declaring a body of [DECLARED_LENGTH] bytes, sends the head and the first
+ * [FIRST_CHUNK_BYTES] at once ([headSent]) and then one byte every [DRIP_INTERVAL] for [RUN_TIME] - a body that is
+ * still arriving long after any test is over, unless the client drops the connection, which [connectionDropped]
+ * reports. With [cutAfterFirstChunk] it closes the connection after the first chunk instead: a peer that cuts the
+ * body off.
  */
 class DrippingBackend(
     private val cutAfterFirstChunk: Boolean = false,
 ) : SocketBackend() {
-    /** Counted down when the response head and the first 4 KiB were flushed to the client. */
+    /** Counted down when the response head and the first [FIRST_CHUNK_BYTES] were flushed to the client. */
     val headSent = CountDownLatch(1)
 
     /**
@@ -177,16 +178,16 @@ class DrippingBackend(
             }
             val out = connection.getOutputStream()
             out.write(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${1024 * 1024}\r\n\r\n"
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $DECLARED_LENGTH\r\n\r\n"
                     .toByteArray(Charsets.ISO_8859_1),
             )
-            out.write(ByteArray(4096) { 'z'.code.toByte() })
+            out.write(ByteArray(FIRST_CHUNK_BYTES) { 'z'.code.toByte() })
             out.flush()
             headSent.countDown()
             if (cutAfterFirstChunk) return
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+            val deadline = System.nanoTime() + RUN_TIME.toNanos()
             while (System.nanoTime() - deadline < 0) {
-                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(200))
+                LockSupport.parkNanos(DRIP_INTERVAL.toNanos())
                 out.write('z'.code)
                 out.flush()
             }
@@ -198,6 +199,21 @@ class DrippingBackend(
     /** The client ended the exchange - unless the failure is this backend closing its own connections. */
     private fun dropped() {
         if (!closing) connectionDropped.countDown()
+    }
+
+    /** The shape of the dripping response, for a test that sets its own bounds against it. */
+    companion object {
+        /** The body length the response head declares - far more than the backend sends within [RUN_TIME]. */
+        const val DECLARED_LENGTH: Int = 1024 * 1024
+
+        /** The body bytes sent at once with the head. */
+        const val FIRST_CHUNK_BYTES: Int = 4096
+
+        /** The pause before each further byte of the body. */
+        val DRIP_INTERVAL: Duration = Duration.ofMillis(200)
+
+        /** How long a connection drips before the backend ends it - longer than any test runs. */
+        val RUN_TIME: Duration = Duration.ofSeconds(30)
     }
 }
 
