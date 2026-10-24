@@ -25,7 +25,6 @@ import eu.inqudium.veredium.testsupport.CustomizedRegistries
 import eu.inqudium.veredium.testsupport.DrippingBackend
 import eu.inqudium.veredium.testsupport.Greeting
 import eu.inqudium.veredium.testsupport.LookupRequest
-import eu.inqudium.veredium.testsupport.SilentBackend
 import eu.inqudium.veredium.testsupport.UnansweredConnectBackend
 import eu.inqudium.veredium.testsupport.WireMockArrivals
 import eu.inqudium.veredium.testsupport.capturing

@@ -75,3 +75,6 @@ fun <T> capturing(
         logger.level = previousLevel
     }
 }
+
+/** The value of this event's key-value pair [name] - a field of legatium's exchange event; `null` when it carries none. */
+fun ILoggingEvent.field(name: String): Any? = keyValuePairs?.singleOrNull { it.key == name }?.value
