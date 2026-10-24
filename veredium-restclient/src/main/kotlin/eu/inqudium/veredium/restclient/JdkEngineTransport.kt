@@ -45,10 +45,10 @@ import java.util.concurrent.Executors
  *
  * `Host` is a RESTRICTED header of the JDK client: Spring's request drops it and the JDK sends the authority of
  * the request URI instead, unless the JVM was started with `-Djdk.httpclient.allowRestrictedHeaders=host`
- * ([EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS], read once, by the JDK and by Spring). Behind the sidecar that would route every call by `localhost:<port>` - so the
- * factory refuses to start with this engine for a backend whose Host header differs from the authority of its
- * base URL ([hostHeaderConflict]). The system property is the host's decision, never this module's: it changes
- * every `java.net.http` client of the JVM.
+ * ([EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS], read once, by the JDK and by Spring). Behind the sidecar that
+ * would route every call by `localhost:<port>` - so the factory refuses to start with this engine for a backend
+ * whose Host header differs from the authority of its base URL ([hostHeaderConflict]). The system property is the
+ * host's decision, never this module's: it changes every `java.net.http` client of the JVM.
  *
  * **Cancellation.** Both blocking points honour an interrupt: waiting for the response head, Spring cancels the
  * JDK's response future, which aborts the exchange; reading the body, the JDK's stream closes itself and fails
@@ -67,14 +67,14 @@ internal class JdkEngineTransport(
     private val window = settings.window
     private val logger = settings.logger
 
-    override val name: String = CLIENT_NAME
+    override val name: String = ENGINE_NAME
 
     /**
      * The client's executor and Spring's request-body writer, owned here and shut down with the client. Virtual
      * threads, named after the engine, instead of the JDK's per-client cached platform pool and Spring's
      * thread-per-write fallback.
      */
-    private val executor: ExecutorService = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("$CLIENT_NAME-", 0).factory())
+    private val executor: ExecutorService = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("$ENGINE_NAME-", 0).factory())
 
     /** The one client of this engine, shared by every backend on it. `internal` so a test can see it terminate. */
     internal val httpClient: HttpClient =
@@ -154,7 +154,7 @@ internal class JdkEngineTransport(
 
     companion object {
         /** The engine's [name]: its threads' name prefix. */
-        const val CLIENT_NAME: String = "restclient-jdk"
+        const val ENGINE_NAME: String = "restclient-jdk"
 
         /**
          * Why the JDK engine cannot carry [endpoint]'s Host header, or `null` when it can: the header the factory
