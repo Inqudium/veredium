@@ -25,7 +25,8 @@ import java.util.concurrent.Future
  * `cancel` is the only thing that reaches a running call: it abandons the exchange and frees its bulkhead permit.
  * A future derived with `thenApply`, `handle` or `thenCombine` does not pass a cancel on to the one it came from,
  * so each method that returns a derived future hands it on itself ([cancelling]); [orders] returns the client's own
- * future, which needs no such step.
+ * future, which needs no such step. Nor does `thenCombine` fail before both inputs are done, so [overview] fails on
+ * the first failure itself ([failingFast]), and its cancel then stops the other call.
  */
 @Component
 class AsyncCustomerAdapter(
@@ -62,13 +63,15 @@ class AsyncCustomerAdapter(
 
     /**
      * The customer with [id] and their orders, both calls in flight at once; `null` for an unknown customer. The
-     * future fails with whatever the first failing call failed with.
+     * future fails as soon as the first call fails, with what that call failed with, and the other call is
+     * cancelled ([failingFast]).
      */
     fun overview(id: String): CompletableFuture<CustomerOverview?> {
         val customer = customer(id)
         val orders = orders(id)
         return customer
             .thenCombine(orders) { found, page -> found?.let { CustomerOverview(it, page.orders) } }
+            .failingFast(customer, orders)
             .cancelling(customer, orders)
     }
 
@@ -81,5 +84,20 @@ class AsyncCustomerAdapter(
          * left running. Cancelling a call that already ended is a no-op.
          */
         fun <T> CompletableFuture<T>.cancelling(vararg calls: Future<*>): CompletableFuture<T> = also { it.whenComplete { _, _ -> calls.forEach { call -> call.cancel(true) } } }
+
+        /**
+         * Fails this future with the first of [calls] to fail. `thenCombine` alone waits for both inputs, even after
+         * one has failed: the result would stay open until the other call ended, at the latest on its budget, and
+         * would then fail with whichever of the two it looks at first. The first failure wins here, wrapped as
+         * `thenCombine` wraps it; what completes the future later is a no-op.
+         */
+        fun <T> CompletableFuture<T>.failingFast(vararg calls: CompletableFuture<*>): CompletableFuture<T> =
+            also { combined ->
+                calls.forEach { call ->
+                    call.whenComplete { _, error ->
+                        if (error != null) combined.completeExceptionally(error as? CompletionException ?: CompletionException(error))
+                    }
+                }
+            }
     }
 }
