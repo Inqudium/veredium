@@ -21,6 +21,7 @@ import eu.inqudium.veredium.testsupport.AnsweringBackend
 import eu.inqudium.veredium.testsupport.DrippingBackend
 import eu.inqudium.veredium.testsupport.Greeting
 import eu.inqudium.veredium.testsupport.LookupRequest
+import eu.inqudium.veredium.testsupport.SocketBackend
 import eu.inqudium.veredium.testsupport.UnansweredConnectBackend
 import eu.inqudium.veredium.testsupport.WireMockArrivals
 import eu.inqudium.veredium.testsupport.capturing
@@ -57,15 +58,19 @@ import org.springframework.web.client.HttpClientErrorException
 import org.springframework.web.client.HttpServerErrorException
 import org.springframework.web.client.ResourceAccessException
 import org.springframework.web.client.RestClient
+import org.springframework.web.client.RestClientResponseException
 import reactor.core.publisher.Mono
 import reactor.netty.http.HttpResources
 import tools.jackson.databind.json.JsonMapper
 import java.io.IOException
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.http.HttpTimeoutException
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
@@ -262,6 +267,93 @@ class RestClientEngineIntegrationTest {
                     RestClientEngine.REACTOR_NETTY -> ReadTimeoutException::class.java
                 }
             assertThat(causeChain(failure)).anyMatch { timeoutType.isInstance(it) }
+        }
+
+        @ParameterizedTest
+        @EnumSource(RestClientEngine::class)
+        fun `should fail with the transport's response timeout when the body stalls after its first chunk`(engine: RestClientEngine) {
+            // What is tested: the response-timeout rung on each engine in the BODY phase - the head and the first
+            //   4 KiB of a declared 1 MiB body arrive at once, then the peer falls silent with the connection open.
+            // Success criteria: with a 300 ms anchor (response timeout 700 ms) and a generous 30 s budget, the call
+            //   fails not before the response timeout and well before 2.5 s, each engine with the failure it raises
+            //   there: a ResourceAccessException over Apache's SocketTimeoutException and Jetty's TimeoutException
+            //   (the head's types); over an IOException of the cancelled body on the JDK, whose timeout in the body
+            //   phase is Spring's handler closing the stream - no HttpTimeoutException; and on Reactor Netty Netty's
+            //   bare ReadTimeoutException, NOT wrapped - the shape the engine has at this point, pinned so that a
+            //   change to it is a deliberate one.
+            // Why it matters: every other response-timeout case delays the head. The guide promises the rung for
+            //   the body as well - over head and body (JDK, Jetty), until the response is complete (Reactor Netty),
+            //   per read (Apache); an upgrade that made one of them a head-only bound would leave a stalled body to
+            //   the TimeLimiter, and the breaker would see a TimeoutException instead of the transport failure.
+            //
+            // Given
+            StallingBackend().use { backend ->
+                val client =
+                    newFactory(RestClientProperties.Engine(default = engine), mesh = meshAt(backend.authority, "stalling", individualRequestTimeoutMs = 300))
+                        .create("stalling")
+                assertThat(client.responseTimeout).isEqualTo(Duration.ofMillis(700))
+
+                // When
+                val (failure, elapsed) = timed { client.get(Greeting::class.java) { it.uri("/stall") } }
+
+                // Then
+                assertThat(backend.headSent.count).`as`("the backend must have sent the head").isZero()
+                // A head-only bound would leave the call to the 30 s budget; one at the anchor would fire before 700 ms.
+                assertThat(elapsed).isGreaterThanOrEqualTo(client.responseTimeout.minus(TIMER_SLACK)).isLessThan(Duration.ofMillis(2_500))
+                when (engine) {
+                    RestClientEngine.APACHE -> {
+                        assertThat(failure).isInstanceOf(ResourceAccessException::class.java).hasCauseInstanceOf(SocketTimeoutException::class.java)
+                    }
+
+                    RestClientEngine.JETTY -> {
+                        assertThat(failure).isInstanceOf(ResourceAccessException::class.java)
+                        assertThat(causeChain(failure)).anyMatch { it is TimeoutException }
+                    }
+
+                    RestClientEngine.JDK -> {
+                        assertThat(failure).isInstanceOf(ResourceAccessException::class.java).hasCauseInstanceOf(IOException::class.java)
+                        assertThat(causeChain(failure)).noneMatch { it is HttpTimeoutException }
+                    }
+
+                    // Netty's ReadTimeoutException is unchecked, so Spring's body stream rethrows it as it is, and the
+                    // engine's body read unwraps only the failures it finds wrapped: it passes Spring's IOException
+                    // handling, unlike the same timeout during the head wait.
+                    RestClientEngine.REACTOR_NETTY -> {
+                        assertThat(failure).isInstanceOf(ReadTimeoutException::class.java)
+                    }
+                }
+            }
+        }
+
+        @ParameterizedTest
+        @EnumSource(RestClientEngine::class)
+        fun `should fail a redirect as a response exception with its status and count it as a failure`(engine: RestClientEngine) {
+            // What is tested: a 302 on each engine - none follows a redirect - through the client's status mapping.
+            // Success criteria: the call fails with a plain RestClientResponseException (neither the 4xx nor the
+            //   5xx subclass) carrying status 302; the redirect's target was never requested; the backend's
+            //   breaker records one failed call and no successful one.
+            // Why it matters: only a 2xx is the answer an adapter asked for. A 3xx on the success path would be
+            //   decoded as the expected body - or fail as an empty one - and count as a success for the breaker,
+            //   while a sidecar answering every call with a redirect is as broken as one answering 500.
+            //
+            // Given
+            wireMock.stubFor(get(urlEqualTo("/moved")).willReturn(aResponse().withStatus(302).withHeader("Location", "/hello")))
+            wireMock.stubFor(get(urlEqualTo("/hello")).willReturn(okJson("""{"message":"hi"}""")))
+            val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+            val client = newFactory(RestClientProperties.Engine(default = engine), circuitBreakers = circuitBreakers).create("status")
+
+            // When
+            val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/moved") } }
+
+            // Then
+            assertThat(failure).isExactlyInstanceOf(RestClientResponseException::class.java)
+            assertThat((failure as RestClientResponseException).statusCode.value()).isEqualTo(302)
+            wireMock.verify(0, getRequestedFor(urlEqualTo("/hello")))
+            val breaker = circuitBreakers.circuitBreaker("status")
+            assertThat(eventually(PROMPTLY) { breaker.metrics.numberOfFailedCalls == 1 })
+                .`as`("the breaker must record the redirect as a failure")
+                .isTrue()
+            assertThat(breaker.metrics.numberOfSuccessfulCalls).isZero()
         }
 
         @ParameterizedTest
@@ -500,43 +592,42 @@ class RestClientEngineIntegrationTest {
         @EnumSource(RestClientEngine::class)
         fun `should release the worker promptly when the budget expires while the body is still arriving`(engine: RestClientEngine) {
             // What is tested: the same contract while the worker is in the BODY read - the head arrived, the body
-            //   drips in chunks, each well inside the response timeout.
-            // Success criteria: with a 1.5 s budget and a body dripped over 10 s, the caller gets a
-            //   TimeoutException within 3 s; the permit and the connection come back within 2 s of that.
+            //   drips, each byte well inside the response timeout.
+            // Success criteria: against a backend that sends the head and 4 KiB of a declared 1 MiB body the moment
+            //   the request arrives and then one byte every 200 ms, with a 1.5 s budget, an 8.4 s response timeout
+            //   and a 256 KiB limit the body stays under, the caller gets a TimeoutException within 3 s; the
+            //   backend sees its connection dropped, and the permit and the connection come back, within 2 s of
+            //   that.
             // Why it matters: the body read is the phase no transport timeout bounds as a whole (a peer that drips
             //   passes every per-read guard), so the interrupt is the only thing that ends it - and it is a
             //   different blocking point than the head on every engine. Spring's Reactor Netty body stream ignores
-            //   the interrupt outright, which is why that engine hands its reads off.
+            //   the interrupt outright, which is why that engine hands its reads off. A backend whose head reaches
+            //   the wire at once is what keeps the budget out of the head wait: WireMock's dribbled body holds
+            //   the head back until its buffer fills, which on a slow runner turns this into the head case.
             //
             // Given
-            wireMock.stubFor(
-                get(urlEqualTo("/drip")).willReturn(
-                    aResponse()
-                        .withStatus(200)
-                        .withHeader("Content-Type", "application/json")
-                        .withBody("""{"message":"${"y".repeat(1_000)}"}""")
-                        .withChunkedDribbleDelay(10, 10_000),
-                ),
-            )
-            val bulkheads = BulkheadRegistry.ofDefaults()
-            val factory =
-                newFactory(
-                    RestClientProperties.Engine(default = engine),
-                    mesh = mesh("dripping", individualRequestTimeoutMs = 8_000),
-                    timeLimiter = budget(Duration.ofMillis(1_500)),
-                    bulkheads = bulkheads,
-                )
-            val client = factory.create("dripping")
+            DrippingBackend().use { backend ->
+                val bulkheads = BulkheadRegistry.ofDefaults()
+                val factory =
+                    newFactory(
+                        RestClientProperties.Engine(default = engine),
+                        mesh = meshAt(backend.authority, "dripping", individualRequestTimeoutMs = 8_000),
+                        timeLimiter = budget(Duration.ofMillis(1_500)),
+                        bulkheads = bulkheads,
+                    )
+                val client = factory.create("dripping")
 
-            // When
-            val startNanos = System.nanoTime()
-            val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/drip") } }
-            val elapsed = Duration.ofNanos(System.nanoTime() - startNanos)
+                // When
+                val (failure, elapsed) = timed { client.get(Greeting::class.java) { it.uri("/drip") } }
 
-            // Then
-            assertThat(failure).isInstanceOf(TimeoutException::class.java)
-            assertThat(elapsed).isLessThan(Duration.ofSeconds(3))
-            awaitReleased(factory, engine, bulkheads, "dripping")
+                // Then
+                assertThat(failure).isInstanceOf(TimeoutException::class.java)
+                assertThat(elapsed).isLessThan(Duration.ofSeconds(3))
+                assertThat(backend.connectionDropped.await(PROMPTLY.toMillis(), TimeUnit.MILLISECONDS))
+                    .`as`("the abandoned exchange on %s must drop the connection of the body still arriving", engine)
+                    .isTrue()
+                awaitReleased(factory, engine, bulkheads, "dripping")
+            }
         }
 
         @ParameterizedTest
@@ -798,14 +889,19 @@ class RestClientEngineIntegrationTest {
         @EnumSource(RestClientEngine::class)
         fun `should report an engine that does not drain by the deadline and close it anyway`(engine: RestClientEngine) {
             // What is tested: the deadline branch of each engine's shutdown, on a clock that is past the deadline
-            //   at its next read.
-            // Success criteria: with an exchange in flight, shutdown() returns without an exception, writes one WARN
-            //   naming the engine and the window, and the engine reports itself closed within 2 s.
+            //   at its next read - the engine's side and the side of the call it cuts off.
+            // Success criteria: with an exchange in flight against a 10 s backend, shutdown() returns without an
+            //   exception, writes one WARN naming the engine and the window, and the engine reports itself closed
+            //   within 2 s; the in-flight call fails within 2 s of shutdown()'s return with a
+            //   ResourceAccessException over an IOException, long before its backend would answer.
             // Why it matters: the line is the only trace of a shutdown that cut calls off; it is unreachable on a
-            //   real clock short of a call longer than every response timeout.
+            //   real clock short of a call longer than every response timeout. And a cut-off call must fail then,
+            //   not hold its worker and its permit on to its response timeout or the TimeLimiter budget - which
+            //   only a case that looks at the call can tell. (Reactor Netty's own way out, for loops that no longer
+            //   signal the exchange's end, has a case of its own below: here the loops still close the channel.)
             //
             // Given
-            wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("{}").withFixedDelay(3_000)))
+            wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("{}").withFixedDelay(10_000)))
             val arrived = arrivals.arrivalOf("/slow")
             val factory =
                 newFactory(
@@ -814,13 +910,14 @@ class RestClientEngineIntegrationTest {
                     nanoTime = leapingClock(TimeUnit.HOURS.toNanos(1)),
                 )
             val client = factory.create("greet")
-            val inFlight = callers.submit<Throwable?> { catchThrowable { client.get(Greeting::class.java) { it.uri("/slow") } } }
+            val inFlight = callers.submit<Pair<Throwable?, Long>> { catchThrowable { client.get(Greeting::class.java) { it.uri("/slow") } } to System.nanoTime() }
             assertThat(arrived.await(5, TimeUnit.SECONDS)).isTrue()
             val transport = factory.engineTransports.getValue(engine)
 
             capturingFactoryWarnings { warnings ->
                 // When
                 val outcome = catchThrowable { factory.shutdown() }
+                val returnedNanos = System.nanoTime()
 
                 // Then
                 assertThat(outcome).isNull()
@@ -829,42 +926,108 @@ class RestClientEngineIntegrationTest {
                 assertThat(eventually(PROMPTLY) { transport.isClosed })
                     .`as`("the %s engine must report itself closed within %s", engine, PROMPTLY)
                     .isTrue()
+                assertCutOff(engine, inFlight, returnedNanos)
             }
-            inFlight.get(10, TimeUnit.SECONDS)
         }
 
         @ParameterizedTest
         @EnumSource(RestClientEngine::class)
         fun `should stop waiting when the shutdown thread is interrupted and leave the flag set`(engine: RestClientEngine) {
-            // What is tested: the interrupt exit of each engine's drain.
-            // Success criteria: with an exchange in flight, shutdown() on an interrupted thread returns within
-            //   2 s (the derived window is far longer), the WARN names the interrupt, and the flag is still set.
+            // What is tested: the interrupt exit of each engine's drain - the engine's side and the side of the
+            //   call it cuts off.
+            // Success criteria: with an exchange in flight against a 10 s backend, shutdown() on an interrupted
+            //   thread returns within 2 s (the derived window is far longer), the WARN names the interrupt, and the
+            //   flag is still set; the in-flight call fails within 2 s of shutdown()'s return with a
+            //   ResourceAccessException over an IOException.
             // Why it matters: a container tearing the context down under its own deadline interrupts the
             //   shutdown thread; a drain that ignored it - or spun on it - would hold the shutdown for the whole
-            //   window.
+            //   window. An engine that stopped waiting but left the exchange running - Jetty stopping on a thread
+            //   of its own, Reactor Netty disposing without waiting - would hold the call's worker and permit past
+            //   the context.
             //
             // Given
-            wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("{}").withFixedDelay(3_000)))
+            wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("{}").withFixedDelay(10_000)))
             val arrived = arrivals.arrivalOf("/slow")
             val factory = newFactory(RestClientProperties.Engine(default = engine), mesh = mesh("greet", individualRequestTimeoutMs = 8_000))
             val client = factory.create("greet")
-            val inFlight = callers.submit<Throwable?> { catchThrowable { client.get(Greeting::class.java) { it.uri("/slow") } } }
+            val inFlight = callers.submit<Pair<Throwable?, Long>> { catchThrowable { client.get(Greeting::class.java) { it.uri("/slow") } } to System.nanoTime() }
             assertThat(arrived.await(5, TimeUnit.SECONDS)).isTrue()
 
             capturingFactoryWarnings { warnings ->
                 // When
                 val shutdown =
-                    callers.submit<Boolean> {
+                    callers.submit<Pair<Boolean, Long>> {
                         Thread.currentThread().interrupt()
                         factory.shutdown()
-                        Thread.currentThread().isInterrupted
+                        Thread.currentThread().isInterrupted to System.nanoTime()
                     }
 
                 // Then
-                assertThat(shutdown.get(PROMPTLY.toMillis(), TimeUnit.MILLISECONDS)).`as`("the interrupt flag must survive").isTrue()
+                val (flagSet, returnedNanos) = shutdown.get(PROMPTLY.toMillis(), TimeUnit.MILLISECONDS)
+                assertThat(flagSet).`as`("the interrupt flag must survive").isTrue()
                 assertThat(warnings().single()).contains("'${engine.key}'", "because the shutdown thread was interrupted")
+                assertCutOff(engine, inFlight, returnedNanos)
             }
-            inFlight.get(10, TimeUnit.SECONDS)
+        }
+
+        @Test
+        fun `should fail a Reactor Netty call waiting for its head when the shutdown finds the event loops silent`() {
+            // What is tested: the Reactor Netty engine's hand-off of the head wait and the shutdownNow of its
+            //   offload executor, through the factory - with every event loop of the engine held, so nothing the
+            //   loops would do (the response timeout's timer, the backend's answer, the close of the disposed
+            //   channel) reaches the exchange any more.
+            // Success criteria: with a call waiting for the head of a 10 s backend (a 30 s budget, an 8.4 s response
+            //   timeout), shutdown() on an interrupted thread returns within 2 s, and the call fails within 2 s of
+            //   that with a ResourceAccessException over the IOException of the interrupted head wait - not at the
+            //   backend's answer or the budget, both of which need the held loops.
+            // Why it matters: Spring's wait for the head is a block() without a time bound. A shutdown past its
+            //   deadline disposes the loops, and an exchange whose end they no longer signal - the hang once seen on
+            //   CI - holds its worker and its permit until the TimeLimiter budget. Only the head wait running on the
+            //   offload executor, and that executor's shutdownNow, end it; held loops are what makes that the only
+            //   way out on demand - with live loops the channel's close ends the call anyway, and the shutdown
+            //   cases above stay green without either.
+            //
+            // Given: a call waiting for its head, and every event loop of the engine held
+            wireMock.stubFor(get(urlEqualTo("/slow")).willReturn(okJson("{}").withFixedDelay(10_000)))
+            val arrived = arrivals.arrivalOf("/slow")
+            val factory =
+                newFactory(RestClientProperties.Engine(default = RestClientEngine.REACTOR_NETTY), mesh = mesh("greet", individualRequestTimeoutMs = 8_000))
+            val client = factory.create("greet")
+            val inFlight = callers.submit<Pair<Throwable?, Long>> { catchThrowable { client.get(Greeting::class.java) { it.uri("/slow") } } to System.nanoTime() }
+            assertThat(arrived.await(5, TimeUnit.SECONDS)).isTrue()
+            val loops = (factory.engineTransports.getValue(RestClientEngine.REACTOR_NETTY) as ReactorNettyEngineTransport).loops.onClient(true).toList()
+            val held = CountDownLatch(loops.size)
+            val release = CountDownLatch(1)
+            loops.forEach { loop ->
+                loop.execute {
+                    held.countDown()
+                    release.await(30, TimeUnit.SECONDS)
+                }
+            }
+            try {
+                assertThat(held.await(5, TimeUnit.SECONDS)).`as`("every event loop must be held").isTrue()
+
+                // When
+                val shutdown =
+                    callers.submit<Long> {
+                        Thread.currentThread().interrupt()
+                        factory.shutdown()
+                        System.nanoTime()
+                    }
+
+                // Then
+                val returnedNanos = shutdown.get(PROMPTLY.toMillis(), TimeUnit.MILLISECONDS)
+                val (failure, endedNanos) = inFlight.get(10, TimeUnit.SECONDS)
+                assertThat(Duration.ofNanos(endedNanos - returnedNanos))
+                    .`as`("the call must end promptly after shutdown() returned: %s", failure)
+                    .isLessThan(PROMPTLY)
+                // The head wait's own InterruptedException, from the offload task the shutdownNow interrupted - not an
+                // InterruptedIOException, which would mean the worker itself had been interrupted.
+                assertThat(failure).isInstanceOf(ResourceAccessException::class.java).hasCauseInstanceOf(IOException::class.java)
+                assertThat(failure!!.cause).hasCauseInstanceOf(InterruptedException::class.java)
+            } finally {
+                release.countDown()
+            }
         }
 
         @Test
@@ -1314,6 +1477,7 @@ class RestClientEngineIntegrationTest {
         mesh: MeshProperties = mesh("greet", "lookup", "status", "limited"),
         timeLimiter: TimeLimiterConfig = GENEROUS_BUDGET,
         bulkheads: BulkheadRegistry = BulkheadRegistry.ofDefaults(),
+        circuitBreakers: CircuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults(),
         maxInMemorySize: DataSize = RestClientProperties().maxInMemorySize,
         meterRegistry: MeterRegistry? = null,
         engineLibraryPresent: (RestClientEngine) -> Boolean = { it.isPresent() },
@@ -1321,7 +1485,7 @@ class RestClientEngineIntegrationTest {
         nanoTime: () -> Long = System::nanoTime,
     ): ResilientRestClientFactory {
         val resilience =
-            BlockingResilienceDecorator(CircuitBreakerRegistry.ofDefaults(), TimeLimiterRegistry.of(timeLimiter), bulkheads)
+            BlockingResilienceDecorator(circuitBreakers, TimeLimiterRegistry.of(timeLimiter), bulkheads)
                 .also { decorators += it }
         return ResilientRestClientFactory(
             RestClientProperties(maxInMemorySize = maxInMemorySize, engine = engines),
@@ -1360,6 +1524,24 @@ class RestClientEngineIntegrationTest {
         }
     }
 
+    /**
+     * Asserts that the call [inFlight] - its failure and when it ended - was cut off by a shutdown of [engine] that
+     * returned at [returnedNanos]: it failed with a ResourceAccessException over an IOException within [PROMPTLY] of
+     * that return, long before its 10 s backend would have answered.
+     */
+    private fun assertCutOff(
+        engine: RestClientEngine,
+        inFlight: Future<Pair<Throwable?, Long>>,
+        returnedNanos: Long,
+    ) {
+        val (failure, endedNanos) = inFlight.get(10, TimeUnit.SECONDS)
+        assertThat(Duration.ofNanos(endedNanos - returnedNanos))
+            .`as`("the call the %s engine's shutdown cut off must end promptly after shutdown() returned: %s", engine, failure)
+            .isLessThan(PROMPTLY)
+        assertThat(failure).`as`("the call the %s engine's shutdown cut off", engine).isInstanceOf(ResourceAccessException::class.java)
+        assertThat(causeChain(failure)).anyMatch { it is IOException }
+    }
+
     /** A mesh with one endpoint [alias] whose sidecar is [authority] (`host:port`), the triplet host being the same authority. */
     private fun meshAt(
         authority: String,
@@ -1393,5 +1575,34 @@ class RestClientEngineIntegrationTest {
         val startNanos = System.nanoTime()
         val failure = catchThrowable(call)
         return failure to Duration.ofNanos(System.nanoTime() - startNanos)
+    }
+}
+
+/**
+ * Answers the first request with a 200 declaring a 1 MiB body, sends the head and the first 4 KiB at once and then
+ * nothing, holding the connection open - a body that stalls, which only a timeout of the client ends. [headSent] is
+ * counted down once the head and the chunk are flushed.
+ */
+private class StallingBackend : SocketBackend() {
+    val headSent = CountDownLatch(1)
+
+    init {
+        start("stalling-backend")
+    }
+
+    override fun serve(connection: Socket) {
+        try {
+            if (!readHead(connection)) return
+            connection.getOutputStream().apply {
+                write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${1024 * 1024}\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+                write(ByteArray(4096) { 'z'.code.toByte() })
+                flush()
+            }
+            headSent.countDown()
+            // Silent until the client gives up and closes, or the backend is closed.
+            while (connection.getInputStream().read() >= 0) continue
+        } catch (_: IOException) {
+            // The client closed the connection.
+        }
     }
 }
