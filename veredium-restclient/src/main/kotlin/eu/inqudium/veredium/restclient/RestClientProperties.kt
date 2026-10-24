@@ -35,12 +35,11 @@ data class RestClientProperties(
      * the same reason (see [RestClientVerdicts.clientSideFailure]).
      *
      * **Why 256 KB and not less.** This is the WebClient twin's ceiling, kept so that the two modules size their
-     * buffers identically against the same backends. 8 KB is too small for a list response from these backends:
-     * an access-profile list exceeds it, and a call refused on its buffer spends its whole retry cap on the same
-     * answer.
+     * buffers identically against the same backends. 8 KB is too small for a typical JSON list response, and a
+     * call refused on its buffer spends its whole retry cap on the same answer.
      *
-     * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and the shared pool is bounded
-     * at `maxConnections` (100, [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst
+     * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and the mesh bulkheads admit
+     * `maxConnections` calls in all (100, [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst
      * case is ~25 MB of response buffers; at the 1 MB some other clients use it would be ~100 MB, which is real
      * money on a service that otherwise needs little heap.
      *

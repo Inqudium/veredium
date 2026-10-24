@@ -134,7 +134,7 @@ class ResilientRestClientFactory(
     private val meshTransport: MeshProperties.Transport = plan.transport
 
     /** How long [shutdown] waits for the engines to drain ([MeshClientPlan.drainWindow]). */
-    private val poolDisposeTimeout: Duration = plan.drainWindow
+    private val drainWindow: Duration = plan.drainWindow
 
     /**
      * `maxInMemorySize` in bytes: the cap on how much of a response body the client will buffer. Handed to every
@@ -152,7 +152,7 @@ class ResilientRestClientFactory(
      */
     private val transports: EngineSet<RestClientEngine, EngineTransport> =
         EngineSet(engineByBackend.values.toSortedSet(), "ResilientRestClientFactory", logger) { engine ->
-            val settings = EngineTransport.Settings(meshTransport, properties.pool, meterRegistry, poolDisposeTimeout, logger)
+            val settings = EngineTransport.Settings(meshTransport, properties.pool, meterRegistry, drainWindow, logger)
             when (engine) {
                 RestClientEngine.APACHE -> ApacheEngineTransport(settings)
                 RestClientEngine.JDK -> JdkEngineTransport(settings)
@@ -301,7 +301,7 @@ class ResilientRestClientFactory(
 
     /**
      * Closes every engine in use on context shutdown, each draining its exchanges in flight until one shared
-     * deadline [poolDisposeTimeout] from now (see each engine's `shutdown`): the Apache pool, the Jetty client,
+     * deadline [drainWindow] from now (see each engine's `shutdown`): the Apache pool, the Jetty client,
      * the Reactor Netty pool and event loops, the JDK client.
      *
      * An engine that does not drain in time is an OUTCOME, not a failure - reported as the statement it is and
@@ -314,7 +314,7 @@ class ResilientRestClientFactory(
      */
     @PreDestroy
     fun shutdown() {
-        transports.shutdown(nanoTime() + poolDisposeTimeout.toNanos(), nanoTime)
+        transports.shutdown(nanoTime() + drainWindow.toNanos(), nanoTime)
     }
 }
 

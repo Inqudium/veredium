@@ -387,7 +387,7 @@ Apache engine, in order:
 1. stop the pool's eviction scheduler;
 2. close every per-endpoint `CloseableHttpClient` (the manager is shared, so this closes nothing underneath);
 3. **wait for the pool to drain**: poll `leased == 0` with `LockSupport.parkNanos` every 50 ms, for at most
-   `poolDisposeTimeout` = the longest `responseTimeout` of any endpoint + connect + pendingAcquire + 1 s —
+   `drainWindow` = the longest `responseTimeout` of any endpoint + connect + pendingAcquire + 1 s —
    derived, so it cannot drift below the ladder as endpoints are retuned. No in-flight call can outlive its
    own response timeout, so waiting longer could not let anything finish that was not going to;
 4. close the manager (`CloseMode.GRACEFUL`). Expiry of the wait is an *outcome*, logged as one WARN naming the
