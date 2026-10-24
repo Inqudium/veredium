@@ -72,4 +72,4 @@ body meters) — those are documented in legatium's own guide, not here.
 
 > **Scope.** This document covers the `eu.inqudium.veredium.webclient` adapter layer only.
 
-**Related:** [Logging Guide: Reactive WebClient Adapters](logging-guide.md).
+**Related:** [Logging Guide: Reactive WebClient](logging-guide.md).
