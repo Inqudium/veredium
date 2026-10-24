@@ -42,11 +42,12 @@ object WebClientVerdicts {
      * carries no error signal through the reactive operators. (The blocking twin lists its `InterruptedException`
      * for exactly the case a cancellation covers here.)
      *
-     * The cause walk is what makes the second entry work at all: Spring wraps the codec failure on an otherwise
-     * successful response into a `WebClientResponseException` reporting **200 OK**, with the real cause
-     * underneath (`200 OK from GET ..., but response failed with cause: DataBufferLimitException`). A 5xx whose
-     * error body exceeds the limit yields a plain `WebClientResponseException` with no limit exception
-     * underneath, so it is still recorded; `WebClientVerdictsTest` pins both.
+     * The cause walk is what makes the second entry work at all. Assumption: Spring wraps the codec failure on an
+     * otherwise successful response into a `WebClientResponseException` reporting **200 OK**, with the real cause
+     * underneath (`200 OK from GET ..., but response failed with cause: DataBufferLimitException`), while a 5xx
+     * whose error body exceeds the limit yields a plain `WebClientResponseException` with no limit exception
+     * underneath, so it is still recorded (spring-web 7.0.9). `ResilientWebClientIntegrationTest` pins both through
+     * the real pipeline; `WebClientVerdictsTest` pins the rule on hand-built exceptions.
      */
     val clientSideFailure: ClientSideFailurePolicy =
         ClientSideFailurePolicy(

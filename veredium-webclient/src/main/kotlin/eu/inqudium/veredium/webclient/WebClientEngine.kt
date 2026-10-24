@@ -8,9 +8,10 @@ import eu.inqudium.veredium.core.engine.HttpEngine
  *
  * Each value maps onto one of Spring's own reactive connectors; the factory builds that connector itself, on
  * resources it owns, and sets it on its clone of Boot's `WebClient.Builder` only. Nothing about the choice
- * reaches another client of the host: Boot's own switch `spring.http.clients.reactive.connector` would change
- * every WebClient the host builds from Boot's builder, which is why this module has a switch of its own and
- * never reads or writes Boot's.
+ * reaches another client of the host: Boot's builder bean, Boot's connector and Boot's own switch
+ * `spring.http.clients.reactive.connector` are neither read nor changed, so every other WebClient of the host
+ * keeps the engine Boot gave it. Boot's switch would change every WebClient the host builds from Boot's builder,
+ * which is why this module has a switch of its own (ADR-0004, "The HTTP engine is the host's choice").
  *
  * The YAML values are the lower-case, dashed names in [key] (`reactor-netty`, `jdk`, `jetty`, `apache`); Boot's
  * relaxed enum binding maps them onto the constants.
@@ -19,7 +20,7 @@ import eu.inqudium.veredium.core.engine.HttpEngine
  * empty-body contract, the default headers, legatium's exchange event, the observation and the Resilience4j
  * decoration. What differs is how far an engine can carry the mesh transport settings and the `app.webclient.pool`
  * knobs, and which transport meters exist; the factory logs that per engine in use at startup, and
- * `webclient-config-guide.md` tabulates it.
+ * `docs/engine-behaviour.md` tabulates it.
  *
  * [key], [requiredClasses] and [dependency] are those of [HttpEngine], shared with the blocking module's engines,
  * which the start-time checks of [eu.inqudium.veredium.core.engine.EngineSelection] read.

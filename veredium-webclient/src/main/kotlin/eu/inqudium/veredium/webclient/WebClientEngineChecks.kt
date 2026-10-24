@@ -30,9 +30,9 @@ internal object WebClientEngineChecks {
     ) = EngineSelection.requireLibraries(KEY, engineByBackend, engine.endpoints.keys) { it.isPresent(classLoader) }
 
     /**
-     * The "no call waits" value `0` of `pool.pending-acquire-max-count` cannot be expressed on Jetty: its request
-     * queue holds a request until it is ON a connection, including while a new connection is opened for it, so
-     * a capacity small enough to let nothing wait behind busy connections would also reject a burst the pool
+     * The "no call waits" value `0` of `pool.pending-acquire-max-count` cannot be expressed on Jetty. Assumption:
+     * its request queue holds a request until it is ON a connection, including while a new connection is opened for
+     * it (jetty-client 12.1.12), so a capacity small enough to let nothing wait behind busy connections would also reject a burst the pool
      * could serve - and a capacity of 0 rejects every request ([JettyEngineTransport.jettyQueueCapacity]).
      */
     fun requireJettyQueue(
@@ -48,8 +48,8 @@ internal object WebClientEngineChecks {
     }
 
     /**
-     * The JDK client refuses an explicit `Host` header unless the JVM was started with
-     * [EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS] naming `host` - and every client of this module sends one, from
+     * Assumption: the JDK client refuses an explicit `Host` header unless the JVM was started with
+     * [EngineSelection.JDK_ALLOW_RESTRICTED_HEADERS] naming `host` (JDK 21) - and every client of this module sends one, from
      * the mesh triplet. [hostHeaderAllowed] asks the JDK itself ([EngineSelection.jdkAllowsHostHeader]).
      */
     fun requireJdkHostHeader(

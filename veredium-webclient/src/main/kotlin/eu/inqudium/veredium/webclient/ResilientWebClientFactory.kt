@@ -37,13 +37,12 @@ import java.util.concurrent.TimeoutException
  *
  * Which library carries a backend's exchanges is `app.webclient.engine` ([WebClientProperties.Engine],
  * [WebClientEngine]): Reactor Netty by default, the JDK client, Jetty or Apache HttpClient 5 per backend. The
- * choice stays inside this factory. It builds the connector itself, on resources it owns - created with the
- * factory for every engine in use, shared by that engine's backends, released in [shutdown] - and sets it on
- * its clone of Boot's builder. It never reads or writes Boot's `spring.http.clients.reactive.*` switches,
- * registers no connector, HTTP-client or settings bean, does not use the host's `ReactorResourceFactory` bean and
- * leaves Boot's builder bean as it found it, so every other WebClient of the host keeps the engine Boot gave it.
- * Reactor Netty included: its pool, event loops and resolver are the factory's, not the process-wide
- * `HttpResources` the host's own Reactor Netty clients share.
+ * choice stays inside this factory, and Boot's own switch is not read ([WebClientEngine] says why). The factory
+ * builds the connector itself, on resources it owns - created with the factory for every engine in use, shared by
+ * that engine's backends, released in [shutdown] - and sets it on its clone of Boot's builder; it registers no
+ * connector, HTTP-client or settings bean, does not use the host's `ReactorResourceFactory` bean and leaves Boot's
+ * builder bean as it found it. Reactor Netty included: its pool, event loops and resolver are the factory's, not
+ * the process-wide `HttpResources` the host's own Reactor Netty clients share.
  *
  * The construction fails, naming the key, when an override names no mesh alias, when a selected engine's library
  * is missing, when the JDK engine cannot send the Host header in this JVM, and when Jetty is asked for a request
@@ -312,18 +311,13 @@ class ResilientWebClientFactory(
      * left of the shutdown deadline when the Reactor Netty engine's turn comes. The WARN names the drain window
      * [drainWindow], as every engine's does, not the part of it that was left for this engine.
      *
-     * For Reactor Netty the disposal IS the drain: the pool is built with Reactor Netty's `disposeTimeout`
-     * ([drainWindow]), so `disposeLater()` refuses new acquires, still serves the calls waiting for a
-     * connection, lets every in-flight call finish on its connection, and completes once all connections came back.
+     * For Reactor Netty the disposal IS the drain - the pool's graceful `disposeTimeout` ([ReactorNettyEngineTransport]).
      *
-     * Expiry is an OUTCOME, not a failure. `block(Duration)` would report it as an `IllegalStateException` -
-     * the same shape as a genuine disposal error, and one that Spring can only catch and log as a destroy
-     * method that threw. The last line before the process exits would then be a stack trace, at the moment
-     * someone is looking for one, saying nothing about what actually happened. `timeout` + `onErrorResume`
-     * turns it into the statement it is: the engine did not drain in time, and it is being closed anyway - on
-     * the same WARN line as every other engine ([EngineDrain.reportUndrained]), named by its engine key. The
-     * `timeout` also guarantees the returned [Mono] a terminal signal, so the wait in [awaitPoolDisposal] cannot
-     * hang, whatever form that wait takes.
+     * Rationale: `timeout` + `onErrorResume`, not `block(Duration)` - an expiry is an OUTCOME, not a failure, and
+     * `block` would report it as an `IllegalStateException`, the shape of a genuine disposal error, which Spring
+     * logs as a destroy method that threw. Here it is the WARN line every engine writes
+     * ([EngineDrain.reportUndrained]), named by its engine key. The `timeout` also guarantees the returned [Mono] a
+     * terminal signal, so the wait in [awaitPoolDisposal] cannot hang.
      *
      * Separate from [shutdown] for the one reason that the timeout branch can only be tested with a disposal
      * that never ends and a clock that can be advanced: the real pool's disposal finishes in milliseconds, and

@@ -87,22 +87,23 @@ internal interface EngineTransport : EngineResources {
  * Reactor Netty: one [ConnectionProvider] and one event-loop group for every backend of the engine, one
  * [ReactorHttpClient] per backend carrying that backend's response timeout and its URI tagger.
  *
- * Reactor Netty keeps a separate sub-pool inside the provider per remote address AND per client configuration
- * (`PooledConnectionProvider` keys it by the address and the client's `channelHash`), and every backend's
+ * Assumption: Reactor Netty keeps a separate sub-pool inside the provider per remote address AND per client
+ * configuration (`PooledConnectionProvider` keys it by the address and the client's `channelHash`, reactor-netty
+ * 1.3.7), and every backend's
  * [ReactorHttpClient] is configured on its own - its response timeout, its URI tagger. So `maxConnections` and
  * the pending-acquire limits apply per BACKEND (and per remote address), not to the engine as a whole: two
  * backends behind the same sidecar never share a connection (`WebClientEngineIntegrationTest` pins it).
  *
  * Nothing here is Reactor Netty's process-wide `HttpResources`, which every other Reactor Netty client of the
  * JVM shares - and which Boot's `ReactorResourceFactory` manages for the host's own clients: the loops are
- * created here (`runOn`), and the resolver is set explicitly, because `HttpClient`'s default resolver comes from
- * `HttpResources` even with own loops. The resolver is Netty's `DefaultAddressResolverGroup`, a stateless
+ * created here (`runOn`), and the resolver is set explicitly. Assumption: `HttpClient`'s default resolver comes
+ * from `HttpResources` even with own loops (reactor-netty 1.3.7). The resolver is Netty's `DefaultAddressResolverGroup`, a stateless
  * singleton carrying no setting, which resolves through `InetAddress` - as the JDK, Jetty and Apache clients do.
  * The lookup runs on the event loop: nothing for the loopback sidecar (`localhost`), a blocking DNS query for a
  * remote base URL.
  *
- * The loops are disposed [window] after the pool, not with it: closing a loop group closes every channel on it at
- * once, and the pool disposal deliberately lets an in-flight call finish on its connection. No call outlives that
+ * The loops are disposed [window] after the pool, not with it. Assumption: closing a loop group closes every
+ * channel on it at once (reactor-netty 1.3.7), and the pool disposal deliberately lets an in-flight call finish on its connection. No call outlives that
  * window (it is longer than any response timeout), so the loops go when nothing can still need them; the threads
  * are daemons, so a JVM exiting before that is not held up.
  */
@@ -135,11 +136,12 @@ internal class ReactorNettyEngineTransport(
             .maxIdleTime(properties.pool.maxIdleTime)
             .maxLifeTime(properties.pool.maxLifeTime)
             .evictInBackground(properties.pool.evictInBackground)
-            // A GRACEFUL disposal, bounded by the factory's drain window: without it `disposeLater()` fails every
-            // call still waiting for a connection at once (`PoolShutdownException`). With it the pool takes no new
-            // acquire, serves the waiting ones and completes once every connection came back - or fails with a
-            // TimeoutException at the window's end, which Reactor Netty logs at ERROR; the factory's own wait, bounded
-            // by what is left of the shared deadline, has reported the pool with a WARN before that.
+            // A GRACEFUL disposal, bounded by the factory's drain window. Assumption: without it `disposeLater()`
+            // fails every call still waiting for a connection at once (`PoolShutdownException`); with it the pool
+            // takes no new acquire, serves the waiting ones and completes once every connection came back - or fails
+            // with a TimeoutException at the window's end, which Reactor Netty logs at ERROR (reactor-netty 1.3.7).
+            // The factory's own wait, bounded by what is left of the shared deadline, has reported the pool with a
+            // WARN before that.
             .disposeTimeout(window)
             .metrics(true)
             .build()
@@ -193,14 +195,14 @@ internal class ReactorNettyEngineTransport(
  * carrying that backend's response timeout as the request timeout (`HttpRequest.timeout`, which bounds the
  * wait for the response headers).
  *
- * The client is pinned to HTTP/1.1, the protocol Reactor Netty speaks by default: left at its default the JDK
- * client offers an `h2c` upgrade on every plaintext request. Redirects are not followed, as with Reactor Netty.
- * The client owns its executor and selector thread and terminates them in [shutdown].
+ * The client is pinned to HTTP/1.1, the protocol Reactor Netty speaks by default. Assumption: left at its
+ * default the JDK client offers an `h2c` upgrade on every plaintext request (JDK 21). Redirects are not followed,
+ * as with Reactor Netty. The client owns its executor and selector thread and terminates them in [shutdown].
  *
- * Not applied, because the client has no per-client equivalent: `max-connections`, `pending-acquire-timeout-ms`
- * and the four `pool.*` knobs. The JDK's pool settings exist only as JVM-wide system properties
- * (`jdk.httpclient.connectionPoolSize`, `jdk.httpclient.keepalive.timeout`), and setting one would change every
- * other `java.net.http` client of the process.
+ * None of the pool knobs is applied ([WebClientEngineChecks.coverageLine] names them on the startup line).
+ * Assumption: the JDK client's pool settings exist only as JVM-wide system properties
+ * (`jdk.httpclient.connectionPoolSize`, `jdk.httpclient.keepalive.timeout`, JDK 21), so there is no per-client
+ * equivalent, and setting one would change every other `java.net.http` client of the process.
  */
 internal class JdkEngineTransport(
     meshTransport: MeshProperties.Transport,
@@ -239,8 +241,8 @@ internal class JdkEngineTransport(
         if (!terminated) {
             EngineDrain.reportUndrained(logger, engine.key, window, left = null)
             client.shutdownNow()
-            // shutdownNow() aborts the exchanges and returns before the client's threads have ended; a short,
-            // bounded wait makes `isClosed` true on return in the normal case without holding up a shutdown.
+            // Assumption: shutdownNow() aborts the exchanges and returns before the client's threads have ended
+            // (JDK 21); a short, bounded wait makes `isClosed` true on return in the normal case without holding up a shutdown.
             try {
                 client.awaitTermination(TERMINATION_AFTER_ABORT)
             } catch (_: InterruptedException) {
@@ -262,18 +264,17 @@ internal class JdkEngineTransport(
  * connector per backend that puts that backend's response timeout on each request as Jetty's per-request idle
  * timeout.
  *
- * Mapped: connect timeout, `max-connections` (per destination, i.e. per remote address like Reactor Netty's
- * sub-pools), `pool.pending-acquire-max-count` (as the per-destination request queue beyond the connections, see
- * [jettyQueueCapacity]), `pool.max-idle-time` (the connection idle timeout) and `pool.max-life-time` (the connection
- * pool's maximum connection duration).
- * Redirects are not followed and no cookie is stored, as with Reactor Netty.
+ * Which knobs it applies is named on the startup line ([WebClientEngineChecks.coverageLine]). `max-connections`
+ * holds per destination, i.e. per remote address like Reactor Netty's sub-pools, and `pool.pending-acquire-max-count`
+ * becomes the per-destination request queue beyond the connections ([jettyQueueCapacity]). Redirects are not
+ * followed and no cookie is stored, as with Reactor Netty.
  *
- * Not applied: `pending-acquire-timeout-ms` - Jetty has no timeout for a request waiting in its queue - and
- * `pool.evict-in-background`, because Jetty closes an idle connection on that connection's own idle timer
- * rather than in a background sweep.
+ * Assumption: Jetty has no timeout for a request waiting in its queue, and it closes an idle connection on that
+ * connection's own idle timer rather than in a background sweep (jetty-client 12.1.12) - so
+ * `pending-acquire-timeout-ms` and `pool.evict-in-background` have no equivalent and are not applied.
  *
- * Shutdown drains, as on every other engine: Jetty's `stop` aborts the exchanges still running, so [shutdown] first
- * waits for them - the same wait, on the same counters, as the blocking module's Jetty engine.
+ * Shutdown drains, as on every other engine. Assumption: Jetty's `stop` aborts the exchanges still running
+ * (jetty-client 12.1.12), so [shutdown] first waits for them - the same wait, on the same counters, as the blocking module's Jetty engine.
  */
 internal class JettyEngineTransport(
     properties: WebClientProperties,
@@ -397,9 +398,9 @@ internal class JettyEndpointConnector(
 }
 
 /**
- * A Jetty response whose body, when cancelled before it completed, aborts the native request - what Spring's
- * connector does not do: cancelling its content publisher only stops the delivery, and Jetty goes on receiving
- * the rest of the body on the connection, for as long as the peer sends it. A codec refusing an over-limit body,
+ * A Jetty response whose body, when cancelled before it completed, aborts the native request. Workaround: Spring's
+ * connector does not (spring-web 7.0.9) - cancelling its content publisher only stops the delivery, and Jetty goes
+ * on receiving the rest of the body on the connection, for as long as the peer sends it. A codec refusing an over-limit body,
  * or the TimeLimiter cancelling while the body arrives, would keep the connection - and its slot of
  * `max-connections` - until the peer stops.
  */
@@ -417,22 +418,23 @@ private class AbortJettyOnBodyCancel(
  * connector per backend carrying that backend's response timeout and the pending-acquire timeout as the
  * request's `RequestConfig`.
  *
- * Mapped: connect timeout and `pool.max-life-time` (connection config), `max-connections` (per route, i.e. per
- * remote address, shared by the backends behind it; no total cap across routes), and `pool.max-idle-time` swept
- * every `pool.evict-in-background` by an idle-connection evictor this transport owns. Retries, redirects and cookie
- * management are switched off, and the client speaks HTTP/1.1 only - each of these is on by default in Apache
- * and off in Reactor Netty, and an automatic retry would spend the mesh budget behind the TimeLimiter's back.
+ * Which knobs it applies is named on the startup line ([WebClientEngineChecks.coverageLine]). `max-connections`
+ * holds per route, i.e. per remote address, shared by the backends behind it, with no total cap across routes;
+ * `pool.max-idle-time` is swept every `pool.evict-in-background` by an idle-connection evictor this transport owns,
+ * and with `pool.evict-in-background: 0` no evictor runs, as with Reactor Netty's "off". Retries, redirects and
+ * cookie management are switched off, and the client speaks HTTP/1.1 only. Assumption: each of these is on by
+ * default in Apache (httpclient5 5.6.4) and off in Reactor Netty. An automatic retry would spend the mesh budget
+ * behind the TimeLimiter's back.
  *
- * Not applied: `pool.pending-acquire-max-count` - the Apache pool has no bound on its waiting requests - and,
- * with `pool.evict-in-background: 0`, `pool.max-idle-time` (no evictor runs, as with Reactor Netty's "off").
- * `pending-acquire-timeout-ms` is set as the connection-request timeout but does not hold on its own.
- * Assumption: Apache's async pool (`StrictConnPool`, httpcore5 5.4) checks a waiting lease's deadline only
+ * Assumption: the Apache pool has no bound on its waiting requests (httpcore5 5.4.3), so
+ * `pool.pending-acquire-max-count` is not applied. `pending-acquire-timeout-ms` is set as the connection-request
+ * timeout but does not hold on its own. Assumption: Apache's async pool (`StrictConnPool`, httpcore5 5.4.3) checks a waiting lease's deadline only
  * while it processes a lease or a release, and no timer fails it in between - with nothing else happening on
  * the route, a call waiting for a connection waits until its TimeLimiter ends it.
  *
- * Cancellation needs this transport's help: Spring's `HttpComponentsClientHttpConnector` drops the `Future` of
- * the exchange it starts, so a cancelled subscription would leave the exchange running until the response or the
- * response timeout. [ApacheEndpointConnector] and [AbortableAsyncClient] keep that `Future` and cancel it.
+ * Cancellation needs this transport's help. Workaround: Spring's `HttpComponentsClientHttpConnector` drops the
+ * `Future` of the exchange it starts (spring-web 7.0.9), so a cancelled subscription would leave the exchange
+ * running until the response or the response timeout. [ApacheEndpointConnector] and [AbortableAsyncClient] keep that `Future` and cancel it.
  */
 internal class ApacheEngineTransport(
     properties: WebClientProperties,
@@ -473,8 +475,8 @@ internal class ApacheEngineTransport(
                 .disableAutomaticRetries()
                 .disableRedirectHandling()
                 .disableCookieManagement()
-                // Apache checks socket and connect timeouts when its selector wakes, every second by default -
-                // late enough to let the response timeout fire AFTER the TimeLimiter rung above it, whose
+                // Workaround: Apache checks socket and connect timeouts only when its selector wakes, every second
+                // by default (httpcore5 5.4.3) - late enough to let the response timeout fire AFTER the TimeLimiter rung above it, whose
                 // headroom is only connect + pending-acquire + 100 ms. Half the fixed headroom keeps the expiry
                 // within it.
                 .setIOReactorConfig(
@@ -596,9 +598,9 @@ internal class ApacheEngineTransport(
  *
  * Cancelling the subscription - the TimeLimiter's abort, a caller's cancellation - cancels that `Future`, which
  * makes Apache abort the exchange and discard its connection - while waiting for the response, where the
- * cancellation reaches the connector's `Mono`. Reading the body needs no help: a body cancelled before its end
- * (a codec refusal, a TimeLimiter abort) releases its connection through Spring's connector and Apache alone, as
- * the dripping-body cases of `WebClientEngineIntegrationTest` pin.
+ * cancellation reaches the connector's `Mono`. Assumption: reading the body needs no help - a body cancelled before
+ * its end (a codec refusal, a TimeLimiter abort) releases its connection through Spring's connector and Apache alone
+ * (spring-web 7.0.9, httpclient5 5.6.4), as the dripping-body cases of `WebClientEngineIntegrationTest` pin.
  *
  * A connector per exchange costs one small object and an idempotent `start()` on the already running client;
  * it is what lets the context carry per-exchange state without relying on when Spring invokes its context
@@ -672,8 +674,8 @@ internal class AbortableAsyncClient(
 
     /**
      * Cancels every exchange still in flight, so its caller receives the cancellation now, and returns how many
-     * it cancelled. A cancelled future completes the callback of Spring's connector with a
-     * `CancellationException`, which ends the call at once (see [ApacheEngineTransport.shutdown] for why that is needed).
+     * it cancelled. Assumption: a cancelled future completes the callback of Spring's connector with a
+     * `CancellationException` (spring-web 7.0.9), which ends the call at once (see [ApacheEngineTransport.shutdown] for why that is needed).
      */
     fun abortInFlight(): Int = inFlight.toList().count { it.cancel(true) }
 

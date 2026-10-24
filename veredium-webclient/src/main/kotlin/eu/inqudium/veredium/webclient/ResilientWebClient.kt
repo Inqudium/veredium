@@ -100,9 +100,9 @@ class ResilientWebClient(
      * passed, not by how much, and legatium's body capture is bounded by its own `max-body-bytes`, which says
      * nothing about the codec's.
      *
-     * Sampled here rather than at the transport: Reactor Netty's `data.received` counts bytes off the wire,
-     * which with `compress(true)` is the COMPRESSED size, while the codec limit bounds the decompressed
-     * buffer. Sizing the limit from that would under-set it by the compression ratio.
+     * Sampled here rather than at the transport. Assumption: Reactor Netty's `data.received` counts bytes off the
+     * wire (reactor-netty 1.3.7), which with `compress(true)` is the COMPRESSED size, while the codec limit bounds
+     * the decompressed buffer. Sizing the limit from that would under-set it by the compression ratio.
      *
      * Recorded in UTF-8 BYTES ([ResponseBodyMetrics.utf8Size]) rather than `String.length`, so the sample and the
      * limit it informs are the same unit.
@@ -164,9 +164,9 @@ class ResilientWebClient(
             // Stamp the endpoint's low-cardinality path template onto the request so legatium's exchange
             // event (adapter_url_template) and Spring's client observation can record the template next to
             // the expanded URL. Done centrally so it holds regardless of which uri(...) overload the caller
-            // used - the builder-lambda form does not set the attribute, and for a caller that passed the
-            // endpoint's template to uri(template, vars) re-setting it is a no-op (the same value). The key is
-            // the library's public constant, the same string Spring's own uri(template, vars) sets.
+            // used - the builder-lambda form does not set the attribute, and for a caller that passed a template
+            // of its own to uri(template, vars) the stamp wins. The key is the library's public constant, the
+            // same string Spring's own uri(template, vars) sets.
             block(webClient.get()).attribute(ClientRequestLoggingFilter.URI_TEMPLATE_ATTRIBUTE, pathTemplate),
             responseType,
             requestBody = null,
@@ -198,10 +198,7 @@ class ResilientWebClient(
             .fromCallable { objectMapper.writeValueAsString(body) }
             .flatMap { serialized ->
                 // Hand the JSON string straight to bodyValue(): WebClient encodes it as UTF-8, so an explicit
-                // toByteArray() would only allocate a redundant array.
-                // .attribute stamps the path template centrally (see get()): a caller that builds the URI with
-                // the uri { builder -> ... } overload does NOT set the template attribute, so without this the
-                // exchange event and the observation would have no template for its calls.
+                // toByteArray() would only allocate a redundant array. The path template is stamped as in get().
                 val spec =
                     block(webClient.post())
                         .bodyValue(serialized)
@@ -209,32 +206,35 @@ class ResilientWebClient(
                 execute(spec, responseType, requestBody = serialized)
             }
 
+    /**
+     * The cold call [get] and [post] return: [spec]'s exchange, decorated, deserialised and logged.
+     *
+     * Everything that owns per-request state - the caller's MDC snapshot, the attempt's clock, the cancel flag - and
+     * the HTTP exchange itself live INSIDE one `defer`, so they are materialised per SUBSCRIPTION, not per assembly.
+     * This method only assembles; subscription is the caller's job (directly, or through `.awaitSingle()`). Each
+     * subscription therefore gets its OWN clock (the duration measures the attempt, not the time the Mono was held
+     * before a late subscription) and its OWN exchange, so a caller that subscribes more than once (a `.retry()` on
+     * the returned Mono) never shares state across subscriptions. Whatever is added here with per-request state
+     * belongs inside the `defer` too.
+     */
     private fun <T : Any> execute(
         spec: WebClient.RequestHeadersSpec<*>,
         responseType: Class<T>,
         requestBody: String?,
     ): Mono<T> {
-        // Everything that owns per-request state - the attempt's startNanos clock - plus the HTTP exchange
-        // itself lives INSIDE this defer, so it is materialised per SUBSCRIPTION, not per assembly. This method
-        // only assembles and returns the cold Mono; subscription is the caller's job (directly, or through
-        // .awaitSingle()). The defer is what keeps that correct: each subscription gets its OWN startNanos (so
-        // the duration measures the attempt, not the time the Mono was held before a late subscription) and
-        // its OWN exchange - so a caller that subscribes more than once (e.g. a .retry() on the returned Mono)
-        // never shares state across subscriptions.
         val exchange =
             Mono.defer {
                 // The caller's MDC, taken HERE because this is the subscribing thread - the last point at which
                 // the caller's correlation keys are reliably on the thread. Every hook below fires on an event
-                // loop and writes its line under this snapshot (class KDoc). Per subscription, like the clock.
+                // loop and writes its line under this snapshot (class KDoc).
                 val callerMdc: Map<String, String>? = MDC.getCopyOfContextMap()
 
                 // Per subscription, i.e. on every outbound call - guarded inside, see ClientCallLog. Runs on the
                 // subscribing thread itself, so it carries the caller's MDC without help.
                 calls.logExecuting(responseType, requestBody)
 
-                // The attempt's own clock, started per SUBSCRIPTION like everything else in this defer. The
-                // error and cancel lines below promise a number regardless of any logging configuration, so
-                // it is measured here and nowhere else.
+                // The attempt's own clock. The error and cancel lines below promise a number regardless of any
+                // logging configuration, so it is measured here and nowhere else.
                 val startNanos = nanoTime()
                 val elapsedMillis = { TimeUnit.NANOSECONDS.toMillis(nanoTime() - startNanos) }
 
@@ -286,10 +286,11 @@ class ResilientWebClient(
                             calls.log(Level.DEBUG, "On signalType={} for backend '{}'", signalType, backendName)
                         }
                     }
-                    // An engine may still report a failure of the exchange AFTER the subscription was cancelled -
-                    // the JDK client's cancelled future, Jetty's abort, Apache's cancelled exchange, each by design -
-                    // and the operators between it and the cancelling TimeLimiter hand such an error to Reactor's
-                    // dropped-error hook, which logs it at ERROR as if it had been lost. It is the expected end of
+                    // Assumption: an engine may still report a failure of the exchange AFTER the subscription was
+                    // cancelled - the JDK client's cancelled future, Jetty's abort, Apache's cancelled exchange, each
+                    // by design - and the operators between it and the cancelling TimeLimiter hand such an error to
+                    // Reactor's dropped-error hook, which logs it at ERROR as if it had been lost (reactor-core
+                    // 3.8.7). It is the expected end of
                     // an aborted exchange, so it is written at DEBUG instead. Outermost on purpose: the context
                     // reaches every operator above it, the decoration's included, and those are where it drops.
                     //

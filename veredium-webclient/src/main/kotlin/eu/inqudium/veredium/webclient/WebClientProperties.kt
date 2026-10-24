@@ -27,9 +27,9 @@ data class WebClientProperties(
      * Upper bound for buffered response bodies. Guards against unbounded memory use on large payloads.
      *
      * **Why 256 KB and not less.** This is Spring's own `ExchangeStrategies` default, so it is the value a
-     * reader already expects; a deviation is what needs justifying, not this. 8 KB proved too small for a list
-     * response from these backends: the backend answers `200 OK` promptly and the codec aborts mid-buffer, on
-     * every retry of the same call.
+     * reader already expects; a deviation is what needs justifying, not this. 8 KB proved too small for list
+     * responses: the backend answers `200 OK` promptly and the codec aborts mid-buffer, on every retry of the
+     * same call.
      *
      * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and how many calls run at once is
      * bounded by the mesh bulkheads, whose sum the reference configuration holds at `maxConnections` (100,
@@ -37,8 +37,13 @@ data class WebClientProperties(
      * buffers; at the 1 MB some other clients use it would be ~100 MB, which is real money on a service that
      * otherwise needs little heap.
      *
-     * **Why a limit at all** - see the range check in `init`: without one, a single degenerate response takes
-     * the pod down, and the failure mode of getting it wrong is documented there.
+     * **Why a limit at all.** Without one, a single degenerate response takes the pod down.
+     *
+     * **Range: 1 B to `Int.MAX_VALUE` B**, checked at bind time, naming the key. Both ends are load-bearing. A zero
+     * or negative limit fails EVERY call with a `DataBufferLimitException`, which
+     * [WebClientVerdicts.clientSideFailure] deliberately keeps off the circuit breaker: the breaker stays closed,
+     * every backend looks down in monitoring, and the cause is one line of YAML. A value past `Int.MAX_VALUE` would
+     * wrap to a negative number when the factory narrows it to an `Int` for the codec, and land in the same case.
      */
     val maxInMemorySize: DataSize = DataSize.ofKilobytes(256),
     /**
@@ -50,8 +55,8 @@ data class WebClientProperties(
      * `maxConnections` and `pendingAcquireTimeout` come from the mesh transport config.
      *
      * Written in Reactor Netty's terms, the default engine, which applies all four knobs. The other engines
-     * apply what they have an equivalent for and say at startup which knobs they do not apply
-     * ([WebClientEngine]; the configuration guide tabulates it).
+     * apply what they have an equivalent for and say at startup which knobs they do not apply;
+     * `docs/engine-behaviour.md` tabulates it per engine.
      */
     val pool: Pool = Pool(),
     /** HTTP client Micrometer Observation - self-contained; it reads only this module's property. */
@@ -81,17 +86,9 @@ data class WebClientProperties(
     val effectiveUserAgent: String = Veredium.resolveUserAgent(userAgent, "app.webclient.user-agent")
 
     init {
-        // Both ends of this range are load-bearing.
-        //
-        // At the bottom: a zero or negative limit binds silently and then fails EVERY call with a
-        // DataBufferLimitException - which WebClientVerdicts.clientSideFailure deliberately keeps off the circuit
-        // breaker, so no breaker opens and the picture in monitoring is "all four backends are down" while the
-        // cause is one line of YAML. The protection works against the diagnosis here, which is exactly why the
-        // value must never get there.
-        //
-        // At the top: ResilientWebClientFactory narrows this to an Int for the codec. Anything past
-        // Int.MAX_VALUE would wrap to a negative number and land back at the bottom case - by a route nobody
-        // would suspect from looking at the configured value.
+        // Both ends of the range are load-bearing (the KDoc of `maxInMemorySize`): the bottom because the breaker
+        // never sees the failure a non-positive limit causes, the top because `ResilientWebClientFactory` narrows
+        // the value to an Int.
         require(maxInMemorySize.toBytes() in 1..Int.MAX_VALUE.toLong()) {
             "app.webclient.max-in-memory-size must be between 1B and ${Int.MAX_VALUE}B, but was $maxInMemorySize"
         }
@@ -115,14 +112,14 @@ data class WebClientProperties(
     ) {
         init {
             // -1 is Reactor Netty's "unbounded" and stays allowed; 0 means "never queue", which is a defensible
-            // fail-fast. Anything below -1 the pool builder rejects too, but it does so at factory construction
-            // and with a message that names neither the property nor its source.
+            // fail-fast. Assumption: anything below -1 the pool builder rejects too (reactor-netty 1.3.7), but it
+            // does so at factory construction and with a message that names neither the property nor its source.
             require(pendingAcquireMaxCount >= -1) {
                 "app.webclient.pool.pending-acquire-max-count must be >= -1 (-1 = unbounded), " +
                     "but was $pendingAcquireMaxCount"
             }
-            // Negative durations are accepted by the pool builder and then quietly mean something no operator
-            // intended: a connection that is due for eviction the moment it is created. Zero is left alone where
+            // Assumption: negative durations are accepted by the pool builder (reactor-netty 1.3.7) and then quietly
+            // mean something no operator intended: a connection that is due for eviction the moment it is created. Zero is left alone where
             // every engine reads it the same way - for evictInBackground it is "off", for maxLifeTime "unbounded".
             //
             // Rationale: not for maxIdleTime - the engines read a zero idle time in OPPOSITE ways. Reactor Netty
@@ -146,10 +143,8 @@ data class WebClientProperties(
      * shape as `validation`.
      *
      * **Scoped to this module.** The setting chooses the connector the factory puts on ITS clone of Boot's
-     * `WebClient.Builder`; Boot's builder bean, Boot's connector and Boot's own switch
-     * (`spring.http.clients.reactive.connector`) are neither read nor changed, so every other WebClient of the
-     * host keeps the engine Boot gave it. That is the reason this is a property of its own rather than an
-     * instruction to set Boot's: Boot's switch is global to the host.
+     * `WebClient.Builder`; Boot's own switch `spring.http.clients.reactive.connector` is neither read nor changed
+     * ([WebClientEngine] says why).
      *
      * **Checked against the mesh** when the factory is constructed, not here (this class does not know the
      * aliases): an [endpoints] key that names no `app.mesh` alias fails the start - unlike a misspelt
