@@ -35,7 +35,21 @@ abstract class SocketBackend(
     /** The connections accepted so far. */
     val connections = AtomicInteger()
 
+    /** The connections whose [serve] has returned - the backend is done with them, whoever ended them. */
+    val connectionsEnded = AtomicInteger()
+
+    /**
+     * Whether [close] was called. Set before any connection is closed, so a subclass that sees its connection fail can
+     * tell its own shutdown from the client going away.
+     */
+    @Volatile
+    protected var closing = false
+        private set
+
     private val accepted = CopyOnWriteArrayList<Socket>()
+
+    /** Guards [closing] against [accepted]: a socket is either registered before [close] runs or closed by the acceptor. */
+    private val lifecycle = Any()
 
     /** Starts accepting; called by a subclass once its own state is initialised. */
     protected fun start(name: String) {
@@ -44,8 +58,24 @@ abstract class SocketBackend(
                 while (true) {
                     val socket = server.accept()
                     connections.incrementAndGet()
-                    accepted += socket
-                    thread(isDaemon = true, name = "$name-connection") { socket.use { serve(it) } }
+                    // A socket accepted while close() runs would be missed by its sweep and served on - for 30 s on a
+                    // dripping backend - so registering and the closed check are one step.
+                    val registered =
+                        synchronized(lifecycle) {
+                            if (!closing) accepted += socket
+                            !closing
+                        }
+                    if (!registered) {
+                        socket.close()
+                        return@thread
+                    }
+                    thread(isDaemon = true, name = "$name-connection") {
+                        try {
+                            socket.use { serve(it) }
+                        } finally {
+                            connectionsEnded.incrementAndGet()
+                        }
+                    }
                 }
             } catch (_: IOException) {
                 // The server socket was closed - the test is over.
@@ -57,6 +87,7 @@ abstract class SocketBackend(
     protected abstract fun serve(connection: Socket)
 
     override fun close() {
+        synchronized(lifecycle) { closing = true }
         server.close()
         accepted.forEach { it.close() }
     }
@@ -113,15 +144,21 @@ class AnsweringBackend(
 }
 
 /**
- * Answers every request with a 200 declaring a 1 MiB body, sends the head and the first 4 KiB at once and then one
- * byte every 200 ms - a body that is still arriving long after any test is over, unless the client drops the
+ * Answers every request with a 200 declaring a 1 MiB body, sends the head and the first 4 KiB at once ([headSent]) and
+ * then one byte every 200 ms - a body that is still arriving long after any test is over, unless the client drops the
  * connection, which [connectionDropped] reports. With [cutAfterFirstChunk] it closes the connection after the first
  * 4 KiB instead: a peer that cuts the body off.
  */
 class DrippingBackend(
     private val cutAfterFirstChunk: Boolean = false,
 ) : SocketBackend() {
-    /** Counted down when the client went away while the body was still arriving (or the backend was closed). */
+    /** Counted down when the response head and the first 4 KiB were flushed to the client. */
+    val headSent = CountDownLatch(1)
+
+    /**
+     * Counted down when the client went away before the response was complete: while the body was still arriving, or
+     * before its request head was complete. Not by the backend's own [close], and not by [cutAfterFirstChunk]'s cut.
+     */
     val connectionDropped = CountDownLatch(1)
 
     init {
@@ -130,7 +167,10 @@ class DrippingBackend(
 
     override fun serve(connection: Socket) {
         try {
-            if (!readHead(connection)) return
+            if (!readHead(connection)) {
+                dropped()
+                return
+            }
             val out = connection.getOutputStream()
             out.write(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${1024 * 1024}\r\n\r\n"
@@ -138,6 +178,7 @@ class DrippingBackend(
             )
             out.write(ByteArray(4096) { 'z'.code.toByte() })
             out.flush()
+            headSent.countDown()
             if (cutAfterFirstChunk) return
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
             while (System.nanoTime() - deadline < 0) {
@@ -146,8 +187,13 @@ class DrippingBackend(
                 out.flush()
             }
         } catch (_: IOException) {
-            connectionDropped.countDown()
+            dropped()
         }
+    }
+
+    /** The client ended the exchange - unless the failure is this backend closing its own connections. */
+    private fun dropped() {
+        if (!closing) connectionDropped.countDown()
     }
 }
 

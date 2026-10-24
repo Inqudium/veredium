@@ -2,8 +2,10 @@ package eu.inqudium.veredium.examples.async
 
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
+import com.github.tomakehurst.wiremock.client.WireMock.equalToJson
 import com.github.tomakehurst.wiremock.client.WireMock.get
 import com.github.tomakehurst.wiremock.client.WireMock.okJson
+import com.github.tomakehurst.wiremock.client.WireMock.post
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import eu.inqudium.veredium.examples.CustomerOverview
 import eu.inqudium.veredium.examples.ExampleContext
@@ -59,14 +61,22 @@ class AsyncExampleTest(
 
     @Test
     fun `should abandon the running call when the caller cancels the combined future`() {
-        // What is tested: cancelling the future of overview while the customer directory has not answered yet.
+        // What is tested: cancelling the future of overview while neither the customer directory nor the order
+        //   search has answered yet.
         // Success criteria: the client logs the cancellation of the customers call within 5 s.
         // Why it matters: a derived future does not pass a cancel on by itself; without the adapter handing it on,
-        //   the exchange would run until its budget expired and hold its bulkhead permit all the while.
+        //   the exchange would run until its budget expired and hold its bulkhead permit all the while. Both
+        //   backends answer only after the test is long over, so the caller's cancel is the only thing that can end
+        //   the combined future - a failing order search would end it, and cancel the customers call, by itself.
         //
-        // Given: a customer the directory answers only after the test is long over
+        // Given: a customer the directory, and orders the search, answer only after the test is long over
         Sidecar.server.stubFor(
             get(urlEqualTo("/v1/customers/c-slow")).willReturn(okJson("""{"id":"c-slow","name":"Slow"}""").withFixedDelay(30_000)),
+        )
+        Sidecar.server.stubFor(
+            post(urlEqualTo("/v1/orders/search"))
+                .withRequestBody(equalToJson("""{"customerId":"c-slow","limit":20}"""))
+                .willReturn(okJson("""{"orders":[]}""").withFixedDelay(30_000)),
         )
         val logger = LoggerFactory.getLogger(ResilientRestClient::class.java) as Logger
         capturing(logger, Level.DEBUG, accept = { it.formattedMessage.startsWith("Cancelled request to backend 'customers'") }) { appender ->

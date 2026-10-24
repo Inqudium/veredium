@@ -7,6 +7,7 @@ import eu.inqudium.veredium.examples.Sidecar.ADAS_ORDERS
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.time.Duration
 
 /** The blocking example as a host runs it: the whole Boot application, its adapter calling the stand-in sidecar. */
 @ExampleContext(BlockingExampleApplication::class)
@@ -59,16 +60,19 @@ class BlockingExampleTest(
     @Test
     fun `should publish the budgets the mesh ladder derived from the configuration`() {
         // What is tested: the BaseAdapter values of BlockingCustomerAdapter.
-        // Success criteria: the response timeout is positive and below the TimeLimiter budget.
+        // Success criteria: the values the ladder derives from application.yml for the slower of the two endpoints,
+        //   order-search (anchor 500 ms, no retries, default margins and transport): the response timeout
+        //   500 + 200 + 200 = 900 ms, the TimeLimiter budget 900 + 100 + 200 + 100 = 1300 ms.
         // Why it matters: an orchestrating caller composes its end-to-end budget from these two numbers; the
-        //   ladder puts the transport's timeout under the TimeLimiter's, so the transport is what trips first.
+        //   ladder puts the transport's timeout under the TimeLimiter's, so the transport is what trips first. The
+        //   adapter publishes the ceiling over its clients - the customers endpoint's 700 ms and 1100 ms are lower.
         //
         // When
         val response = adapter.responseTimeout
         val budget = adapter.timeLimiterTimeout
 
         // Then
-        assertThat(response).isPositive()
-        assertThat(budget).isGreaterThan(response)
+        assertThat(response).isEqualTo(Duration.ofMillis(900))
+        assertThat(budget).isEqualTo(Duration.ofMillis(1300))
     }
 }
