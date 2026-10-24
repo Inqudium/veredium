@@ -9,13 +9,16 @@ import org.springframework.core.env.Environment
  * [RestClientProperties.Observability.httpObservationEnabled] ACHIEVES in the host at hand - Boot's
  * `ObservationRestClientCustomizer` puts the host's registry on the builder, this only reads whether there was
  * one. Lines are written under this class's logger name.
+ *
+ * @param properties The module's properties, read for the toggle.
+ * @param environment Read ONLY for the two central disable-filter values. Nullable on purpose, an optional
+ *   dependency, so a test can construct the report directly; the Spring context always injects it.
+ * @param observationRegistry The host's registry, read ONLY to make the toggle line truthful; `null` when the host
+ *   has none.
  */
 class RestClientObservationReport(
     properties: RestClientProperties,
-    // Nullable ON PURPOSE: an optional dependency, so tests can construct the report directly; the Spring
-    // context always injects it. Read ONLY for the two central disable-filter values.
     environment: Environment? = null,
-    // Nullable like environment: read ONLY to make the toggle line truthful.
     observationRegistry: ObservationRegistry? = null,
 ) : HttpObservationReport(
         stackName = "RestClient",

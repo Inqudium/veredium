@@ -29,9 +29,9 @@ import java.util.concurrent.ScheduledExecutorService
  * pipeline. The backend name is reused as the Resilience4j instance name, so `product-agreements` needs
  * matching `resilience4j.*.instances.product-agreements` config.
  *
- * Exchange logging is not assembled here: legatium-restclient-logging's auto-configuration puts its
- * interceptor on Boot's `RestClient.Builder` bean as a `RestClientCustomizer`, and every client below is a
- * clone of that bean. The factory's only contribution is the request attribute the library reads the client's
+ * Exchange logging is not assembled here. Assumption: legatium-restclient-logging's auto-configuration puts its
+ * interceptor on Boot's `RestClient.Builder` bean as a `RestClientCustomizer` (legatium 1.3), and every client
+ * below is a clone of that bean. The factory's only contribution is the request attribute the library reads the client's
  * name from.
  *
  * ## Engines
@@ -80,18 +80,18 @@ class ResilientRestClientFactory(
      * REQUIRED on purpose, unlike the optional dependencies above: those are optional because the factory works
      * sensibly without them. Without this one it would work DIFFERENTLY - a bare builder from the static factory
      * carries no host customizer and no observation registry, so the http.client.requests span would vanish
-     * without a log line. Spring treats a Kotlin default as an optional dependency and would take exactly that
-     * silent path when the bean is absent; a required parameter makes a missing bean a context-start failure that
+     * without a log line. Assumption: Spring treats a Kotlin default as an optional dependency (Spring Framework
+     * 7.0) and would take exactly that silent path when the bean is absent; a required parameter makes a missing bean a context-start failure that
      * names [RestClient.Builder]. A host that excludes `RestClientAutoConfiguration` declares its own
      * [RestClient.Builder] bean. Tests that construct the factory directly pass a bare builder and say so at the
      * call site.
      */
     restClientBuilder: RestClient.Builder,
     /**
-     * Monotonic clock for the ONE wait this factory makes - the drain deadline in [shutdown]. Injectable so the
-     * deadline branch can be reached by a test that controls time instead of one that holds a connection open
-     * past the derived window; defaults to `System::nanoTime`, so production wiring is unchanged. The same
-     * shape as [ResilientRestClient]'s clock, and like it never used for a timestamp.
+     * Monotonic clock for the ONE wait this factory makes - the drain deadline in [shutdown] - never used for a
+     * timestamp. Injectable so the deadline branch can be reached by a test that controls time instead of one that
+     * holds a connection open past the derived window; defaults to `System::nanoTime`, so production wiring is
+     * unchanged.
      */
     private val nanoTime: () -> Long = System::nanoTime,
     /**
@@ -269,9 +269,9 @@ class ResilientRestClientFactory(
                 // reactive twin makes for its connector.
                 .requestFactory(requestFactory)
                 // Host routes the sidecar to the upstream (from the triplet); set() (not add) so re-applying
-                // never accumulates values. Every engine honours an explicit Host header except the JDK's, which
-                // the factory refuses at startup where it matters (checkedEngineSelection); the same goes for
-                // User-Agent: the library's token (`veredium/<version>`) or the host's own
+                // never accumulates values. Assumption: every engine honours an explicit Host header except the
+                // JDK's, which the factory refuses at startup where it matters (checkedEngineSelection); the same
+                // goes for User-Agent: the library's token (`veredium/<version>`) or the host's own
                 // (app.restclient.user-agent) replaces the engine's default so a peer's access log names what
                 // calls it.
                 .defaultHeaders { headers ->
@@ -319,17 +319,22 @@ class ResilientRestClientFactory(
 }
 
 /**
- * The meter vocabulary of this module. Smaller than the reactive twin's on purpose: the twin also owns a
- * URI-to-template mapper for Reactor Netty's per-request transport metrics, which would mint a series per path
- * variable without it. Apache HttpClient records no per-request meter here; the per-request view is Spring's
- * `http.client.requests` observation, which takes its `uri` tag from the template attribute every client stamps
- * on its requests - so the cardinality guard is the attribute, and a second mapper would guard nothing.
+ * The meter vocabulary of this module.
+ *
+ * The pool gauges differ per engine, each registered in the host's registry and named on the engine's startup line:
+ * the Apache engine registers `restclient.pool.*` under the constants below, the Reactor Netty engine Reactor
+ * Netty's own `reactor.netty.connection.provider.*` family tagged `name=restclient-reactor-netty`, Jetty and the
+ * JDK client none. `veredium-restclient/docs/metrics.md` lists them with their tags.
+ *
+ * There is no URI-to-template mapper, unlike on the reactive twin: no engine here records a per-request meter. The
+ * per-request view is Spring's `http.client.requests` observation, which takes its `uri` tag from the template
+ * attribute every client stamps on its requests - so the cardinality guard is the attribute, and a mapper would
+ * guard nothing.
  */
 object RestClientMetrics {
     /**
-     * Prefix of the shared pool's gauges, as Apache's `ConnPoolMeters` names them: `restclient.pool.leased`,
-     * `restclient.pool.available` and `restclient.pool.pending`, each tagged [POOL_TAG] = the pool name. The
-     * counterpart of Reactor Netty's `reactor.netty.connection.provider.*` family on the twin.
+     * Prefix of the Apache pool's gauges, as Apache's `ConnPoolMeters` names them: `restclient.pool.leased`,
+     * `restclient.pool.available` and `restclient.pool.pending`, each tagged [POOL_TAG] = the pool name.
      */
     const val POOL_METER_PREFIX: String = "restclient"
 

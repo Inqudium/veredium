@@ -76,10 +76,10 @@ import java.util.concurrent.TimeoutException
  * on until it ends or the TimeLimiter budget expires, holding its bulkhead permit and its pool connection all
  * the while. A caller that wants a deadline shorter than the budget cancels the future itself when it passes.
  *
- * The exchange itself is NOT logged here. legatium-restclient-logging hangs its interceptor on Boot's
- * `RestClient.Builder` bean, which the factory clones per backend, and writes one structured event per exchange
- * on the `adapter-http-exchange` logger (`adapter_name` = [backendName], via the request attribute the factory
- * sets). What this class logs is the transport detail underneath: the per-call DEBUG lines, the error line
+ * The exchange itself is NOT logged here. Assumption: legatium-restclient-logging hangs its interceptor on
+ * Boot's `RestClient.Builder` bean, which the factory clones per backend, and writes one structured event per
+ * exchange on the `adapter-http-exchange` logger (`adapter_name` = [backendName], via the request attribute the
+ * factory sets; legatium 1.3). What this class logs is the transport detail underneath: the per-call DEBUG lines, the error line
  * with the exception class, the cancellation line and the buffer-limit line - each carrying `adapter_name` and
  * `adapter_url_template` under the library's own field names ([ClientCallLog]), so it joins the exchange event on sight.
  */
@@ -117,12 +117,11 @@ class ResilientRestClient(
      *
      * The number this exists to inform is [RestClientProperties.maxInMemorySize]: a ceiling that has to be
      * picked, with nothing to pick it from. A [ResponseBodyLimitExceededException] reports only that the limit
-     * was passed and the wire size the peer declared, and legatium's body capture is bounded by its own
+     * was passed and the length the peer declared, if any, and legatium's body capture is bounded by its own
      * `max-body-bytes`, which says nothing about this limit.
      *
-     * Sampled AFTER decompression, which is where the limit applies: every engine of this module inflates a
-     * compressed body transparently, so what the bounded reader counts and what this meter records are the same
-     * bytes.
+     * Sampled AFTER decompression, which is where the limit applies ([BoundedBodyReader]), so what the bounded
+     * reader counts and what this meter records are the same bytes.
      *
      * Recorded in UTF-8 BYTES ([ResponseBodyMetrics.utf8Size]) rather than `String.length`, so the sample and the
      * limit it informs are the same unit. For a UTF-8 body that is the byte count as read, taken without decoding
@@ -133,9 +132,9 @@ class ResilientRestClient(
      */
     private val responseBodySize: DistributionSummary? = null,
     /**
-     * Monotonic time source for the per-attempt duration, injected so a test can assert the elapsed time
-     * exactly instead of observing it. Defaults to `System::nanoTime`, so production wiring is unchanged.
-     * Monotonic on purpose - this measures a duration, never a timestamp.
+     * Monotonic time source for the per-attempt duration - it measures a duration, never a timestamp - injected
+     * so a test can assert the elapsed time exactly instead of observing it. Defaults to `System::nanoTime`, so
+     * production wiring is unchanged.
      */
     private val nanoTime: () -> Long = System::nanoTime,
 ) {
@@ -194,18 +193,7 @@ class ResilientRestClient(
     fun <T : Any> get(
         responseType: Class<T>,
         block: (RestClient.RequestHeadersUriSpec<*>) -> RestClient.RequestHeadersSpec<*>,
-    ): T =
-        execute(
-            // Stamp the endpoint's low-cardinality path template onto the request so legatium's exchange
-            // event (adapter_url_template) and Spring's client observation can record the template next to
-            // the expanded URL. Done centrally so it holds regardless of which uri(...) overload the caller
-            // used - the builder-lambda form does not set the attribute, and for a caller that passed
-            // uri(template, vars) re-setting it is a no-op (the same value). The key is the library's public
-            // constant, the same string Spring's own uri(template, vars) sets.
-            block(restClient.get()).attribute(ClientRequestLoggingInterceptor.URI_TEMPLATE_ATTRIBUTE, pathTemplate),
-            responseType,
-            requestBody = null,
-        )
+    ): T = execute(stamped(block(restClient.get())), responseType, requestBody = null)
 
     /**
      * Executes a POST of [body] and blocks for the result. [block] applies the URI and content type and returns
@@ -234,14 +222,7 @@ class ResilientRestClient(
         val serialized = objectMapper.writeValueAsString(body)
         // Hand the JSON string straight to body(): the String converter writes it as UTF-8 under the content
         // type the caller set, so an explicit toByteArray() would only allocate a redundant array.
-        // .attribute stamps the path template centrally (see get()): a caller that builds the URI with the
-        // uri { builder -> ... } overload does NOT set the template attribute, so without this the exchange
-        // event and the observation would have no template for its calls.
-        val spec =
-            block(restClient.post())
-                .body(serialized)
-                .attribute(ClientRequestLoggingInterceptor.URI_TEMPLATE_ATTRIBUTE, pathTemplate)
-        return execute(spec, responseType, requestBody = serialized)
+        return execute(stamped(block(restClient.post()).body(serialized)), responseType, requestBody = serialized)
     }
 
     /**
@@ -250,12 +231,7 @@ class ResilientRestClient(
     fun <T : Any> getAsync(
         responseType: Class<T>,
         block: (RestClient.RequestHeadersUriSpec<*>) -> RestClient.RequestHeadersSpec<*>,
-    ): CompletableFuture<T> =
-        executeAsync(
-            block(restClient.get()).attribute(ClientRequestLoggingInterceptor.URI_TEMPLATE_ATTRIBUTE, pathTemplate),
-            responseType,
-            requestBody = null,
-        )
+    ): CompletableFuture<T> = executeAsync(stamped(block(restClient.get())), responseType, requestBody = null)
 
     /**
      * Executes a POST of [body] without blocking: [post], with the result delivered on the returned future.
@@ -276,11 +252,23 @@ class ResilientRestClient(
             } catch (e: Exception) {
                 return CompletableFuture.failedFuture(e)
             }
-        val spec =
-            block(restClient.post())
-                .body(serialized)
-                .attribute(ClientRequestLoggingInterceptor.URI_TEMPLATE_ATTRIBUTE, pathTemplate)
-        return executeAsync(spec, responseType, requestBody = serialized)
+        return executeAsync(stamped(block(restClient.post()).body(serialized)), responseType, requestBody = serialized)
+    }
+
+    /**
+     * [spec] with the endpoint's low-cardinality [pathTemplate] stamped on as the URI template attribute, which
+     * legatium's exchange event (`adapter_url_template`) and Spring's client observation record next to the
+     * expanded URL. Every entry point of this client stamps its request here, so the template is there whichever
+     * `uri(...)` overload the caller used - the builder-lambda form sets no template at all - and a new entry point
+     * must do the same.
+     *
+     * The stamp wins: for a caller that passed `uri(template, vars)`, the template Spring recorded is replaced by
+     * [pathTemplate]. Assumption: the key, legatium's public `ClientRequestLoggingInterceptor.URI_TEMPLATE_ATTRIBUTE`,
+     * is the attribute Spring's own `uri(template, vars)` sets (spring-web 7.0).
+     */
+    private fun <S : RestClient.RequestHeadersSpec<*>> stamped(spec: S): S {
+        spec.attribute(ClientRequestLoggingInterceptor.URI_TEMPLATE_ATTRIBUTE, pathTemplate)
+        return spec
     }
 
     /**
@@ -444,17 +432,17 @@ class ResilientRestClient(
      * as a plain [RestClientResponseException].
      *
      * `exchange` rather than `retrieve()` because the bounded read needs the raw stream, and `exchange` is the one
-     * API that hands it over. It also hands over the status decision - `exchange` applies no status handlers -
-     * which is taken here the way Spring's `DefaultResponseErrorHandler` takes it: a 4xx becomes an
+     * API that hands it over. Assumption: `exchange` applies no status handlers (spring-web 7.0), so it also hands
+     * over the status decision, which is taken here the way Spring's `DefaultResponseErrorHandler` takes it: a 4xx becomes an
      * [HttpClientErrorException], a 5xx an [HttpServerErrorException], each carrying status, headers and the
      * (truncated) error body, so a caller or a log sees the same exception types a plain `retrieve()` throws.
      * Only a 2xx is a body to return. A 1xx or 3xx the transport did not resolve - no engine follows a redirect -
      * is never the answer the caller asked for, so it fails as a [RestClientResponseException] carrying its status,
      * which the breaker records like any status that is not a benign 4xx.
      *
-     * The response is closed by `RestClient` when this function returns (`close = true`), which is also the
-     * moment legatium emits its exchange event - on this worker thread, under the caller's MDC that the
-     * decorator installed there.
+     * The response is closed by `RestClient` when this function returns (`close = true`). Assumption: that close
+     * is the moment legatium emits its exchange event (legatium 1.3) - on this worker thread, under the caller's MDC
+     * that the decorator installed there.
      */
     private fun exchange(spec: RestClient.RequestHeadersSpec<*>): RawBody =
         spec.exchange<RawBody>({ _, response ->

@@ -8,13 +8,14 @@ import java.io.InputStream
  *
  * The backend answered, and with a success status: this is a CLIENT-side refusal, which is why the circuit
  * breaker is told to discount it ([RestClientVerdicts.clientSideFailure]) and why the one line that reports it names the
- * configured limit ([ResilientRestClient]). [contentLength] is the `Content-Length` the response declared, or
- * `-1` when it declared none (chunked encoding) - a LOWER bound on the body, since the header is the wire size
- * and the body may have been compressed.
+ * configured limit ([ResilientRestClient]). [contentLength] is what the response declared, never what was
+ * measured: the reader stops one byte past the limit and does not count the rest.
  *
  * @property backendName The backend whose response was refused - its mesh alias.
  * @property limitBytes The buffer limit the body exceeded, in bytes.
- * @property contentLength The declared `Content-Length`, or `-1` when the response declared none.
+ * @property contentLength The `Content-Length` the response declared - never the compressed wire size, since an
+ *   engine that decompresses a body drops the header ([BoundedBodyReader], "Memory") - or `-1` when none was
+ *   declared (chunked encoding) or the engine decoded a compressed body.
  */
 class ResponseBodyLimitExceededException(
     val backendName: String,
@@ -32,9 +33,9 @@ class ResponseBodyLimitExceededException(
  * so a single degenerate response could take the pod down. The WebClient twin gets that bound for free from the
  * reactive codec; this module enforces it itself, at the one place every response passes through - the
  * exchange function in [ResilientRestClient] - so that the ceiling means the same thing on both stacks: the
- * DECODED bytes buffered per concurrently handled response. Every engine of this module decompresses
- * transparently, so the count here is after decompression, exactly as the codec counts. The reader sees only an
- * `InputStream`, which is what keeps it engine-agnostic.
+ * DECODED bytes buffered per concurrently handled response. Assumption: every engine of this module decompresses
+ * a gzip body transparently (each transport says how), so the count here is after decompression, exactly as the
+ * codec counts. The reader sees only an `InputStream`, which is what keeps it engine-agnostic.
  *
  * Two reads, for the two kinds of body:
  *  - [readOrNull] for a SUCCESS body, which has to arrive whole or not at all: a body that does not fit is
@@ -49,10 +50,11 @@ class ResponseBodyLimitExceededException(
  * The limit bounds what one response may cost, so the reader is careful not to multiply it. The bytes are read
  * straight into the array that is returned - no intermediate chunk, no `ByteArrayOutputStream` whose final
  * `toByteArray()` would double the peak. When the response declares a `Content-Length` (the usual case for a
- * JSON answer; the engines drop the header when they decompress, so a declared length is the decoded one), the
- * array is allocated at that size up front, capped at the limit so a lying header cannot reserve more than the
- * limit allows; a body of exactly that length is then returned without a single copy. Without a declared length
- * the array starts at 8 KiB and doubles, capped at the limit, and is trimmed to size once at the end.
+ * JSON answer), the array is allocated at that size up front, capped at the limit so a lying header cannot reserve
+ * more than the limit allows; a body of exactly that length is then returned without a single copy. Without a
+ * declared length the array starts at 8 KiB and doubles, capped at the limit, and is trimmed to size once at the
+ * end. Assumption: an engine that decompresses a body drops its `Content-Length` (Apache httpclient5 5.6, Spring's
+ * JDK request 7.0, Jetty 12.1, Netty's decompressor), so a declared length is never the compressed wire size.
  *
  * The remainder of an over-limit body is NOT read here. Closing the response afterwards hands the stream back
  * to the engine, and every engine of this module discards the connection rather than read the rest of a body

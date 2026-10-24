@@ -12,11 +12,12 @@ import eu.inqudium.veredium.core.engine.HttpEngine
  * (`spring.http.clients.imperative.factory`), and the factory registers no request factory, HTTP client,
  * `ClientHttpRequestFactoryBuilder` or `HttpClientSettings` bean: every engine is an object the factory owns,
  * set on its private clone of Boot's `RestClient.Builder`. Boot's switch selects the engine of every RestClient
- * in the host, which is exactly what a library must not do to a host that has other clients - the guide's
- * "Engines" section has the long form.
+ * in the host, which is exactly what a library must not do to a host that has other clients -
+ * `veredium-restclient/docs/GUIDE.md`, section "Engines", has the long form.
  *
  * What each engine maps from the mesh ladder and the pool settings, and what it cannot express, is stated on one
- * startup line per engine in use and in the guide's mapping table; the per-engine classes carry the detail.
+ * startup line per engine in use and in the table of that guide's section "What each engine applies"; the
+ * per-engine classes carry the detail.
  *
  * The three properties are those of [HttpEngine], shared with the reactive module's engines, which the start-time
  * checks of [eu.inqudium.veredium.core.engine.EngineSelection] read.
