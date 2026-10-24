@@ -37,6 +37,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreaker
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
+import io.micrometer.core.instrument.Metrics
 import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.micrometer.observation.Observation
@@ -131,6 +132,9 @@ class WebClientEngineIntegrationTest {
          * it - a race, decided differently on a loaded machine.
          */
         private val MAY_REPORT_FAILURE_AFTER_ABORT = setOf(WebClientEngine.JDK)
+
+        /** The name prefix of Reactor Netty's per-request client meters - `.metrics(true, ...)` on each backend's client. */
+        private const val REACTOR_NETTY_CLIENT_METERS = "reactor.netty.http.client"
 
         /** Reactor's per-subscription onErrorDropped key, as a caller would put a hook of its own there. */
         private const val ON_ERROR_DROPPED_KEY = "reactor.onErrorDropped.local"
@@ -780,6 +784,55 @@ class WebClientEngineIntegrationTest {
             val transport = factory.engineTransports.getValue(WebClientEngine.REACTOR_NETTY) as ReactorNettyEngineTransport
             val endpoint = meshFor(listOf("where"), wireMock.baseUrl()).resolveAll().values.single()
             assertThat(transport.httpClientFor(endpoint).configuration().resolver()).isSameAs(DefaultAddressResolverGroup.INSTANCE)
+        }
+
+        @Test
+        fun `should tag reactor-netty's transport meters with the endpoint's path template, not the called path`() {
+            // What is tested: the wiring of the URI tagger into the Reactor Netty engine - the call that
+            //   `WebClientMetricsTest` cannot make, through a backend whose template carries a path variable.
+            // Success criteria: after a call of `/uri-tag-probe/42`, Reactor Netty's `reactor.netty.http.client.*`
+            //   meters of that call carry `uri=/uri-tag-probe/{id}`, and none carries the called path.
+            // Why it matters: the tagger is only a function until the engine is given it and calls it with the
+            //   path; a client built with `.metrics(true) { it }` would pass every test of the function and still
+            //   mint one time series per id in every host's metric backend.
+            //
+            // Given: a backend whose template has a path variable, on the Reactor Netty engine
+            val template = "/uri-tag-probe/{id}"
+            val called = "/uri-tag-probe/42"
+            wireMock.stubFor(get(urlEqualTo(called)).willReturn(okJson("""{"message":"tagged"}""")))
+            val mesh =
+                MeshProperties(
+                    defaults = MeshProperties.Defaults(individualRequestTimeoutMs = ANCHOR_MS),
+                    endpoints =
+                        listOf(
+                            MeshProperties.EndpointConfig(
+                                triplet = "/endpoint/localhost/GET$template",
+                                alias = "uri-tag",
+                                baseUrl = wireMock.baseUrl(),
+                            ),
+                        ),
+                )
+            val factory = newFactory(WebClientProperties.Engine(default = WebClientEngine.REACTOR_NETTY), listOf("uri-tag"), mesh = mesh)
+            // Reactor Netty registers these meters in Micrometer's global registry, for the whole JVM; this case
+            // reads them there and takes its own out again afterwards.
+            val probeMeters = {
+                Metrics.globalRegistry.meters.filter { meter ->
+                    meter.id.name.startsWith(REACTOR_NETTY_CLIENT_METERS) && meter.id.getTag("uri") in setOf(template, called)
+                }
+            }
+            try {
+                // When
+                factory.create("uri-tag").get(Greeting::class.java) { it.uri(called) }.block()
+
+                // Then: the call's meters arrive - written when the exchange completes, possibly after block() -
+                // and every one of them carries the template
+                assertThat(eventually { probeMeters().any { it.id.name == "$REACTOR_NETTY_CLIENT_METERS.response.time" } })
+                    .`as`("the call's response-time meter is registered: %s", probeMeters().map { it.id })
+                    .isTrue()
+                assertThat(probeMeters().map { it.id.getTag("uri") }).containsOnly(template)
+            } finally {
+                probeMeters().forEach { Metrics.globalRegistry.remove(it) }
+            }
         }
 
         @Test
