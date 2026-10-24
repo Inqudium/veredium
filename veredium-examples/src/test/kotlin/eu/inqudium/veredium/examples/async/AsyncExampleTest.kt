@@ -71,7 +71,8 @@ class AsyncExampleTest(
         // Why it matters: a derived future does not pass a cancel on by itself; without the adapter handing it on,
         //   the exchange would run until its budget expired and hold its bulkhead permit all the while. Both
         //   backends answer only after the test is long over, so the caller's cancel is the only thing that can end
-        //   the combined future before the budgets do. A failing call ends it by itself: the next two tests.
+        //   the combined future before the budgets do. A failing call ends it by itself: the overview cases of a
+        //   failing order search and of a failing customer directory.
         //
         // Given: a customer the directory, and orders the search, answer only after the test is long over
         stubSlowCustomer()
@@ -115,7 +116,7 @@ class AsyncExampleTest(
     @Test
     fun `should fail the overview on a failing customer directory at once, and abandon the order search`() {
         // What is tested: overview while the customer directory answers 500 at once and the order search has not
-        //   answered yet - the other direction of the previous test.
+        //   answered yet - the other direction of the failing order search case.
         // Success criteria: the future fails with the directory's 500, and the client logs the cancellation of the
         //   order-search call.
         // Why it matters: the customers future is a derived one (customer maps the 404), the orders future the
