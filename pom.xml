@@ -86,7 +86,7 @@
 
     <properties>
         <!-- CI-Friendly Version -->
-        <revision>1.0.0</revision>
+        <revision>1.0.1-SNAPSHOT</revision>
 
         <!-- Encoding -->
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
