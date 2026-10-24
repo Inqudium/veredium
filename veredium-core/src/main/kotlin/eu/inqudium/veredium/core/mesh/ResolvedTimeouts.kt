@@ -77,9 +77,10 @@ data class ResolvedTimeouts(
     val sidecarGlobalMs: Long = (1 + maxRetries) * individualRequestTimeoutMs + margins.globalMarginMs
 
     /**
-     * The transport's response timeout for the app->sidecar hop, one rung above the sidecar's `global`: the
-     * blocking stack applies it as Apache's `RequestConfig.responseTimeout`, the reactive stack as Reactor
-     * Netty's `responseTimeout`. Same rung, same number, whichever stack the host runs on.
+     * The transport's response timeout for the app->sidecar hop, one rung above the sidecar's `global`, applied by
+     * whichever engine carries the call - on the default engines as Apache's `RequestConfig.responseTimeout` and
+     * Reactor Netty's `responseTimeout`; how the other engines map it is in `docs/engine-behaviour.md` (ADR-0004).
+     * Same rung, same number, whichever stack and engine the host runs on.
      */
     val responseTimeout: Duration = Duration.ofMillis(sidecarGlobalMs + margins.responseTimeoutMarginMs)
 
