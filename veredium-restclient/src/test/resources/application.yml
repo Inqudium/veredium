@@ -151,7 +151,7 @@ app:
     validation:
       enabled: true
       fail-on-violation: false
-  # The single per-endpoint tree (see docs/mesh-timeout.md). Each endpoint drives BOTH the RestClient target
+  # The single per-endpoint tree (see veredium-core/docs/mesh-timeout.md). Each endpoint drives BOTH the RestClient target
   # (baseUrl = the sidecar; the Host header is derived from the triplet host) AND the full timeout ladder
   # (connect / response / pending-acquire / max-connections + the per-endpoint TimeLimiter and slow-call).
   # No explicit alias: the logical backend name (R4j instance + metric label) is DERIVED from the triplet

@@ -49,7 +49,8 @@ import java.util.function.Supplier
  * request is read off the wire, where each engine announces itself: the host's client sets no User-Agent, so
  * WireMock sees the engine's default token (`Apache-HttpClient/...`, `Java-http-client/...`), while the module's
  * clients send `veredium/<version>` on every engine. The module's side is therefore read off two other traces: its
- * `Accept-Encoding` (Apache offers `gzip, x-gzip, deflate`, Jetty and Reactor Netty `gzip`, the JDK client none),
+ * `Accept-Encoding` (Apache offers `gzip, x-gzip, deflate`, Jetty and Reactor Netty `gzip`, Spring's JDK request
+ * `gzip` and `deflate` as two values),
  * and the selected engine's own pool, which counts the connection of an exchange held in flight. Neither depends on
  * what the factory records about itself. No reflection on Spring's client internals, no mocks.
  */
@@ -132,8 +133,8 @@ class RestClientEngineIsolationTest {
 
     @Test
     fun `should keep the module on its own engine when the host sets Boot's global switch`() {
-        // What is tested: the other direction - Boot's `spring.http.clients.imperative.factory`, set by the host,
-        //   against the module's default engine.
+        // What is tested: the reverse of the case with the host's client left untouched - Boot's
+        //   `spring.http.clients.imperative.factory`, set by the host, against the module's default engine.
         // Success criteria: the host's client runs on the JDK client Boot's switch selects (its User-Agent on the
         //   wire), the module's client on Apache - Apache's Accept-Encoding on the wire, its held exchange the one
         //   connection in use of the factory's Apache pool, and its request factory Spring's HttpComponents one,

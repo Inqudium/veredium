@@ -155,11 +155,11 @@ class ResilientRestClientFactoryBuilderWiringTest {
             // What is tested: the module toggle OFF overriding what Boot put on the builder - for this factory's
             //   clients only.
             // Success criteria: no `http.client.requests` timer after a request, with the same registry and the
-            //   same Boot customizer as the case above.
+            //   same Boot customizer as the case recording an observation per request.
             // Why it matters: the toggle is the operator's off switch for these clients' spans; one that lost to
             //   Boot's wiring would switch nothing off.
             //
-            // Given: the toggle OFF, the same registry bean and the same Boot customizer as above
+            // Given: the toggle OFF, the same registry bean and the same Boot customizer as the toggle-on case
             val meterRegistry = SimpleMeterRegistry()
             factoryContext(observationEnabled = false, meterRegistry = meterRegistry)
                 .withBootsRestClientAutoConfiguration()
@@ -213,7 +213,7 @@ class ResilientRestClientFactoryBuilderWiringTest {
             //   bean method is what hosts run, and what it hands the factory - Boot's builder bean rather than a
             //   builder of its own, the host's registry rather than none - is invisible at runtime: a wrong
             //   argument there silently costs every client the host's customizers, the exchange event and the
-            //   body-size meter, while each case above stays green.
+            //   body-size meter, while every case that builds the factory itself stays green.
             //
             // Given: the module's auto-configuration as a host loads it, plus a host customizer and registry
             wireMock.resetRequests()
@@ -250,11 +250,12 @@ class ResilientRestClientFactoryBuilderWiringTest {
             //   without a `RestClient.Builder` bean.
             // Success criteria: the context fails to start, naming `RestClient$Builder` and the factory bean
             //   'resilientRestClientFactory'.
-            // Why it matters: the case above shows the builder bean is used when there is one; this one, that the
-            //   bean method does not fall back to a bare builder when there is none - a host that excluded Boot's
-            //   auto-configuration would otherwise run without its customizers and the exchange log, unannounced.
+            // Why it matters: the case sending a call through the auto-configured factory shows the builder bean is
+            //   used when there is one; this one, that the bean method does not fall back to a bare builder when
+            //   there is none - a host that excluded Boot's auto-configuration would otherwise run without its
+            //   customizers and the exchange log, unannounced.
             //
-            // Given: everything the case above loads but Boot's RestClient auto-configuration
+            // Given: everything the auto-configured factory case loads but Boot's RestClient auto-configuration
             ApplicationContextRunner()
                 .withInitializer { context -> context.environment.propertySources.addFirst(MapPropertySource("probe-mesh", meshKeys())) }
                 .withConfiguration(
