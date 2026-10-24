@@ -82,9 +82,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 Most entries resolve the findings of the defect analyses in `docs/assessment/`
-(`DEFECT_ANALYSIS-2026-10-21T20-14-02.md`, `-2026-10-22T14-01-49.md`, `-2026-10-23T05-20-01.md`).
+(`DEFECT_ANALYSIS-2026-10-21T20-14-02.md`, `-2026-10-22T14-01-49.md`, `-2026-10-23T05-20-01.md`,
+`-2026-10-24T10-08-59.md`).
 
-#### Shutdown and engine release - 2026-10-22 to 2026-10-23
+#### Shutdown and engine release - 2026-10-22 to 2026-10-24
+
+- `veredium-webclient`: on the Reactor Netty engine, a shutdown thread that was interrupted no longer fails the
+  engine's release. Its wait for the pool's disposal was a `block()`, which answers an interrupt with an exception:
+  the event loops were never scheduled for disposal and outlived the context, calls in flight ran until their
+  response timeout, and the log showed "failed to release its resources" with a stack trace. The wait now ends on
+  the interrupt with the shared drain line ("because the shutdown thread was interrupted"), keeps the flag, and the
+  loops go in any case. The interrupted-shutdown case now runs on every reactive engine.
+- `veredium-webclient`: the Reactor Netty engine's drain line names the drain window, as every engine's does,
+  instead of the part of the shared deadline that was left when its turn came.
+- `veredium-restclient`: on the Reactor Netty engine, a head wait that finished just as the worker was interrupted
+  has its response closed, instead of holding its pooled connection.
 
 - `veredium-restclient`: on the Reactor Netty engine, a call still waiting for its response head when a shutdown
   past its deadline disposed the event loops could hang until its TimeLimiter budget. Spring's wait for the head
@@ -125,7 +137,11 @@ Most entries resolve the findings of the defect analyses in `docs/assessment/`
   and aborting them. What is still running at the deadline is aborted with one WARN; an interrupted shutdown
   thread stops waiting at once and leaves the stop to a thread of its own.
 
-#### Cancellation and response bodies - 2026-10-21 to 2026-10-23
+#### Cancellation and response bodies - 2026-10-21 to 2026-10-24
+
+- `veredium-restclient`: on the Reactor Netty engine, a response timeout during the BODY phase fails the call with
+  Spring's `ResourceAccessException` over an `IOException`, as on every other engine and as during the head wait,
+  instead of Netty's bare `ReadTimeoutException`.
 
 - `veredium-restclient`, Jetty engine: a call abandoned while its body was being read left the worker's interrupt
   flag cleared - Jetty's body stream answers the interrupt with a bare `InterruptedIOException` and swallows it -
@@ -211,7 +227,16 @@ Most entries resolve the findings of the defect analyses in `docs/assessment/`
   against `jackson-core`/`jackson-databind` 3.1.5 (five High, two Medium). Drop the pin once Boot manages
   3.1.7 or later itself.
 
-#### Tests - 2026-10-21 to 2026-10-23
+#### Tests - 2026-10-21 to 2026-10-24
+
+- Shutdown cases check how the call still in flight ends, not only that the engine closed; the blocking Reactor
+  Netty engine's head hand-off and its executor's `shutdownNow` are pinned at engine level. A per-engine case pins
+  the response timeout in the body phase. Each stack has a context that calls through the factory its
+  auto-configuration builds. The reactive deserialisation and response validation are pinned against the breaker,
+  as on the blocking stack. `EngineDrain`, `MeshClientPlan` and `EngineSet`'s lock have core tests of their own.
+  The raw-socket backends of `veredium-test-support` report a client that leaves before its head and no longer
+  report their own close as the client's; they have self-tests. Assertions that promised more than they checked
+  ("exactly one event", the call's own clock, the example budgets, the async example's cancel) check it now.
 
 - The reactive pool settings (`max-idle-time`, `max-life-time`, `pending-acquire-max-count`) are pinned on
   the wire per engine; the blocking response and connect timeouts are bounded from below - the blocking connect
@@ -374,7 +399,12 @@ Part of these entries resolve the findings of `docs/assessment/CODE_STYLE-2026-1
 - `veredium-webclient`: an exchange error reported after a cancellation is logged at DEBUG instead of as
   Reactor's `onErrorDropped` ERROR.
 
-#### Client API - 2026-10-19
+#### Client API - 2026-10-19 to 2026-10-24
+
+- **Status contract (both stacks):** only a 2xx is a body to decode. A 1xx or 3xx - no engine follows a redirect -
+  fails as the stack's response exception with its status (`RestClientResponseException`,
+  `WebClientResponseException`), and the breaker records it as a failure. Before, it was decoded as a body, or
+  failed as `EmptyResponseBodyException` while the breaker recorded a success.
 
 - `ResilientRestClient.getAsync` / `postAsync`: the blocking client's calls without the wait, over the
   decorator's asynchronous form - a `CompletableFuture<T>` that carries every outcome unwrapped (a
