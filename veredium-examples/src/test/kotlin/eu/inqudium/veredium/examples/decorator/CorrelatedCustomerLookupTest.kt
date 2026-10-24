@@ -27,6 +27,10 @@ class CorrelatedCustomerLookupTest(
     @BeforeEach
     fun stubBackends() {
         Sidecar.reset()
+    }
+
+    @BeforeEach
+    fun clearMdc() {
         MDC.clear()
     }
 
