@@ -32,6 +32,9 @@ snippet says `...`:
 
 - **[Core guide](https://github.com/Inqudium/veredium/blob/main/veredium-core/docs/GUIDE.md)** —
   the long-form guide of the module: architecture, integration, configuration.
+- **[Status contract](status-contract.md)** —
+  what each HTTP status becomes on both client stacks: a value or an error,
+  and how the circuit breaker counts it.
 - **[Test evidence](https://inqudium.github.io/veredium/tests/test-evidence/)** —
   the generated inventory of the test suite: every test sentence plus its
   rationale, grouped by module and component.
