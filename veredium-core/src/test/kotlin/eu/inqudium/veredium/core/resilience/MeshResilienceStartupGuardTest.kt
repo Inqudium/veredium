@@ -85,10 +85,12 @@ class MeshResilienceStartupGuardTest {
         fun `should name the benign-4xx policy without the client-side failure types in its line`() {
             // What is tested: that the INFO line of the benign-4xx policy names the aliases it was applied to and
             //   NOT the client-side failure types - those belong to the sibling policy's line.
-            // Success criteria: the line contains both aliases and none of the failure type names.
+            // Success criteria: the line says the benign 4xx counts as a success, contains both aliases and none of
+            //   the failure type names.
             // Why it matters: this line is the startup evidence an operator reads to confirm WHICH backends are
             //   covered by WHICH rule. A placeholder filled with the sibling's type list silently drops the alias,
-            //   and a placeholder/argument mismatch neither fails nor warns.
+            //   and a placeholder/argument mismatch neither fails nor warns. A line that said "ignores" would tell the
+            //   operator the opposite of the installed verdict, which records the benign 4xx as a success.
             //
             // Given: two endpoints
             val props = propsFor(PAYMENTS_TRIPLET)
@@ -99,8 +101,8 @@ class MeshResilienceStartupGuardTest {
 
             // Then
             val line = appender.list.map { it.formattedMessage }.single { it.contains("benign 4xx") }
-            assertThat(line).contains(ACCOUNTS_ALIAS, PAYMENTS_ALIAS)
-            assertThat(line).doesNotContain("BulkheadFullException", "TestBufferLimitException")
+            assertThat(line).contains("as a success", ACCOUNTS_ALIAS, PAYMENTS_ALIAS)
+            assertThat(line).doesNotContain("ignores", "BulkheadFullException", "TestBufferLimitException")
         }
 
         @Test

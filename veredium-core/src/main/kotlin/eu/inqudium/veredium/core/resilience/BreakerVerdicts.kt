@@ -65,7 +65,7 @@ class HttpExchangeErrorPolicy(
     ) {
         logBuilder
             .setMessage(
-                "CircuitBreaker now ignores benign 4xx (every client error except 408/429) for backend(s): " +
+                "CircuitBreaker now counts benign 4xx (every client error except 408/429) as a success for backend(s): " +
                     "{} - a business-case rejection cannot open a breaker against a healthy backend",
             ).addArgument(name)
             .log()
