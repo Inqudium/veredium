@@ -634,7 +634,7 @@ class BlockingResilienceDecoratorTest {
             //   worker held becomes available again.
             // Success criteria: the worker's park ends in an InterruptedException; afterwards a second call
             //   through the same single-permit bulkhead succeeds; the breaker, told to ignore the pipeline's own
-            //   failures, counted nothing.
+            //   failures, recorded the cancelled call as ignored and counted no failure.
             // Why it matters: a plain CompletableFuture's cancel() does not interrupt anything by specification,
             //   so a cancelled call would otherwise hold its permit and its connection until the budget - the
             //   very leak the blocking form's hand-off avoids.
@@ -649,6 +649,8 @@ class BlockingResilienceDecoratorTest {
             val bulkhead = singlePermitBulkheads().bulkhead("ledger")
             val permitReleased = CountDownLatch(1)
             bulkhead.eventPublisher.onCallFinished { permitReleased.countDown() }
+            val breakerRecorded = CountDownLatch(1)
+            breaker.eventPublisher.onIgnoredError { breakerRecorded.countDown() }.onError { breakerRecorded.countDown() }
             val decorator = decorator()
             val entered = CountDownLatch(1)
             val workerInterrupted = CountDownLatch(1)
@@ -671,20 +673,28 @@ class BlockingResilienceDecoratorTest {
             // Then: the future is cancelled, the worker interrupted, the permit free, the breaker untouched.
             // The worker's catch block runs BEFORE Bulkhead.decorateCallable's `finally` releases the permit, so
             // the release is awaited through the bulkhead's own call-finished event (published right after the
-            // release) - a second call made straight after the latch could still meet the permit taken.
+            // release) - a second call made straight after the latch could still meet the permit taken. Likewise the
+            // breaker records the cancelled call on the waiter, after it has cancelled the worker, so its verdict
+            // is awaited through its own event before the metrics are read: read earlier, an InterruptedException
+            // the breaker was about to count would still look like nothing counted.
             assertThat(cancelled).isTrue()
             assertThat(future.isCancelled).isTrue()
             assertThat(workerInterrupted.await(5, TimeUnit.SECONDS)).`as`("the worker must be cancelled with its future").isTrue()
             assertThat(permitReleased.await(5, TimeUnit.SECONDS)).`as`("the worker must release its permit").isTrue()
             assertThat(bulkhead.metrics.availableConcurrentCalls).isEqualTo(1)
             assertThat(decorator.decorateAsync(breaker, limiter, bulkhead) { "after" }.get(5, TimeUnit.SECONDS)).isEqualTo("after")
+            assertThat(breakerRecorded.await(5, TimeUnit.SECONDS)).`as`("the breaker recorded the cancelled call").isTrue()
             assertThat(breaker.metrics.numberOfFailedCalls).isZero()
         }
 
         @Test
-        fun `should not cancel the call when only a derived stage is cancelled`() {
-            // What is tested: the override of cancel() stays on the future decorateAsync hands out; a stage derived
-            //   from it (thenApply, ...) is an ordinary CompletableFuture, as it would be anywhere else.
+        fun `should leave the call running when only a derived stage is cancelled, as the JDK derives plain stages`() {
+            // What is tested: cancelling a stage derived (thenApply) from the future decorateAsync hands out. This
+            //   documents the JDK's behaviour more than it guards the decorator's: the future's own
+            //   `newIncompleteFuture` override returns a plain CompletableFuture, but the JDK's implementation it
+            //   overrides already does, so no plausible change to the decorator turns this red. It would catch a JDK
+            //   whose derived stages started inheriting the subclass - and the override is what keeps the
+            //   decorator independent of that.
             // Success criteria: the derived stage reports cancelled, while the original future still completes
             //   with the call's value once released.
             // Why it matters: one consumer cancelling its view of the result must not abandon a call another

@@ -6,9 +6,15 @@ import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.assertj.core.api.Assertions.catchThrowable
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.LockSupport
 
 /**
  * The lifecycle [EngineSet] gives the engines of a client factory on both stacks, over engines that record what is done
@@ -129,6 +135,76 @@ class EngineSetTest {
     }
 
     @Test
+    fun `should release an engine only after a client build that holds it has ended, and refuse the next one`() {
+        // What is tested: shutdown() on another thread while a use() block holds the engine open on a latch, then
+        //   use() once the shutdown has returned.
+        // Success criteria: the shutdown thread waits; the engine is not released while the block runs, and is
+        //   released after the block ended; the later use() fails with the refusal and its block does not run.
+        // Why it matters: the lock is what keeps a client built during the context's shutdown from receiving an
+        //   engine the shutdown is releasing under it - its first call would then fail on a closed pool, far from
+        //   the cause. A single-threaded test cannot tell the lock from its absence.
+        //
+        // Given: a use() block that holds the engine until released
+        val inBlock = AtomicBoolean(false)
+        val releasedDuringBlock = AtomicReference<Boolean>()
+        val engines = EngineSet(listOf(TestEngine.ONE), OWNER, logger) { RecordingEngine(it, onShutdown = { releasedDuringBlock.set(inBlock.get()) }) }
+        val entered = CountDownLatch(1)
+        val leave = CountDownLatch(1)
+        val builder =
+            Thread.ofPlatform().start {
+                engines.use(TestEngine.ONE, "early") {
+                    inBlock.set(true)
+                    entered.countDown()
+                    leave.await(5, TimeUnit.SECONDS)
+                    inBlock.set(false)
+                }
+            }
+        assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+
+        // When: the shutdown runs while the block holds the engine
+        val shutdown = Thread.ofPlatform().start { engines.shutdown(DEADLINE) { 0L } }
+        val shutdownWaited = eventually { shutdown.state == Thread.State.WAITING || !shutdown.isAlive }
+        val releasedWhileHeld = engines.all.getValue(TestEngine.ONE).isClosed
+        leave.countDown()
+        builder.join(5_000)
+        shutdown.join(5_000)
+        var ranLate = false
+        val late = catchThrowable { engines.use(TestEngine.ONE, "late") { ranLate = true } }
+
+        // Then
+        assertThat(shutdownWaited).`as`("the shutdown thread waited for the lock").isTrue()
+        assertThat(releasedWhileHeld).`as`("released while the block held the engine").isFalse()
+        assertThat(releasedDuringBlock.get()).`as`("the release ran inside the block").isFalse()
+        assertThat(shutdown.isAlive).isFalse()
+        assertThat(late).isInstanceOf(IllegalStateException::class.java).hasMessageContaining("was shut down")
+        assertThat(ranLate).isFalse()
+    }
+
+    @Test
+    fun `should take a second shutdown without a failure and stay closed`() {
+        // What is tested: shutdown() called twice, as Spring's destroy callback and a test's own call may.
+        // Success criteria: neither call throws or logs a WARN; every engine is closed after the first and is handed
+        //   the second call too - closing again is each engine's own idempotency, which the transports state; use()
+        //   is refused afterwards.
+        // Why it matters: the class KDoc promises an idempotent release. A second call that threw would fail the
+        //   destroy callback, and one that reopened the set would hand out a released engine.
+        //
+        // Given
+        val engines = EngineSet(TestEngine.entries, OWNER, logger) { RecordingEngine(it) }
+        engines.shutdown(DEADLINE) { 0L }
+        val closedAfterFirst = engines.all.values.map { it.isClosed }
+
+        // When
+        engines.shutdown(DEADLINE) { 0L }
+
+        // Then
+        assertThat(closedAfterFirst).containsOnly(true)
+        assertThat(engines.all.values.map { it.shutdowns }).containsExactly(2, 2, 2)
+        assertThat(lines.list.filter { it.level == Level.WARN }).isEmpty()
+        assertThatThrownBy { engines.use(TestEngine.ONE, "late") { } }.isInstanceOf(IllegalStateException::class.java)
+    }
+
+    @Test
     fun `should refuse an engine no backend selected`() {
         // What is tested: use() for an engine the set was not created with.
         // Success criteria: an IllegalStateException naming the engine and the owner.
@@ -160,13 +236,16 @@ class EngineSetTest {
         override val dependency: String = "none"
     }
 
-    /** An engine that records its release, and throws [failShutdown] from it when given. */
+    /** An engine that records its release, runs [onShutdown] in it, and throws [failShutdown] from it when given. */
     private class RecordingEngine(
         val engine: TestEngine,
         private val failShutdown: RuntimeException? = null,
+        private val onShutdown: () -> Unit = {},
     ) : EngineResources {
+        @Volatile
         var shutdownDeadline: Long? = null
         var deadlineReachedAtShutdown: Boolean? = null
+        var shutdowns = 0
 
         override val key: String = engine.key
 
@@ -176,6 +255,8 @@ class EngineSetTest {
             deadlineNanos: Long,
             nanoTime: () -> Long,
         ) {
+            onShutdown()
+            shutdowns++
             shutdownDeadline = deadlineNanos
             deadlineReachedAtShutdown = nanoTime() - deadlineNanos >= 0
             failShutdown?.let { throw it }
@@ -185,5 +266,15 @@ class EngineSetTest {
     private companion object {
         const val OWNER = "TestFactory"
         const val DEADLINE = 42_000L
+
+        /** Whether [condition] holds within 5 s, polled every 10 ms - the core's tests cannot use the test-support one. */
+        fun eventually(condition: () -> Boolean): Boolean {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!condition()) {
+                if (System.nanoTime() - deadline >= 0) return false
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10))
+            }
+            return true
+        }
     }
 }
