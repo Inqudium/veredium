@@ -28,36 +28,42 @@ import java.util.concurrent.TimeUnit
  *
  * ## What maps, and what Jetty cannot express
  *
- * | Setting                          | Here                                                                         |
- * |----------------------------------|------------------------------------------------------------------------------|
- * | `connect-timeout-ms`             | `HttpClient.connectTimeout`                                                  |
- * | per-endpoint response timeout    | Spring's read timeout, which Jetty applies as the request's TOTAL timeout (queueing for a connection, connect, head and body together), plus the request's idle timeout set here to the same value, so a silent connection in use fails at the rung as on Apache |
- * | `max-connections`                | `maxConnectionsPerDestination` (every endpoint behind the sidecar is one destination) |
- * | `pending-acquire-timeout-ms`     | none - Jetty queues a request for a connection without a time bound of its own; the total timeout above bounds the wait. The queue is bounded in COUNT instead, at Jetty's default of 1024 per destination |
- * | `pool.max-idle-time`             | `HttpClient.idleTimeout` - for idle pooled connections; an exchange in flight uses the request's idle timeout above. Never `0`, which would be Jetty's "no idle timeout": the binding requires a positive value |
- * | `pool.max-life-time`             | the connection pool's `maxDuration`, which Jetty enforces when a connection is LEASED (`0` = unbounded) |
- * | `pool.evict-in-background`       | none - Jetty closes an idle connection on its own scheduler the moment the idle timeout passes; there is no interval |
- * | pool meters                      | none - Jetty has no Micrometer binder                                        |
+ * The settings it applies, each with the Jetty knob it lands on, are [applied], the ones it cannot express
+ * [notApplied] - both on the engine's startup line. Why the latter have no knob, and what needs saying about the
+ * former:
+ *
+ * - The response timeout is Spring's read timeout, which Jetty applies as the request's TOTAL timeout (queueing for
+ *   a connection, connect, head and body together); the request's idle timeout is set to the same value, so a
+ *   silent connection in use fails at the rung as on Apache.
+ * - `pending-acquire-timeout-ms`: Jetty queues a request for a connection without a time bound of its own; the
+ *   total timeout bounds the wait. The queue is bounded in COUNT instead, at Jetty's default of 1024 per
+ *   destination.
+ * - `pool.evict-in-background`: Jetty closes an idle connection on its own scheduler the moment the idle timeout
+ *   passes; there is no interval.
+ * - Pool meters: Jetty has no Micrometer binder.
+ *
+ * Assumption: Jetty decodes a gzip body transparently, through the `jetty-compression-gzip` decoder its
+ * `HttpClient` discovers on start (a dependency of jetty-client 12.1) - [BoundedBodyReader] counts decoded bytes.
  *
  * Jetty's defaults that the Apache engine switches off are switched off here too: no redirects, no cookie store.
- * Jetty's own `User-Agent` is removed, because Spring ADDS the client's header rather than replacing Jetty's - a
- * peer would otherwise see two.
+ * Workaround: Jetty's own `User-Agent` is removed, because Spring ADDS the client's header rather than replacing
+ * Jetty's (spring-web 7.0) - a peer would otherwise see two.
  *
  * ## Cancellation, and the one thing Spring's request leaves behind
  *
  * Both blocking points of Spring's Jetty request honour an interrupt - waiting for the head, and reading the body
- * - so an interrupted worker ends at once. But Spring only stops WAITING: the Jetty request itself stays in flight,
- * holding its connection until the response arrives or the total timeout expires. The decorator returned by
- * [requestFactory] closes that gap ([AbortingRequest], shared with the Apache engine): it aborts the Jetty request
+ * - so an interrupted worker ends at once. Workaround: Spring only stops WAITING - the Jetty request itself stays in
+ * flight, holding its connection until the response arrives or the total timeout expires (spring-web 7.0). The
+ * decorator returned by [requestFactory] closes that gap ([AbortingRequest], shared with the Apache engine): it aborts the Jetty request
  * when the exchange fails, when a body read fails (an interrupt included), and when the response is closed before
  * its body was read to the end. The Jetty request is captured where Spring creates it,
  * `HttpClient.newRequest(URI)`, on the thread that runs the exchange ([RequestCapturingHttpClient]).
  *
  * ## The interrupt a body read consumes
  *
- * Jetty's body stream (`InputStreamResponseListener`) answers an interrupt during a read with a bare
- * `InterruptedIOException`: no message, no cause, and the thread's interrupt flag cleared by the
- * `InterruptedException` it caught. The exchange log then has no sign that the caller abandoned the call, and
+ * Workaround: Jetty's body stream (`InputStreamResponseListener`) answers an interrupt during a read with a bare
+ * `InterruptedIOException` - no message, no cause, and the thread's interrupt flag cleared by the
+ * `InterruptedException` it caught (Jetty 12.1). The exchange log then has no sign that the caller abandoned the call, and
  * logs the cancellation as a failure. The response's body read therefore sets the flag again before it rethrows
  * that exception ([InterruptRestoringRequest]), as the JDK's own interruptible reads leave it set - the other
  * three engines need nothing of the kind.
@@ -154,8 +160,8 @@ internal class JettyEngineTransport(
      * Waits until the deadline for the exchanges in flight to finish, then stops the client - which aborts what
      * is left and stops Jetty's own threads. Same shape and same line as the Apache pool's drain.
      *
-     * A shutdown thread that was interrupted does not block on the stop: Jetty's stop waits for its own threads
-     * regardless of the interrupt, so it is started on a thread of its own and left to complete - as Reactor
+     * A shutdown thread that was interrupted does not block on the stop. Assumption: Jetty's stop waits for its own
+     * threads regardless of the interrupt (Jetty 12.1), so it is started on a thread of its own and left to complete - as Reactor
      * Netty's disposal is.
      */
     override fun shutdown(

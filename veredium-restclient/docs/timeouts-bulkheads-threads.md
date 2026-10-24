@@ -131,12 +131,15 @@ holds in every phase — connecting, leasing, waiting for the head, reading the 
 never *in* any of those phases.
 
 **The worker is cancelled, and that cancellation is effective.** `future.cancel(true)` interrupts the worker.
-Since JDK 13 the JDK's socket implementation reacts to an interrupt by closing the socket, so a worker blocked
-in a read fails at once with `SocketException: Closed by interrupt`; a worker blocked in Apache's pool lease
-or in connect is interruptible too. The worker therefore ends promptly, releases its bulkhead permit, and the
+The worker is a **virtual** thread, and on a virtual thread the JDK's socket implementation reacts to an interrupt
+by closing the socket (JEP 444, JDK 21), so a worker blocked in a read fails at once with
+`SocketException: Closed by interrupt`; a worker blocked in connect is interruptible the same way, one blocked in
+Apache's pool lease on any thread. The worker therefore ends promptly, releases its bulkhead permit, and the
 half-used connection is discarded rather than returned to the pool. (This is the one place the blocking stack
-is *better off* than a naive reading of it: "a blocking read cannot be cancelled" was true of the old socket
-implementation, not of the current one. `BlockingResilienceDecoratorTest` pins that the worker is interrupted.)
+is *better off* than a naive reading of it: "a blocking read cannot be cancelled" still holds on a platform thread,
+not on a virtual one - moving the exchange to a platform pool would silently lose the Apache engine's
+cancellation. `BlockingResilienceDecoratorTest` pins that the worker is interrupted,
+`RestClientEngineIntegrationTest` that an Apache read on it ends with the socket closed by the interrupt.)
 
 **The exchange event reports a `cancelled`.** legatium's interceptor runs on the worker. Since legatium 1.3.0 it
 reads the worker's interrupt flag, and the interrupt in the cause chain where the flag is already consumed, and

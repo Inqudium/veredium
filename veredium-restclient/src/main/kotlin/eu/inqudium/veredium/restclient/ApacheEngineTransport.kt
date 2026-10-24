@@ -32,33 +32,24 @@ import java.util.concurrent.TimeUnit
  * `PoolingHttpClientConnectionManager` for every backend on it, one `CloseableHttpClient` per backend over that
  * pool carrying the backend's response timeout, wrapped in Spring's [HttpComponentsClientHttpRequestFactory].
  *
- * ## The transport, mapped from the reactive twin
- *
- * | Reactor Netty (webclient module)             | Apache HttpClient 5 (here)                                            |
- * |----------------------------------------------|-----------------------------------------------------------------------|
- * | one `ConnectionProvider` for all endpoints   | one `PoolingHttpClientConnectionManager`, shared by every client      |
- * | `maxConnections`                             | `maxConnTotal` AND `maxConnPerRoute` (every endpoint is one route)    |
- * | `pendingAcquireTimeout`                      | `RequestConfig.connectionRequestTimeout`                              |
- * | `pendingAcquireMaxCount`                     | none - Apache's pending queue is bounded in time only                 |
- * | `CONNECT_TIMEOUT_MILLIS`                     | `ConnectionConfig.connectTimeout`                                     |
- * | per-endpoint `responseTimeout`               | per-client `RequestConfig.responseTimeout` (applied as socket timeout) |
- * | `maxIdleTime` / `maxLifeTime` / `evictInBackground` | `closeIdle` / `ConnectionConfig.timeToLive` + `closeExpired`, on the transport's own schedule |
- * | `compress(true)` / `keepAlive(true)`         | Apache's defaults (content compression and keep-alive are on)         |
- * | `.metrics(true)` on the pool                 | Apache's `ConnPoolMeters` (httpclient5-observation), see [RestClientMetrics] |
- * | `.metrics(true)` per request, URI-templated  | none - Spring's `http.client.requests` observation carries the template |
+ * The mesh and pool settings it applies, each with the Apache knob it lands on, are [applied], on the engine's
+ * startup line: all of them. The one knob of the reactive twin without a counterpart is the pending-acquire count
+ * limit - Apache's pool has none ([RestClientProperties.Pool]); the pool gauges are Apache's own ([RestClientMetrics]).
  *
  * What Apache does by default and Reactor Netty does not is switched OFF, so the two clients behave alike on
  * the wire: no automatic retry of a failed idempotent request (the sidecar owns retries, and a second attempt
  * would double-count against the ladder), no redirect following, no cookie jar.
  *
- * **Cancellation.** An interrupted worker is released by the JDK socket implementation itself: since JDK 13 a
- * blocking socket read reacts to the interrupt by closing the socket, the read fails at once with
- * `SocketException: Closed by interrupt`, and a pool lease and a connect are interruptible too. Apache then
- * discards the half-used connection.
+ * **Cancellation.** An interrupted worker is released by the JDK socket implementation itself, and only because
+ * the worker is a virtual thread - [eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator] runs every
+ * exchange on one. Assumption: on a virtual thread, a blocking `java.net.Socket` read or connect reacts to the
+ * interrupt by closing the socket and fails at once with `SocketException: Closed by interrupt` (JEP 444, JDK 21);
+ * on a platform thread it would block on until the socket timeout. The pool lease waits interruptibly on any
+ * thread. Apache then discards the half-used connection.
  *
- * **A body not read to its end.** Apache does NOT discard it on close - it reads it to the end, to keep the
- * connection: Spring's response close consumes the entity, and Apache's content streams drain the rest of the
- * message in their own close. For a body refused at the buffer limit that is the rest of a body nobody wants,
+ * **A body not read to its end.** Assumption: Apache does NOT discard it on close - it reads it to the end, to keep
+ * the connection: Spring's response close consumes the entity, and Apache's content streams drain the rest of the
+ * message in their own close (spring-web 7.0, httpclient5 5.6). For a body refused at the buffer limit that is the rest of a body nobody wants,
  * read on the worker with its permit and its connection, for as long as the peer takes - past the TimeLimiter
  * budget, a client-side refusal would end as a timeout the breaker records. [requestFactory] therefore hands out
  * an [AbortingRequest]: a response closed before its end cancels the Apache request first, which discards the
@@ -78,9 +69,10 @@ internal class ApacheEngineTransport(
 
     /**
      * The single connection pool shared by every target's HttpClient, built once and closed in [shutdown].
-     * Apache keeps a separate sub-pool per route, so distinct sidecar ports stay isolated - which is also why
-     * the per-route limit is raised to the total: every endpoint IS one route, and Apache's per-route default
-     * of five would otherwise cap each backend at five connections regardless of `maxConnections`.
+     * Apache keeps a separate sub-pool per route (scheme, host and port), so distinct sidecar ports stay isolated.
+     * All endpoints share the sidecar's route unless one overrides `base-url`, which is why the per-route limit is
+     * raised to the total. Assumption: Apache's per-route default is five (httpclient5 5.6), which would otherwise
+     * cap the sidecar's route - every backend on it together - at five connections regardless of `maxConnections`.
      *
      * `maxConnections` / `pendingAcquireTimeout` come from the mesh transport config; the lifetime bound from
      * [RestClientProperties.Pool]. A zero `maxLifeTime` leaves the time-to-live unset, Apache's "no limit".
@@ -134,11 +126,12 @@ internal class ApacheEngineTransport(
     private val boundPoolMeters: List<Meter> =
         meterRegistry?.let { registry ->
             val before = registry.meters.toSet()
-            // Pool metrics: the same question the reactor twin's `.metrics(true)` answers - how full is the pool.
-            // Apache's own binder (httpclient5-observation; Micrometer deprecated its hc5 binder in favour of it)
-            // reads the manager off a client BUILDER, so a throwaway builder over the shared manager is handed to
-            // it once, here - never per endpoint, which would register the same gauges once per client. The binder
-            // hands back nothing to deregister with, so what it registered is read off the registry.
+            // Pool metrics: the same question the reactor twin's `.metrics(true)` answers - how full is the pool -
+            // from Apache's own binder (httpclient5-observation; Micrometer deprecated its hc5 binder in favour of
+            // it). Workaround: the binder reads the manager off a client BUILDER and hands back nothing to
+            // deregister with (httpclient5-observation 5.6), so a throwaway builder over the shared manager is
+            // handed to it once, here - never per endpoint, which would register the same gauges once per client -
+            // and what it registered is read off the registry.
             ConnPoolMeters.bindTo(
                 HttpClients.custom().setConnectionManager(connectionManager),
                 registry,
@@ -168,7 +161,8 @@ internal class ApacheEngineTransport(
      * Three Apache defaults are switched off because Reactor Netty does not have them and the ladder does not
      * expect them: automatic retries (the sidecar owns retries; an in-app second attempt would spend the ladder's
      * budget twice without telling anyone), redirect following, and the cookie store. Content compression and
-     * keep-alive stay on - the twin enables both explicitly, Apache has them on by default.
+     * keep-alive stay on, as the twin enables both explicitly. Assumption: Apache has both on by default and
+     * decompresses a gzip body transparently (httpclient5 5.6) - [BoundedBodyReader] counts decoded bytes.
      */
     private fun buildHttpClient(endpoint: ResolvedTimeouts): CloseableHttpClient =
         HttpClients
@@ -207,7 +201,8 @@ internal class ApacheEngineTransport(
             "none (no MeterRegistry)"
         }
 
-    override val cancellation: String = "the interrupted worker's socket read fails at once (the JDK closes the socket), the connection is discarded"
+    override val cancellation: String =
+        "the interrupted worker's socket read fails at once (on the virtual worker the JDK closes the socket), the connection is discarded"
 
     override val isClosed: Boolean get() = connectionManager.isClosed
 
@@ -216,7 +211,8 @@ internal class ApacheEngineTransport(
     /**
      * Drains the shared pool, waiting until the deadline for leased connections to come back, then closes it.
      *
-     * Apache's pool has no "dispose when drained" of its own: `close` discards leased connections on the spot.
+     * Assumption: Apache's pool has no "dispose when drained" of its own - `close` discards leased connections on
+     * the spot (httpclient5 5.6).
      * The wait is therefore made here, bounded, and its expiry is an OUTCOME, not a failure - reported as the
      * statement it is (the pool did not drain in time and is being dropped anyway), never as an exception out
      * of a destroy callback, where Spring could only log a stack trace at the moment someone is looking for one.

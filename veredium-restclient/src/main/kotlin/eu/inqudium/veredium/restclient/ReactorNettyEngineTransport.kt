@@ -41,38 +41,37 @@ import java.util.concurrent.TimeoutException
  *
  * ## What maps
  *
- * | Setting                          | Here                                                                         |
- * |----------------------------------|------------------------------------------------------------------------------|
- * | `connect-timeout-ms`             | `ChannelOption.CONNECT_TIMEOUT_MILLIS`                                       |
- * | per-endpoint response timeout    | `HttpClient.responseTimeout` - the longest silence between reads from sending the request until the response is complete |
- * | `max-connections`                | `ConnectionProvider.maxConnections` (per remote address; every endpoint behind the sidecar is one) |
- * | `pending-acquire-timeout-ms`     | `ConnectionProvider.pendingAcquireTimeout`                                   |
- * | `pool.max-idle-time` / `max-life-time` / `evict-in-background` | `maxIdleTime` / `maxLifeTime` (`0` = unbounded) / `evictInBackground` (`0` = off) |
- * | pool meters                      | Reactor Netty's own gauge names (`reactor.netty.connection.provider.*`), registered in the HOST's registry by [PoolMeters] instead of Micrometer's global one |
+ * Every mesh and pool setting maps; [applied], on the engine's startup line, names the knob each lands on. The
+ * response timeout is `HttpClient.responseTimeout`, the longest silence between reads from sending the request
+ * until the response is complete. The pool gauges keep Reactor Netty's own names (`reactor.netty.connection.provider.*`)
+ * but go to the HOST's registry, through [PoolMeters], instead of Micrometer's global one.
  *
- * The pending-acquire queue is bounded in count at Reactor Netty's default of twice `max-connections`;
- * `app.restclient` has no key for it (the reactive sibling's `pending-acquire-max-count` was dropped here because
- * Apache has no counterpart). Reactor Netty's defaults that the Apache engine does not share are switched off: the
- * one automatic retry of a request whose pooled connection was closed while sending (`disableRetry`). Redirects
- * are off by default; there is no cookie store. Compression is on, as on Apache. Name resolution uses the JDK's
- * resolver like the other three engines - Reactor Netty's default resolver would come from the global
- * `HttpResources`. The pool's timers run on Reactor's shared `parallel` scheduler, as for every Reactor Netty
- * pool; that scheduler holds no connection or state of this engine.
+ * The one setting not applied, [notApplied], is the pending-acquire count limit: `app.restclient` has no key for it
+ * (the reactive sibling's `pending-acquire-max-count` was dropped here because Apache has no counterpart), so
+ * Reactor Netty's default holds. Assumption: that default is twice `max-connections` (Reactor Netty 1.3).
+ *
+ * Reactor Netty's defaults that the Apache engine does not share are switched off: the one automatic retry of a
+ * request whose pooled connection was closed while sending (`disableRetry`). Redirects are off by default; there is
+ * no cookie store. Compression is on, as on Apache: `compress(true)` offers gzip and inflates the body in the
+ * pipeline, so [BoundedBodyReader] counts decoded bytes. Name resolution uses the JDK's resolver like the other three
+ * engines. Assumption: Reactor Netty's default resolver would come from the global `HttpResources`, and the pool's
+ * timers run on Reactor's shared `parallel` scheduler, as for every Reactor Netty pool (Reactor Netty 1.3); that
+ * scheduler holds no connection or state of this engine.
  *
  * ## Cancellation, and the one place Spring's request does not honour an interrupt
  *
  * Waiting for the response head honours an interrupt: Reactor's `block()` cancels the subscription, which
- * closes the connection. Reading the BODY does not: Spring's body stream (`SubscriberInputStream`, spring-web 7.0)
- * waits with `LockSupport.park` in a loop that ignores the interrupt, so an interrupted worker would spin until
- * the next chunk, the end of the body or the response timeout. And closing the response DRAINS the rest of the
- * body. [requestFactory] therefore hands out a decorator whose body reads each run on a short-lived virtual
+ * closes the connection. Workaround: reading the BODY does not - Spring's body stream (`SubscriberInputStream`,
+ * spring-web 7.0) waits with `LockSupport.park` in a loop that ignores the interrupt, so an interrupted worker would
+ * spin until the next chunk, the end of the body or the response timeout. And closing the response DRAINS the rest
+ * of the body. [requestFactory] therefore hands out a decorator whose body reads each run on a short-lived virtual
  * thread while the worker waits for them interruptibly ([HandOffInputStream]): on an interrupt the worker closes
  * Spring's stream, which wakes the reader and cancels the inbound, and fails the read with an
  * `InterruptedIOException`. Closing a response whose body was not read to its end closes the stream first, so
  * the connection is released instead of drained.
  *
- * The wait for the head is handed off the same way ([handOff]), for a reason of its own: Spring's `block()` has no
- * time bound, and the response timeout is a timer on the event loops. A [shutdown] past its deadline disposes the
+ * The wait for the head is handed off the same way ([handOff]), for a reason of its own. Workaround: Spring's
+ * `block()` has no time bound (spring-web 7.0), and the response timeout is a timer on the event loops. A [shutdown] past its deadline disposes the
  * loops, and an exchange whose end they no longer signal would hold its worker until the TimeLimiter budget. Run
  * on [offload], that wait is interrupted by the shutdown's `shutdownNow` and fails at once.
  */
@@ -101,8 +100,9 @@ internal class ReactorNettyEngineTransport(
             .maxIdleTime(pool.maxIdleTime)
             .apply { pool.maxLifeTime.takeUnless { it.isZero }?.let { maxLifeTime(it) } }
             .apply { pool.evictInBackground.takeUnless { it.isZero }?.let { evictInBackground(it) } }
-            // Always on, with this class's registrar: it is how the drain sees the leased connections, and the
-            // custom registrar keeps Reactor Netty from registering anything in Micrometer's global registry.
+            // Always on, with this class's registrar: it is how the drain sees the leased connections. Assumption: a
+            // custom registrar keeps Reactor Netty from registering anything in Micrometer's global registry
+            // (Reactor Netty 1.3).
             .metrics(true) { pools }
             .build()
 
@@ -288,8 +288,8 @@ internal class ReactorNettyEngineTransport(
         override fun getStatusText(): String = delegate.statusText
 
         override fun close() {
-            // Spring's close drains what is left of the body; a body not read to its end is closed first, which
-            // cancels the inbound - the connection is released rather than read to the end of a body nobody wants.
+            // Assumption: Spring's close drains what is left of the body (spring-web 7.0); a body not read to its
+            // end is closed first, which cancels the inbound - the connection is released rather than read to the end of a body nobody wants.
             body?.closeUnlessAtEnd()
             delegate.close()
         }
@@ -330,7 +330,7 @@ internal class ReactorNettyEngineTransport(
         }
 
         /**
-         * [source]'s read, with a transport failure as the [IOException] it is. Spring's stream reports the
+         * [source]'s read, with a transport failure as the [IOException] it is. Workaround: Spring's stream reports the
          * inbound's error UNCHECKED (`Exceptions.propagate`, spring-web 7.0): a peer closing the connection
          * mid-body arrives as Reactor's `ReactiveException` around a `PrematureCloseException`. Thrown on as that,
          * it would pass Spring's `IOException` handling of the exchange - no `ResourceAccessException`, unlike

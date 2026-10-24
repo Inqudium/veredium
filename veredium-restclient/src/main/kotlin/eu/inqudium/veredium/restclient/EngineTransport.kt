@@ -127,8 +127,8 @@ internal open class ForwardingClientHttpRequest(
 /**
  * A request whose exchange [abort]s when it fails, and whose response aborts it when a body read fails and when it
  * is closed before its body was read to the end ([AbortingResponse]) - the decorator of the engines whose own close
- * would otherwise DRAIN the rest of an unwanted body (Apache, the JDK client: Spring's responses of both read it to
- * the end in `close`) or leave the exchange in flight (Jetty).
+ * would otherwise DRAIN the rest of an unwanted body (Apache, the JDK client) or leave the exchange in flight
+ * (Jetty).
  *
  * [abort] receives the response once there is one (`null` while the request failed before it), and must be a no-op
  * on an exchange that already ended; the engines' aborts are.
@@ -155,8 +155,8 @@ internal class AbortingRequest(
  * The response of an [AbortingRequest]. "Read to the end" means a read returned `-1`; a body never opened counts as
  * not read, because the engine would otherwise drain it on close just the same.
  *
- * The abort runs BEFORE the delegate's close: Spring's Apache and JDK responses read the rest of the body in their
- * close, so aborting afterwards would come too late.
+ * The abort runs BEFORE the delegate's close. Assumption: Spring's Apache and JDK responses read the rest of the
+ * body in their close (spring-web 7.0), so aborting afterwards would come too late.
  */
 internal class AbortingResponse(
     private val delegate: ClientHttpResponse,

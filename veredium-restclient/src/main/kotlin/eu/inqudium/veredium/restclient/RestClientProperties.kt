@@ -38,13 +38,17 @@ data class RestClientProperties(
      * buffers identically against the same backends. 8 KB is too small for a typical JSON list response, and a
      * call refused on its buffer spends its whole retry cap on the same answer.
      *
-     * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and the mesh bulkheads admit
-     * `maxConnections` calls in all (100, [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst
-     * case is ~25 MB of response buffers; at the 1 MB some other clients use it would be ~100 MB, which is real
-     * money on a service that otherwise needs little heap.
+     * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and how many calls run at once is
+     * bounded by the mesh bulkheads, whose sum the reference configuration holds at `maxConnections` (100,
+     * [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst case is ~25 MB of response
+     * buffers; at the 1 MB some other clients use it would be ~100 MB, which is real money on a service that
+     * otherwise needs little heap.
      *
-     * **Why a limit at all** - see the range check in `init`: without one, a single degenerate response takes
-     * the pod down, and the failure mode of getting it wrong is documented there.
+     * **Why a limit at all, and its range.** Without one, a single degenerate response takes the pod down. The value
+     * must lie between 1 B and `Int.MAX_VALUE` B, checked at binding: a limit of zero would fail EVERY call with a
+     * [ResponseBodyLimitExceededException] while the circuit breaker stays closed (it discounts that failure, see
+     * [RestClientVerdicts.clientSideFailure]), and a value past `Int.MAX_VALUE` would wrap to a negative buffer size
+     * on its way to the bounded read and end the same way.
      */
     val maxInMemorySize: DataSize = DataSize.ofKilobytes(256),
     /**
@@ -82,17 +86,11 @@ data class RestClientProperties(
     val effectiveUserAgent: String = Veredium.resolveUserAgent(userAgent, "app.restclient.user-agent")
 
     init {
-        // Both ends of this range are load-bearing.
-        //
-        // At the bottom: a zero or negative limit binds silently and then fails EVERY call with a
-        // ResponseBodyLimitExceededException - which RestClientVerdicts.clientSideFailure deliberately keeps off the
-        // circuit breaker, so no breaker opens and the picture in monitoring is "all four backends are down"
-        // while the cause is one line of YAML. The protection works against the diagnosis here, which is exactly
-        // why the value must never get there.
-        //
-        // At the top: ResilientRestClientFactory narrows this to an Int for the bounded body buffer. Anything
-        // past Int.MAX_VALUE would wrap to a negative number and land back at the bottom case - by a route
-        // nobody would suspect from looking at the configured value.
+        // Both ends are refused at binding rather than left to the runtime (the consequences are in the KDoc of
+        // maxInMemorySize). At the bottom the breaker's discount works against the diagnosis: every backend then
+        // looks down while no breaker opens, and the cause is one line of YAML. At the top the route is one nobody
+        // would suspect from the configured value: ResilientRestClientFactory narrows it to an Int for the bounded
+        // body buffer, and the wrapped value lands at the bottom case.
         require(maxInMemorySize.toBytes() in 1..Int.MAX_VALUE.toLong()) {
             "app.restclient.max-in-memory-size must be between 1B and ${Int.MAX_VALUE}B, but was $maxInMemorySize"
         }
@@ -105,10 +103,13 @@ data class RestClientProperties(
      * lease time), the JDK engine none, since its pool is configurable only through JVM-wide system properties.
      * Each engine's startup line names the knobs it applies and the ones it does not.
      *
-     * The WebClient twin's `pending-acquire-max-count` has no counterpart here, deliberately: Apache's pool has
-     * no bounded pending queue. A caller waiting for a connection is bounded in TIME only, by the mesh transport's
-     * `pending-acquire-timeout-ms` (the connection-request timeout), which is also how the bulkheads are sized -
-     * they shed load before the pool queue builds up at all.
+     * The WebClient twin's `pending-acquire-max-count` has no key here, deliberately: Apache, the default engine,
+     * has no counterpart, and each other engine keeps a default of its own. Assumption: Apache's pool has no bounded
+     * pending queue - a caller waiting for a connection is bounded in TIME only, by the mesh transport's
+     * `pending-acquire-timeout-ms` (the connection-request timeout); Reactor Netty applies that time bound and bounds
+     * the queue in COUNT at twice `max-connections`; Jetty bounds it in count at 1024 per destination and in time
+     * only by the request's total timeout; the JDK client queues nothing, its pool being unbounded (httpclient5 5.6,
+     * Reactor Netty 1.3, Jetty 12.1). The bulkheads are sized to shed load before a pool queue builds up at all.
      */
     data class Pool(
         /**
@@ -116,9 +117,9 @@ data class RestClientProperties(
          * eviction schedule (`closeIdle`), every [evictInBackground]; the other engines apply it by their own
          * mechanism or not at all ([Pool]).
          *
-         * Must be positive. Zero has no reading the engines agree on: Reactor Netty evicts every idle connection at
-         * once (no keep-alive at all), Jetty takes it as "no idle timeout", Apache closes all idle connections at
-         * every sweep - so it is refused at binding rather than meaning three things.
+         * Must be positive. Assumption: zero has no reading the engines agree on - Reactor Netty evicts every idle
+         * connection at once (no keep-alive at all), Jetty takes it as "no idle timeout", Apache closes all idle
+         * connections at every sweep - so it is refused at binding rather than meaning three things.
          */
         val maxIdleTime: Duration = Duration.ofSeconds(30),
         /**
@@ -134,8 +135,8 @@ data class RestClientProperties(
         val evictInBackground: Duration = Duration.ofSeconds(30),
     ) {
         init {
-            // Negative durations are accepted by Apache's builders and then quietly mean something no operator
-            // intended: a connection that is due for eviction the moment it is created. Zero is left alone where
+            // Assumption: Apache's builders accept negative durations (httpclient5 5.6), which then quietly mean
+            // something no operator intended: a connection that is due for eviction the moment it is created. Zero is left alone where
             // every engine reads it alike - for evictInBackground it is "off", for maxLifeTime it is "unbounded" -
             // and refused for maxIdleTime, where the engines read it in opposite ways (see its KDoc).
             require(maxIdleTime.isPositive) {
@@ -194,9 +195,9 @@ data class RestClientProperties(
 
     /**
      * Toggle for Spring RestClient's NATIVE Micrometer Observation on the outbound HTTP calls of THIS module.
-     * [ResilientRestClientFactory] clones Boot's auto-configured `RestClient.Builder`, on which Boot's
-     * `ObservationRestClientCustomizer` has already placed the host's `ObservationRegistry` (and observation
-     * convention) - the factory does not wire the registry itself. When `false` this flag REPLACES the registry
+     * [ResilientRestClientFactory] clones Boot's auto-configured `RestClient.Builder` and does not wire the registry
+     * itself. Assumption: Boot's `ObservationRestClientCustomizer` has already placed the host's
+     * `ObservationRegistry` (and observation convention) on that builder (Spring Boot 4.1). When `false` this flag REPLACES the registry
      * Boot wired with a NOOP, so this module's clients open no `http.client.requests` observation while every
      * other RestClient of the host keeps its own. When `true`, each request opens that observation; with a
      * tracing bridge on the (host's) classpath that becomes a CLIENT span and injects the W3C `traceparent` into
