@@ -13,7 +13,6 @@ import io.github.resilience4j.spring6.timelimiter.configure.TimeLimiterConfigura
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import org.springframework.beans.factory.BeanRegistrar
 import org.springframework.beans.factory.BeanRegistry
-import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.core.env.Environment
 
 /** The slow-call rate an enabled circuit breaker is pinned to when the derived slow-call sits below `individual`. */
@@ -165,11 +164,7 @@ abstract class MeshResilienceRegistrar(
         registry: BeanRegistry,
         env: Environment,
     ) {
-        val mesh =
-            Binder
-                .get(env)
-                .bind(MeshProperties.PREFIX, MeshProperties::class.java)
-                .orElseGet { MeshProperties() }
+        val mesh = MeshProperties.bind(env)
         mesh.endpointsOwnedBy(stack).values.sortedBy { it.alias }.forEach { endpoint ->
             registry.registerBean(circuitBreakerBeanName(stack, endpoint.alias), CircuitBreakerConfigCustomizer::class.java) { spec ->
                 spec

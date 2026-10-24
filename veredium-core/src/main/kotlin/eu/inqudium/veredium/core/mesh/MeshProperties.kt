@@ -1,6 +1,8 @@
 package eu.inqudium.veredium.core.mesh
 
 import org.springframework.boot.context.properties.ConfigurationProperties
+import org.springframework.boot.context.properties.bind.Binder
+import org.springframework.core.env.Environment
 
 /**
  * Binds the app-side mesh config (`app.mesh`), which describes the same endpoints as the sidecar's own config and
@@ -102,6 +104,17 @@ data class MeshProperties(
         val triplets = endpoints.map { it.triplet }
         require(triplets.size == triplets.toSet().size) { "Mesh triplets collide: ${duplicatesIn(triplets)}" }
     }
+
+    /**
+     * Every endpoint resolved to its ladder, keyed by the canonical triplet (unique per the `init` guard).
+     *
+     * Derived ONCE and cached, so that every consumer (the client factory, the ladder logger and the R4j
+     * registrar) reasons about one set of [ResolvedTimeouts] instances for the configuration rather than each
+     * about its own copies; the derivation itself is cheap. Lazy rather than eager so binding a [MeshProperties]
+     * stays free of the derivation, and its `require` diagnostics keep surfacing at the first use rather than deep
+     * inside Spring's binder.
+     */
+    private val resolved: Map<String, ResolvedTimeouts> by lazy { resolveEndpoints() }
 
     /**
      * The shared fallbacks under `app.mesh.defaults`; an endpoint that leaves a value unset inherits it from here.
@@ -257,8 +270,14 @@ data class MeshProperties(
     /**
      * Transport-level caps for the app->sidecar hop - the client's pre-response phases that sit OUTSIDE the
      * responseTimeout window, so only the TimeLimiter covers them (hence the computed [timeLimiterMargin] must
-     * exceed their worst case). The client factory of each stack reads them directly: `connectTimeoutMs` drives
-     * the connect timeout, `pendingAcquireTimeoutMs` / `maxConnections` the shared pool.
+     * exceed their worst case). The client factory of each stack reads them directly: [connectTimeoutMs] drives
+     * the connect timeout, [pendingAcquireTimeoutMs] / [maxConnections] the connection pools of its engines.
+     *
+     * @property sidecarBaseUrl The base URL of every endpoint that sets no `base-url` of its own.
+     * @property connectTimeoutMs The TCP connect timeout, in milliseconds.
+     * @property pendingAcquireTimeoutMs How long a call waits for a free pooled connection, in milliseconds.
+     * @property maxConnections The connection bound of each pool an engine holds - what the mesh bulkheads are
+     *   sized against.
      */
     data class Transport(
         val sidecarBaseUrl: String = "http://localhost:8042",
@@ -315,17 +334,6 @@ data class MeshProperties(
         }
     }
 
-    /**
-     * Every endpoint resolved to its ladder, keyed by the canonical triplet (unique per the `init` guard).
-     *
-     * Derived ONCE and cached, so that every consumer (the client factory, the ladder logger and the R4j
-     * registrar) reasons about one set of [ResolvedTimeouts] instances for the configuration rather than each
-     * about its own copies; the derivation itself is cheap. Lazy rather than eager so binding a [MeshProperties]
-     * stays free of the derivation, and its `require` diagnostics keep surfacing at the first use rather than deep
-     * inside Spring's binder.
-     */
-    private val resolved: Map<String, ResolvedTimeouts> by lazy { resolveEndpoints() }
-
     /** Resolve every endpoint to its ladder, keyed by the canonical triplet (unique per the `init` guard). */
     fun resolveAll(): Map<String, ResolvedTimeouts> = resolved
 
@@ -339,27 +347,33 @@ data class MeshProperties(
     fun endpointsOwnedBy(stack: String): Map<String, ResolvedTimeouts> = resolveAll().values.filter { it.stack == null || it.stack == stack }.associateBy { it.alias }
 
     /** The endpoints another stack than [stack] owns explicitly, as alias -> owning stack - for the messages that name it. */
-    fun endpointsOwnedByOthers(stack: String): Map<String, String> = resolveAll().values.mapNotNull { endpoint -> endpoint.stack?.takeIf { it != stack }?.let { endpoint.alias to it } }.toMap()
+    fun endpointsOwnedByOthers(stack: String): Map<String, String> =
+        resolveAll()
+            .values
+            .mapNotNull { endpoint ->
+                val owner = endpoint.stack
+                if (owner == null || owner == stack) null else endpoint.alias to owner
+            }.toMap()
 
     private fun resolveEndpoints(): Map<String, ResolvedTimeouts> =
-        endpoints.associate { e ->
-            e.triplet to
+        endpoints.associate { endpoint ->
+            endpoint.triplet to
                 ResolvedTimeouts(
-                    triplet = e.triplet,
+                    triplet = endpoint.triplet,
                     // alias is generated from the triplet unless explicitly overridden
-                    alias = e.effectiveAlias(),
-                    host = e.host(),
-                    pathTemplate = e.pathTemplate(),
-                    baseUrl = e.baseUrl ?: defaults.transport.sidecarBaseUrl,
-                    headers = e.headers,
-                    individualRequestTimeoutMs = e.individualRequestTimeoutMs ?: defaults.individualRequestTimeoutMs,
-                    maxRetries = e.maxRetries ?: defaults.maxRetries,
+                    alias = endpoint.effectiveAlias(),
+                    host = endpoint.host(),
+                    pathTemplate = endpoint.pathTemplate(),
+                    baseUrl = endpoint.baseUrl ?: defaults.transport.sidecarBaseUrl,
+                    headers = endpoint.headers,
+                    individualRequestTimeoutMs = endpoint.individualRequestTimeoutMs ?: defaults.individualRequestTimeoutMs,
+                    maxRetries = endpoint.maxRetries ?: defaults.maxRetries,
                     margins = defaults.margins,
                     transport = defaults.transport,
                     // tri-state: a per-endpoint flag wins; null inherits the shared default.
-                    timeLimiterEnabled = e.timeLimiter?.enabled ?: defaults.timeLimiter.enabled,
-                    circuitBreakerEnabled = e.circuitBreaker?.enabled ?: defaults.circuitBreaker.enabled,
-                    stack = e.stack,
+                    timeLimiterEnabled = endpoint.timeLimiter?.enabled ?: defaults.timeLimiter.enabled,
+                    circuitBreakerEnabled = endpoint.circuitBreaker?.enabled ?: defaults.circuitBreaker.enabled,
+                    stack = endpoint.stack,
                 )
         }
 
@@ -372,7 +386,21 @@ data class MeshProperties(
             .keys
 
     companion object {
-        /** The property prefix this tree binds from - the one string the registrar and the binding share. */
+        /**
+         * The property prefix this tree binds from - the one string the `@ConfigurationProperties` binding and
+         * [bind] share.
+         */
         const val PREFIX: String = "app.mesh"
+
+        /**
+         * Binds [PREFIX] from [environment] before any bean exists - for the registrars and the ownership check,
+         * which read the mesh while bean definitions are still being registered. An absent `app.mesh` block binds
+         * to the defaults.
+         */
+        internal fun bind(environment: Environment): MeshProperties =
+            Binder
+                .get(environment)
+                .bind(PREFIX, MeshProperties::class.java)
+                .orElseGet { MeshProperties() }
     }
 }

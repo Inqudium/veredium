@@ -71,7 +71,7 @@ object EngineDrain {
             "HTTP engine '{}' did not drain {} - closing it with {} still in flight",
             engine,
             if (Thread.currentThread().isInterrupted) "because the shutdown thread was interrupted" else "within $window",
-            left?.let { "$it exchange(s)" } ?: "the exchanges",
+            if (left == null) "the exchanges" else "$left exchange(s)",
         )
     }
 }

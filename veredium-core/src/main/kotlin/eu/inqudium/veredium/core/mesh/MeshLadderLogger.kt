@@ -1,5 +1,6 @@
 package eu.inqudium.veredium.core.mesh
 
+import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.boot.context.event.ApplicationReadyEvent
 import org.springframework.context.event.EventListener
@@ -19,11 +20,11 @@ import org.springframework.context.event.EventListener
 class MeshLadderLogger(
     private val props: MeshProperties,
 ) {
-    private val log = LoggerFactory.getLogger(MeshLadderLogger::class.java)
+    private val logger: Logger = LoggerFactory.getLogger(MeshLadderLogger::class.java)
 
     /** Writes [ladderLines] at INFO once the application is ready - after every binding the ladder reads. */
     @EventListener(ApplicationReadyEvent::class)
-    fun logResolvedLadder() = ladderLines().forEach(log::info)
+    fun logResolvedLadder() = ladderLines().forEach(logger::info)
 
     /** One line per endpoint (sorted by alias) - the fully derived ladder, for the startup log and tests. */
     fun ladderLines(): List<String> =
@@ -31,10 +32,10 @@ class MeshLadderLogger(
             .resolveAll()
             .values
             .sortedBy { it.alias }
-            .map { t ->
-                "mesh ladder [${t.alias}] ${t.triplet}: " +
-                    "individual=${t.individualRequestTimeoutMs}ms global=${t.sidecarGlobalMs}ms " +
-                    "responseTimeout=${t.responseTimeout.toMillis()}ms " +
-                    "slowCall=${t.slowCallDuration.toMillis()}ms timeLimiter=${t.timeLimiterTimeout.toMillis()}ms"
+            .map { endpoint ->
+                "mesh ladder [${endpoint.alias}] ${endpoint.triplet}: " +
+                    "individual=${endpoint.individualRequestTimeoutMs}ms global=${endpoint.sidecarGlobalMs}ms " +
+                    "responseTimeout=${endpoint.responseTimeout.toMillis()}ms " +
+                    "slowCall=${endpoint.slowCallDuration.toMillis()}ms timeLimiter=${endpoint.timeLimiterTimeout.toMillis()}ms"
             }
 }

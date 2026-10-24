@@ -53,12 +53,14 @@ object EngineSelection {
         val (owned, unknown) = overrides.filterNot { it in aliases }.sorted().partition { it in foreign }
         val problems =
             owned.map { "$prefix.endpoints.$it names a mesh endpoint the ${foreign.getValue(it)} stack owns, not this one" } +
-                listOfNotNull(
-                    unknown.takeIf { it.isNotEmpty() }?.let { keys ->
-                        "${keys.joinToString { "$prefix.endpoints.$it" }} names no mesh endpoint - the key must be the alias " +
-                            "of an app.mesh.endpoints[] entry. Known aliases: ${aliases.sorted()}"
-                    },
-                )
+                if (unknown.isEmpty()) {
+                    emptyList()
+                } else {
+                    listOf(
+                        "${unknown.joinToString { "$prefix.endpoints.$it" }} names no mesh endpoint - the key must be the alias " +
+                            "of an app.mesh.endpoints[] entry. Known aliases: ${aliases.sorted()}",
+                    )
+                }
         require(problems.isEmpty()) { problems.joinToString("; ") }
     }
 

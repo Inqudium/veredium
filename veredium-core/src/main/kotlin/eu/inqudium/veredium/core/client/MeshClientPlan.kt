@@ -61,9 +61,8 @@ class MeshClientPlan(
             .plusSeconds(1)
 
     init {
-        // Which backends actually validate, resolved the same way the clients resolve it. Worth a startup line because
-        // both ways this silently does nothing are invisible at runtime: a backend simply not listed, or no Bean
-        // Validation provider on the classpath at all, in which case no configuration can switch it on for anyone.
+        // Which backends actually validate, resolved the same way the clients resolve it - why that is worth a startup
+        // line, see `ResponseValidation.validatedAliases`.
         logger.info(
             "Response Bean Validation: default={}, validated endpoints={} (provider {})",
             validation.enabledByDefault,
@@ -80,11 +79,10 @@ class MeshClientPlan(
      *   confusing 404 or connection error at the first call.
      */
     fun endpoint(backendName: String): ResolvedTimeouts {
-        foreignEndpoints[backendName]?.let { owner ->
-            throw IllegalArgumentException(
-                "Backend '$backendName' is owned by the $owner stack (app.mesh.endpoints[].stack=$owner), not by the $stack " +
-                    "stack: build its client with the $owner stack's factory.",
-            )
+        val owner = foreignEndpoints[backendName]
+        require(owner == null) {
+            "Backend '$backendName' is owned by the $owner stack (app.mesh.endpoints[].stack=$owner), not by the $stack " +
+                "stack: build its client with the $owner stack's factory."
         }
         return endpoints[backendName]
             ?: error("No mesh endpoint configured for backend '$backendName'. Add an app.mesh.endpoints[] entry whose alias equals '$backendName'.")
@@ -136,9 +134,9 @@ class MeshClientPlan(
         }
 
     private companion object {
-        const val HOST = "Host"
-        const val USER_AGENT = "User-Agent"
-        const val ACCEPT = "Accept"
-        const val APPLICATION_JSON = "application/json"
+        const val HOST: String = "Host"
+        const val USER_AGENT: String = "User-Agent"
+        const val ACCEPT: String = "Accept"
+        const val APPLICATION_JSON: String = "application/json"
     }
 }

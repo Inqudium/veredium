@@ -3,7 +3,6 @@ package eu.inqudium.veredium.core.resilience
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory
-import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.core.env.Environment
 
 /**
@@ -27,11 +26,7 @@ class MeshOwnershipCheck(
     private val environment: Environment,
 ) : BeanFactoryPostProcessor {
     override fun postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
-        val mesh =
-            Binder
-                .get(environment)
-                .bind(MeshProperties.PREFIX, MeshProperties::class.java)
-                .orElseGet { MeshProperties() }
+        val mesh = MeshProperties.bind(environment)
         val problems = problems(mesh, beanFactory.beanDefinitionNames.toList())
         check(problems.isEmpty()) {
             "The mesh endpoints are not served by exactly one client stack each - ${problems.size} problem(s):\n  - " +
@@ -59,8 +54,10 @@ class MeshOwnershipCheck(
                 beanNames
                     .filter { it.startsWith(MeshResilienceRegistrar.CIRCUIT_BREAKER_BEAN_PREFIX) }
                     .map { it.removePrefix(MeshResilienceRegistrar.CIRCUIT_BREAKER_BEAN_PREFIX) }
-                    .mapNotNull { claim -> stacks.firstOrNull { claim.startsWith("$it.") }?.let { stack -> claim.removePrefix("$stack.") to stack } }
-                    .groupBy({ it.first }, { it.second })
+                    .mapNotNull { claim ->
+                        val stack = stacks.firstOrNull { claim.startsWith("$it.") }
+                        if (stack == null) null else claim.removePrefix("$stack.") to stack
+                    }.groupBy({ it.first }, { it.second })
             return mesh.endpoints.mapIndexedNotNull { index, endpoint ->
                 val alias = endpoint.effectiveAlias()
                 val key = "${MeshProperties.PREFIX}.endpoints[$index].stack"
