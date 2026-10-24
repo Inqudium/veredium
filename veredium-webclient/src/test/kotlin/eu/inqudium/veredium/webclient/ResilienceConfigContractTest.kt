@@ -24,7 +24,7 @@ import org.springframework.core.env.MapPropertySource
  * It checks that every mesh alias (derived from its triplet exactly as at runtime, by binding `app.mesh` into
  * [MeshProperties]) is declared under `resilience4j.circuitbreaker.instances`, `resilience4j.timelimiter.instances`
  * AND `resilience4j.bulkhead.instances`, and that the bulkheads of those aliases together admit no more
- * concurrent calls than the shared pool has connections -
+ * concurrent calls than one pool has connections -
  * `sum(max-concurrent-calls) <= app.mesh.defaults.transport.max-connections` - and shows that the check bites.
  *
  * Both rules are invisible when broken. An undeclared alias still gets an instance - on the registry default,
@@ -38,9 +38,9 @@ import org.springframework.core.env.MapPropertySource
  * The per-alias `max-concurrent-calls` is not read off the YAML by hand: the `resilience4j.bulkhead` keys are
  * handed to Resilience4j's own Boot auto-configuration and the value is read off the instance it builds, so a
  * `base-config`, a `configs.default` or an instance override resolves exactly as it would in the running
- * application. The sum runs over ALL mesh aliases against the one pool size - exact for the blocking stack,
- * conservative here (Reactor Netty caps per remote address, so an endpoint with its own `base-url` gets its own
- * sub-pool), and therefore the safe direction for a reference.
+ * application. The sum runs over ALL mesh aliases against the one pool size - exact for an engine whose backends
+ * share one pool per destination (jetty, apache), conservative on reactor-netty (a sub-pool per backend, each
+ * holding `max-connections` of its own), and therefore the safe direction for a reference.
  *
  * Determinism: classpath files and a Spring context that configures and calls nothing.
  */
@@ -70,11 +70,12 @@ class ResilienceConfigContractTest {
 
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = [REFERENCE, FIXTURE])
-    fun `should keep the mesh bulkheads within the shared connection pool`(file: String) {
+    fun `should keep the sum of the mesh bulkheads within max-connections`(file: String) {
         // What is tested: the sizing half for one file - sum(max-concurrent-calls) over the mesh aliases, as
         //   Resilience4j resolves each instance, against app.mesh.defaults.transport.max-connections.
-        // Success criteria: no over-commit is reported; the file's four aliases at 25 permits each fill the
-        //   100-connection pool exactly.
+        // Success criteria: no over-commit is reported; the file's four aliases at 25 permits each sum to the
+        //   100 connections exactly - what one pool shared by all four backends holds (jetty, apache), and
+        //   conservative on reactor-netty, where each backend has a sub-pool of its own.
         // Why it matters: see the class KDoc - an over-committed pool moves the queueing out of the bulkhead and
         //   charges its timeouts to whichever backend happens to wait.
         //

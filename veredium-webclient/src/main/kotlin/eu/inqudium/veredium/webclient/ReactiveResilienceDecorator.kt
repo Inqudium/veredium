@@ -74,13 +74,13 @@ import java.time.Duration
  * operation and sees a `BulkheadFullException` raised anywhere beneath it is exactly such a case: extending
  * the list here does NOT extend it there; both move together.
  *
- * Inverting the nesting (bulkhead outermost) would make the rejection structurally invisible to the breaker
- * and is the obvious cheaper alternative - it was weighed and rejected: it departs from the order above, it
- * makes the bulkhead count calls the breaker short-circuits (so its limit bounds a different population and
- * its metric no longer means "in-flight at the backend"), and it would surface a `BulkheadFullException` to
- * callers where a `CallNotPermittedException` is the truthful answer. It would also not remove the need for
- * the record/ignore mechanism, since a client-side failure raised by the SOURCE - a codec limit, a parse
- * error - sits inside every operator regardless of their order.
+ * Rationale: the nesting is not inverted (bulkhead outermost), although that would make the rejection
+ * structurally invisible to the breaker and is the obvious cheaper alternative - it was weighed and rejected: it
+ * departs from the order above, it makes the bulkhead count calls the breaker short-circuits (so its limit bounds
+ * a different population and its metric no longer means "in-flight at the backend"), and it would surface a
+ * `BulkheadFullException` to callers where a `CallNotPermittedException` is the truthful answer. It would also
+ * not remove the need for the record/ignore mechanism, since a client-side failure raised by the SOURCE - a codec
+ * limit, a parse error - sits inside every operator regardless of their order.
  *
  * ## Pinned, and one thing the order does NOT do
  *
@@ -111,7 +111,7 @@ class ReactiveResilienceDecorator(
     ): Mono<T> {
         val circuitBreaker = circuitBreakerRegistry.circuitBreaker(backendName)
         val timeLimiter = timeLimiterRegistry.timeLimiter(backendName)
-        // Only the semaphore Bulkhead is reactive-compatible; ThreadPoolBulkhead must not be used here.
+        // Invariant: only the semaphore Bulkhead is reactive-compatible; ThreadPoolBulkhead must not be used here.
         val bulkhead = bulkheadRegistry.bulkhead(backendName)
 
         return source

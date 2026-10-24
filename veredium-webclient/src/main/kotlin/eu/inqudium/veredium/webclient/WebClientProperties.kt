@@ -10,16 +10,16 @@ import java.time.Duration
 /**
  * GLOBAL configuration for the WebClients produced by [ResilientWebClientFactory] - everything NOT
  * per-endpoint. The per-endpoint config (base URL, Host, timeout ladder) lives in `app.mesh.endpoints[]`,
- * so one factory serves several backends from that tree, with one connection [pool] per HTTP [engine].
+ * so one factory serves several backends from that tree, on the resources of each HTTP [engine] in use.
  *
  * Only knobs with no mesh equivalent stay here: `maxInMemorySize`, the pool lifecycle and the engine. The mesh
  * transport config owns `maxConnections` / `pendingAcquireTimeout`, the ladder owns the response timeout.
  *
  * Every value is checked while BINDING, the way [eu.inqudium.veredium.core.mesh.MeshProperties] and
- * [eu.inqudium.veredium.core.mesh.ResolvedTimeouts] do it - and for the
- * same reason: a wrong number here does not announce itself. It binds, the context starts, and the effect
- * shows up as a runtime symptom that points anywhere but at the configuration. The messages therefore name
- * the PROPERTY KEY, not the Kotlin field, because the key is what the person reading the failure has to edit.
+ * [eu.inqudium.veredium.core.mesh.ResolvedTimeouts] do it - and for the same reason: a wrong number here does not
+ * announce itself. It binds, the context starts, and the effect shows up as a runtime symptom that points anywhere
+ * but at the configuration. The messages therefore name the PROPERTY KEY, not the Kotlin field, because the key is
+ * what the person reading the failure has to edit.
  */
 @ConfigurationProperties(prefix = "app.webclient")
 data class WebClientProperties(
@@ -31,20 +31,23 @@ data class WebClientProperties(
      * response from these backends: the backend answers `200 OK` promptly and the codec aborts mid-buffer, on
      * every retry of the same call.
      *
-     * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and the shared pool is bounded
-     * at `maxConnections` (100, [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst case is ~25 MB of
-     * response buffers; at the 1 MB some other clients use it would be ~100 MB, which is real money on a
-     * service that otherwise needs little heap.
+     * **Why not more.** The limit applies PER CONCURRENTLY BUFFERED RESPONSE, and how many calls run at once is
+     * bounded by the mesh bulkheads, whose sum the reference configuration holds at `maxConnections` (100,
+     * [eu.inqudium.veredium.core.mesh.MeshProperties.Transport]). At 256 KB the worst case is ~25 MB of response
+     * buffers; at the 1 MB some other clients use it would be ~100 MB, which is real money on a service that
+     * otherwise needs little heap.
      *
      * **Why a limit at all** - see the range check in `init`: without one, a single degenerate response takes
      * the pod down, and the failure mode of getting it wrong is documented there.
      */
     val maxInMemorySize: DataSize = DataSize.ofKilobytes(256),
     /**
-     * One shared connection pool for all endpoints of an engine. Every endpoint connects to the same local
-     * sidecar over loopback, so per-endpoint pool isolation is not worth the lost connection reuse; per-backend
-     * isolation is owned by the R4j bulkhead / circuit breaker / time limiter instead. `maxConnections` and
-     * `pendingAcquireTimeout` come from the mesh transport config.
+     * The connection-pool settings of every engine. What a pool is shared by depends on the engine: Reactor Netty
+     * keeps a sub-pool per BACKEND inside the one provider of the factory (per remote address and per client
+     * configuration, and every backend's client is configured on its own), Jetty and Apache share one pool per
+     * destination between the backends behind it, and the JDK client has no per-client pool settings at all.
+     * Per-backend isolation is owned by the R4j bulkhead / circuit breaker / time limiter on every engine.
+     * `maxConnections` and `pendingAcquireTimeout` come from the mesh transport config.
      *
      * Written in Reactor Netty's terms, the default engine, which applies all four knobs. The other engines
      * apply what they have an equivalent for and say at startup which knobs they do not apply
@@ -69,7 +72,8 @@ data class WebClientProperties(
     val userAgent: String? = null,
     /**
      * Which HTTP engine carries the clients of this module - a default with per-backend (mesh alias)
-     * overrides, see [Engine]. The code default is Reactor Netty, the engine Boot's own WebClient auto-configuration prefers.
+     * overrides, see [Engine]. The code default is Reactor Netty, the engine Boot's own WebClient
+     * auto-configuration prefers.
      */
     val engine: Engine = Engine(),
 ) {
@@ -121,11 +125,11 @@ data class WebClientProperties(
             // intended: a connection that is due for eviction the moment it is created. Zero is left alone where
             // every engine reads it the same way - for evictInBackground it is "off", for maxLifeTime "unbounded".
             //
-            // Not for maxIdleTime: the engines read a zero idle time in OPPOSITE ways. Reactor Netty evicts every
-            // connection whose idle time is >= the limit, i.e. every released one, so keep-alive is silently gone
-            // and each call opens a new connection; Jetty reads 0 as "no idle timeout" and never closes an idle
-            // connection; Apache's evictor closes every idle connection on each sweep. There is no one meaning to
-            // give the value, so it is refused, naming the key.
+            // Rationale: not for maxIdleTime - the engines read a zero idle time in OPPOSITE ways. Reactor Netty
+            // evicts every connection whose idle time is >= the limit, i.e. every released one, so keep-alive is
+            // silently gone and each call opens a new connection; Jetty reads 0 as "no idle timeout" and never
+            // closes an idle connection; Apache's evictor closes every idle connection on each sweep. There is no
+            // one meaning to give the value, so it is refused, naming the key.
             require(maxIdleTime.isPositive) {
                 "app.webclient.pool.max-idle-time must be positive (0 would mean no keep-alive on Reactor Netty and " +
                     "no idle timeout on Jetty), but was $maxIdleTime"
@@ -175,7 +179,8 @@ data class WebClientProperties(
 
     /**
      * Toggle for Spring WebClient's NATIVE Micrometer Observation on the outbound HTTP calls of THIS module.
-     * [ResilientWebClientFactory] clones Boot's auto-configured [org.springframework.web.reactive.function.client.WebClient.Builder], on which Boot's
+     * [ResilientWebClientFactory] clones Boot's auto-configured
+     * [org.springframework.web.reactive.function.client.WebClient.Builder], on which Boot's
      * `ObservationWebClientCustomizer` has already placed the host's `ObservationRegistry` (and observation
      * convention) - the factory does not wire the registry itself. This flag has two jobs: it gates the JVM-wide
      * Reactor context-propagation hook ([WebClientReactorContextPropagationConfiguration]), and when `false` it
@@ -186,8 +191,9 @@ data class WebClientProperties(
      * with no `ObservationRegistry` bean at all Boot wires nothing and it is a NOOP.
      *
      * This is DELIBERATELY self-contained: it resolves from this module's own property and from nothing else of
-     * the host, so the module traces its HTTP calls whatever else is on the classpath. The central switch for ALL WebClients of the host is Spring's `management.observations.enable.*` filter,
-     * which acts on the registry itself and is orthogonal to this flag.
+     * the host, so the module traces its HTTP calls whatever else is on the classpath. The central switch for ALL
+     * WebClients of the host is Spring's `management.observations.enable.*` filter, which acts on the registry
+     * itself and is orthogonal to this flag.
      *
      * @property httpObservationEnabled Default `false` (opt-in): the module traces its HTTP calls only when the
      *   operator asks for it. Safe to flip on even without a tracer present (NOOP).

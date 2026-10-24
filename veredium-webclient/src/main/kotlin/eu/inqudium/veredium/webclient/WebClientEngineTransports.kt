@@ -101,20 +101,20 @@ internal interface EngineTransport : EngineResources {
  * The lookup runs on the event loop: nothing for the loopback sidecar (`localhost`), a blocking DNS query for a
  * remote base URL.
  *
- * The loops are disposed [drainBound] after the pool, not with it: closing a loop group closes every channel on it
- * at once, and the pool disposal deliberately lets an in-flight call finish on its connection. No call outlives
- * that bound (it is longer than any response timeout), so the loops go
- * when nothing can still need them; the threads are daemons, so a JVM exiting before that is not held up.
+ * The loops are disposed [window] after the pool, not with it: closing a loop group closes every channel on it at
+ * once, and the pool disposal deliberately lets an in-flight call finish on its connection. No call outlives that
+ * window (it is longer than any response timeout), so the loops go when nothing can still need them; the threads
+ * are daemons, so a JVM exiting before that is not held up.
  */
 internal class ReactorNettyEngineTransport(
     properties: WebClientProperties,
     private val meshTransport: MeshProperties.Transport,
     poolName: String,
     /**
-     * The factory's drain bound, longer than any response timeout: the pool's graceful `disposeTimeout`, and how
+     * The factory's drain window, longer than any response timeout: the pool's graceful `disposeTimeout`, and how
      * long after the pool's disposal the loops are disposed.
      */
-    private val drainBound: Duration,
+    private val window: Duration,
     /** Waits for the pool's disposal, bounded by the time given - the factory's drain, which reports an expiry. */
     private val dispose: (Mono<Void>, Duration) -> Unit,
 ) : EngineTransport {
@@ -135,12 +135,12 @@ internal class ReactorNettyEngineTransport(
             .maxIdleTime(properties.pool.maxIdleTime)
             .maxLifeTime(properties.pool.maxLifeTime)
             .evictInBackground(properties.pool.evictInBackground)
-            // A GRACEFUL disposal, bounded by the factory's drain bound: without it `disposeLater()` fails every
+            // A GRACEFUL disposal, bounded by the factory's drain window: without it `disposeLater()` fails every
             // call still waiting for a connection at once (`PoolShutdownException`). With it the pool takes no new
             // acquire, serves the waiting ones and completes once every connection came back - or fails with a
-            // TimeoutException at the bound, which Reactor Netty logs at ERROR; the factory's own wait, bounded by
-            // what is left of the shared deadline, has reported the pool with a WARN before that.
-            .disposeTimeout(drainBound)
+            // TimeoutException at the window's end, which Reactor Netty logs at ERROR; the factory's own wait, bounded
+            // by what is left of the shared deadline, has reported the pool with a WARN before that.
+            .disposeTimeout(window)
             .metrics(true)
             .build()
 
@@ -177,14 +177,14 @@ internal class ReactorNettyEngineTransport(
             // Whatever the wait for the pool did - a disposal error included - the loops must still go.
             if (loopsScheduled.compareAndSet(false, true)) {
                 Mono
-                    .delay(drainBound)
+                    .delay(window)
                     .then(loops.disposeLater())
                     .subscribe()
             }
         }
     }
 
-    /** The pool is disposed; the loops follow [drainBound] later (class KDoc). */
+    /** The pool is disposed; the loops follow [window] later (class KDoc). */
     override val isClosed: Boolean get() = connectionProvider.isDisposed
 }
 
@@ -263,9 +263,9 @@ internal class JdkEngineTransport(
  * timeout.
  *
  * Mapped: connect timeout, `max-connections` (per destination, i.e. per remote address like Reactor Netty's
- * sub-pools), `pool.pending-acquire-max-count` (as the per-destination request queue beyond the connections,
- * see [jettyQueueCapacity]), `pool.max-idle-time`
- * (the connection idle timeout) and `pool.max-life-time` (the connection pool's maximum connection duration).
+ * sub-pools), `pool.pending-acquire-max-count` (as the per-destination request queue beyond the connections, see
+ * [jettyQueueCapacity]), `pool.max-idle-time` (the connection idle timeout) and `pool.max-life-time` (the connection
+ * pool's maximum connection duration).
  * Redirects are not followed and no cookie is stored, as with Reactor Netty.
  *
  * Not applied: `pending-acquire-timeout-ms` - Jetty has no timeout for a request waiting in its queue - and
@@ -418,8 +418,8 @@ private class AbortJettyOnBodyCancel(
  * request's `RequestConfig`.
  *
  * Mapped: connect timeout and `pool.max-life-time` (connection config), `max-connections` (per route, i.e. per
- * remote address, shared by the backends behind it; no total cap across routes), and `pool.max-idle-time` swept every
- * `pool.evict-in-background` by an idle-connection evictor this transport owns. Retries, redirects and cookie
+ * remote address, shared by the backends behind it; no total cap across routes), and `pool.max-idle-time` swept
+ * every `pool.evict-in-background` by an idle-connection evictor this transport owns. Retries, redirects and cookie
  * management are switched off, and the client speaks HTTP/1.1 only - each of these is on by default in Apache
  * and off in Reactor Netty, and an automatic retry would spend the mesh budget behind the TimeLimiter's back.
  *
@@ -606,8 +606,11 @@ internal class ApacheEngineTransport(
  */
 internal class ApacheEndpointConnector(
     private val client: AbortableAsyncClient,
-    // Not named `requestConfig`: inside the context's `apply` below that name resolves to the CONTEXT's own
-    // (still null) property, and the endpoint's timeouts would silently never reach the exchange.
+    /**
+     * The endpoint's timeouts, set on every exchange's context. Rationale: not named `requestConfig` - inside the
+     * context's `apply` in [connect] that name resolves to the CONTEXT's own (still null) property, and the
+     * endpoint's timeouts would silently never reach the exchange.
+     */
     private val endpointConfig: RequestConfig,
 ) : ClientHttpConnector {
     override fun connect(
