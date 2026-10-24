@@ -34,7 +34,11 @@ object Sidecar {
                 .withHeader("Host", equalTo("customers.example.com"))
                 .willReturn(okJson("""{"id":"c-1","name":"Ada"}""")),
         )
-        server.stubFor(get(urlEqualTo("/v1/customers/c-404")).willReturn(notFound()))
+        server.stubFor(
+            get(urlEqualTo("/v1/customers/c-404"))
+                .withHeader("Host", equalTo("customers.example.com"))
+                .willReturn(notFound()),
+        )
         server.stubFor(
             post(urlEqualTo("/v1/orders/search"))
                 .withHeader("Host", equalTo("orders.example.com"))
@@ -43,6 +47,7 @@ object Sidecar {
         )
         server.stubFor(
             post(urlEqualTo("/v1/orders/search"))
+                .withHeader("Host", equalTo("orders.example.com"))
                 .withRequestBody(equalToJson("""{"customerId":"c-404","limit":20}"""))
                 .willReturn(okJson("""{"orders":[]}""")),
         )
