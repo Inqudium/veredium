@@ -17,8 +17,9 @@ import tools.jackson.databind.json.JsonMapper
  * it selects the engine and forgets the flag.
  *
  * Runs in its own Surefire execution (`jdk-restricted-host-header` in the module POM), because the main test JVM
- * starts with the flag and the JDK reads it only once: no test in that JVM can see the restriction, and no test
- * may lift or impose it by setting the property, which would change every `java.net.http` client of the JVM.
+ * starts with the flag. Assumption: the JDK reads it only once (JDK 21) - so no test in that JVM can see the
+ * restriction, and no test may lift or impose it by setting the property, which would change every
+ * `java.net.http` client of the JVM.
  */
 class JdkEngineRestrictedHostHeaderTest {
     @Test

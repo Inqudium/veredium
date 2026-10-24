@@ -109,7 +109,10 @@ import java.util.zip.GZIPOutputStream
  */
 class WebClientEngineIntegrationTest {
     companion object {
-        /** The TimeLimiter budget of every case not ABOUT the budget - see `newFactory` there for why not 1 s. */
+        /**
+         * The TimeLimiter budget of every case not ABOUT the budget. Not 1 s: a call slowed by a loaded machine would
+         * then end in a TimeoutException, which the breaker records, and a case about something else would flake.
+         */
         private val GENEROUS_BUDGET: Duration = Duration.ofSeconds(30)
 
         /** The endpoints' anchor; the derived response timeout is 1000 + 200 + 200 = 1400 ms. */
@@ -122,7 +125,7 @@ class WebClientEngineIntegrationTest {
          */
         private const val LONG_ANCHOR_MS = 10_000L
 
-        /** The engines that report a failure of the exchange AFTER the TimeLimiter's abort, every time (client class KDoc). */
+        /** The engines that report a failure of the exchange AFTER the TimeLimiter's abort, every time. */
         private val REPORTS_FAILURE_AFTER_ABORT = setOf(WebClientEngine.JETTY, WebClientEngine.APACHE)
 
         /**
@@ -407,8 +410,9 @@ class WebClientEngineIntegrationTest {
         fun `should refuse a dripping body past the codec limit at once, dropping the connection`(engine: WebClientEngine) {
             // What is tested: what the codec's refusal of an over-limit body does to the exchange on each engine when
             //   the rest of the body is still on its way - the body-phase cancellation (Jetty: AbortJettyOnBodyCancel).
-            // Success criteria: against a backend that sends the head and 4 KiB of a declared 1 MiB body at once and
-            //   then one byte every 200 ms, a 1 KiB limit and a generous budget, the call fails with
+            // Success criteria: against a backend that sends the head and `DrippingBackend.FIRST_CHUNK_BYTES` of a
+            //   body declared `DrippingBackend.DECLARED_LENGTH` long at once and then one byte every
+            //   `DrippingBackend.DRIP_INTERVAL`, a 1 KiB limit and a generous budget, the call fails with
             //   DataBufferLimitException as its root cause within 2 s, and the backend sees its connection dropped
             //   within 2 s - except on the JDK client, which has no way to abort an exchange once its head arrived:
             //   cancelling its body subscription only unregisters the subscriber, the client reads the rest. For it
@@ -456,8 +460,8 @@ class WebClientEngineIntegrationTest {
             //   body drips, nothing on the client refuses it.
             // Success criteria: against the dripping backend, a 1 s budget and the default codec limit, the call
             //   fails with a TimeoutException within 2.5 s, and the backend sees its connection dropped within 2 s -
-            //   except on the JDK client, which reads a cancelled body on (see the codec case above); for it the case
-            //   pins that the connection is NOT dropped.
+            //   except on the JDK client, which reads a cancelled body on (see the dripping-body codec-limit case);
+            //   for it the case pins that the connection is NOT dropped.
             // Why it matters: the body is the phase no per-read timeout bounds as a whole - a peer that drips passes
             //   every one - so the TimeLimiter's cancellation is what ends it, and only if it reaches the engine's
             //   exchange does the connection come back instead of being held for as long as the peer sends.
@@ -812,8 +816,8 @@ class WebClientEngineIntegrationTest {
                         ),
                 )
             val factory = newFactory(WebClientProperties.Engine(default = WebClientEngine.REACTOR_NETTY), listOf("uri-tag"), mesh = mesh)
-            // Reactor Netty registers these meters in Micrometer's global registry, for the whole JVM; this case
-            // reads them there and takes its own out again afterwards.
+            // Assumption: Reactor Netty registers these meters in Micrometer's global registry, for the whole JVM
+            // (reactor-netty 1.3.7); this case reads them there and takes its own out again afterwards.
             val probeMeters = {
                 Metrics.globalRegistry.meters.filter { meter ->
                     meter.id.name.startsWith(REACTOR_NETTY_CLIENT_METERS) && meter.id.getTag("uri") in setOf(template, called)
@@ -1276,9 +1280,10 @@ class WebClientEngineIntegrationTest {
                     )
                 val client = factory.create("queued")
                 val waiting = if (engine == WebClientEngine.JETTY) 2 else 1
-                // The holder first, and the others only once it is ON its connection: on a cold pool Jetty keeps the
-                // holder in its queue until the connection is open, so a burst would meet the queue's cold-pool
-                // capacity (max-connections + the count) instead of the count behind a busy connection.
+                // The holder first, and the others only once it is ON its connection. Assumption: on a cold pool
+                // Jetty keeps the holder in its queue until the connection is open (jetty-client 12.1.12), so a burst
+                // would meet the queue's cold-pool capacity (max-connections + the count) instead of the count behind
+                // a busy connection.
                 val held = mutableListOf(client.get(Greeting::class.java) { it.uri("/held") }.toFuture())
                 try {
                     assertThat(backend.requestArrived.await(5, TimeUnit.SECONDS)).`as`("the first call holds the connection").isTrue()

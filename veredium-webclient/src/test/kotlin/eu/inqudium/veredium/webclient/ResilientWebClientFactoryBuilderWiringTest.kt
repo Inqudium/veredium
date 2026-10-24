@@ -160,9 +160,9 @@ class ResilientWebClientFactoryBuilderWiringTest {
             //   meter at all.
             // Why it matters: the toggle is the module's only way to keep its own clients unobserved while the
             //   host observes everything else; a factory that kept Boot's registry regardless would pass the
-            //   test above and ignore the operator's choice here.
+            //   observation-per-request test and ignore the operator's choice here.
             //
-            // Given: the toggle OFF, the same registry bean and the same Boot customizer as above
+            // Given: the toggle OFF, the registry bean and Boot customizer of the observation-per-request test
             val meterRegistry = SimpleMeterRegistry()
             factoryContext(observationEnabled = false, meterRegistry = meterRegistry)
                 .withBootsWebClientAutoConfiguration()
@@ -195,8 +195,8 @@ class ResilientWebClientFactoryBuilderWiringTest {
                 .run { context ->
                     // Then: it fails, and the failure names the missing bean type AND the bean that needed it - a
                     // required parameter, so Spring reports the absence instead of silently constructing on a bare
-                    // builder. Spring prints the JVM binary name of the nested interface, WebClient$Builder, and
-                    // the bean by its decapitalised default name.
+                    // builder. Assumption: Spring prints the JVM binary name of the nested interface,
+                    // WebClient$Builder, and the bean by its decapitalised default name (spring-beans 7.0.9).
                     assertThat(context).hasFailed()
                     assertThat(context.startupFailure)
                         .hasMessageContainingAll("WebClient\$Builder", "'resilientWebClientFactory'")

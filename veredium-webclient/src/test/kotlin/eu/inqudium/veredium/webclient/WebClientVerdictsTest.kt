@@ -77,12 +77,13 @@ class WebClientVerdictsTest {
 
         @Test
         fun `should still count a genuine backend error as a circuit-breaker failure`() {
-            // What is tested: the counterpart that keeps the test above honest - the customized config must ignore
-            //   ONLY the client-side failures, not disable failure recording as such.
+            // What is tested: the counterpart that keeps the bulkhead-rejection test honest - the customized config
+            //   must ignore ONLY the client-side failures, not disable failure recording as such.
             // Success criteria: a plain backend error through the same decorated pipeline advances the
             //   failed-call counter to exactly one.
             // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
-            //   it disables the protection silently - would satisfy the zero-failure assertion above.
+            //   it disables the protection silently - would satisfy the bulkhead-rejection test's zero-failure
+            //   assertion.
             //
             // Given: the same wiring, with the customizer applied
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
@@ -132,14 +133,14 @@ class WebClientVerdictsTest {
 
         @Test
         fun `should still record a genuine backend failure that carries a large error body`() {
-            // What is tested: the boundary of the cause walk - that discounting buffer failures does not leak
-            //   into discounting real ones.
-            // Success criteria: a 5xx is recorded, including one whose error body is large. Measured
-            //   beforehand: such a response yields a plain WebClientResponseException with NO
-            //   DataBufferLimitException underneath, because Spring does not fail on an oversized error body.
-            // Why it matters: this is the failure mode that would make the whole breaker useless - if a 5xx
-            //   ever started carrying a buffer failure as its cause, the cause walk would silently discount
-            //   genuine outages. Nothing in the code prevents that; this test is what would catch it.
+            // What is tested: the boundary of the cause walk at the PREDICATE - that discounting buffer failures
+            //   does not leak into discounting real ones.
+            // Success criteria: the customized breaker does not ignore a hand-built 500 WebClientResponseException
+            //   carrying a 64 KiB error body, nor a TimeoutException.
+            // Why it matters: a 5xx stays a failure, whatever its body size. This test checks only the rule, on an
+            //   exception it builds itself; whether Spring's real exception for an oversized error body keeps that
+            //   shape is pinned through the pipeline by ResilientWebClientIntegrationTest ("should record a 5xx
+            //   whose error body exceeds the buffer limit as a breaker failure").
             //
             // Given
             val circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults()
@@ -205,7 +206,7 @@ class WebClientVerdictsTest {
             // What is tested: the counterpart of the 404 case through the same decorated pipeline.
             // Success criteria: a 500 fails the call and advances the failed-call counter to exactly one.
             // Why it matters: without this, a breaker that recorded nothing at all - the far worse defect, since
-            //   it disables the protection silently - would satisfy the zero-failure assertion above.
+            //   it disables the protection silently - would satisfy the 404 test's zero-failure assertion.
             //
             // Given
             val registry = CircuitBreakerRegistry.ofDefaults()
