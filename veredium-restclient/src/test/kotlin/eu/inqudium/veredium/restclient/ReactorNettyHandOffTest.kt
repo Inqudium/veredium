@@ -17,6 +17,10 @@ import java.util.concurrent.TimeUnit
  * The hand-off of the Reactor Netty engine's two blocking waits ([ReactorNettyEngineTransport.handOff]), over a
  * wait that nothing but an interrupt ends - the case no real exchange produces on demand: an exchange whose end
  * the disposed event loops never signal.
+ *
+ * That the engine runs its head wait through this hand-off, and shuts its offload executor down, is pinned at the
+ * engine in `RestClientEngineIntegrationTest` (`The shutdown`), with the event loops held so that nothing else can
+ * end the call.
  */
 class ReactorNettyHandOffTest {
     private val offload: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()

@@ -175,23 +175,30 @@ class LegatiumExchangeLoggingIntegrationTest {
         fun `should write exactly one event on the library's logger with the backend name and the template`() {
             // What is tested: the wiring end to end for the plain case - one GET through a client of the factory
             //   in a host-shaped context produces legatium's exchange event.
-            // Success criteria: the event is on `adapter-http-exchange`, INFO / success / 200, carries the backend
-            //   name as `adapter_name` and the mesh TEMPLATE as `adapter_url_template`, and was written on the
-            //   decorator's worker thread.
+            // Success criteria: after a second, fencing exchange of the same backend, the GET left exactly one
+            //   event; it is on `adapter-http-exchange`, INFO / success / 200, carries the backend name as
+            //   `adapter_name` and the mesh TEMPLATE as `adapter_url_template`, and was written on the decorator's
+            //   worker thread.
             // Why it matters: the event reaches the factory's clients only through Boot's builder bean, and the
             //   backend name only through a request attribute; either missing makes every exchange anonymous on
             //   the dashboards built on this event.
             //
             // Given: a host context and a 200 answer
             wireMock.stubFor(get(urlEqualTo("/things/42")).willReturn(okJson("""{"message":"hi"}""")))
+            wireMock.stubFor(post(urlEqualTo("/things/43")).willReturn(okJson("""{"message":"fence"}""")))
             hostContext("things").run { context ->
                 capturing(backend = "things") { appender ->
-                    // When: one GET through a client of the factory
-                    context.client("things").get(Greeting::class.java) { it.uri("/things/42") }
+                    // When: one GET through a client of the factory, then a POST as the ordering fence - awaiting
+                    // ITS event means anything the GET was going to emit has had its turn
+                    val client = context.client("things")
+                    client.get(Greeting::class.java) { it.uri("/things/42") }
+                    client.post(Greeting::class.java, LookupRequest("fence")) { it.uri("/things/43").contentType(MediaType.APPLICATION_JSON) }
 
-                    // Then: one event, on the library's logger, INFO / success, naming the backend and the
-                    // template - the two fields a log query groups by - written on the decorator's worker
-                    val event = appender.awaitEvents().last()
+                    // Then: one event for the GET, on the library's logger, INFO / success, naming the backend and
+                    // the template - the two fields a log query groups by - written on the decorator's worker
+                    val events = appender.awaitEvents { it.formattedMessage.startsWith("Adapter http exchange POST ") }
+                    assertThat(events).`as`("the GET's events and the fence's").hasSize(2)
+                    val event = events.single { it.formattedMessage.startsWith("Adapter http exchange GET ") }
                     assertThat(event.loggerName).isEqualTo(EXCHANGE_LOGGER)
                     assertThat(event.level).isEqualTo(Level.INFO)
                     assertThat(event.formattedMessage).startsWith("Adapter http exchange GET ").contains("things -> 200")

@@ -16,7 +16,9 @@ import java.util.Arrays;
  *       the body itself, byte for byte;</li>
  *   <li>{@code readTruncated} returns the prefix of length {@code min(length, limit)};</li>
  *   <li>neither takes more from the stream than it may: {@code limit + 1} bytes (the probe that tells "at the
- *       limit" from "past it") for {@code readOrNull}, {@code limit} for {@code readTruncated};</li>
+ *       limit" from "past it") for {@code readOrNull}, {@code limit} for {@code readTruncated} - or
+ *       {@code limit + 1} when the declared length IS the limit, where one probe read sees whether the body ended
+ *       there, so the engines' close does not discard a connection that has nothing left on it;</li>
  *   <li>the declared length never changes a result - it only sizes the first buffer.</li>
  * </ul>
  * The stream returns short reads of fuzzer-chosen sizes, zero-length reads included (never two in a row, so the
@@ -35,8 +37,9 @@ class BoundedBodyReaderFuzzTest {
         // Success criteria: for both reads of the same input, no read throws, and (1) readOrNull returns null
         //   exactly when the body is longer than the limit and otherwise the body byte for byte; (2)
         //   readTruncated returns the prefix of length min(length, limit); (3) readOrNull takes at most
-        //   limit + 1 bytes from the stream and readTruncated at most limit; (4) the declared length never
-        //   changes a result - the expected values of (1) and (2) ignore it.
+        //   limit + 1 bytes from the stream and readTruncated at most limit (limit + 1 when the declared length
+        //   equals the limit: the one probe read that sees a body complete at the limit end); (4) the declared
+        //   length never changes a result - the expected values of (1) and (2) ignore it.
         // Why it matters: the limit is the only memory bound on a response the peer controls, and its meaning
         //   downstream - which exception, which breaker verdict - rests on the exact byte it is drawn at. A
         //   reader that loses or duplicates a piece across short reads, or miscounts at a buffer boundary,
@@ -83,8 +86,11 @@ class BoundedBodyReaderFuzzTest {
                 "readTruncated did not return the prefix of length min(length, limit)",
                 body,
                 limit);
+        // The probe read past a body that declared exactly the limit: it finds the end of a complete body, and
+        // takes one byte of a body longer than it declared (a lying peer) - never more.
+        long truncatedMayTake = declaredLength == limit ? limit + 1L : limit;
         require(
-                prefix.taken <= limit,
+                prefix.taken <= truncatedMayTake,
                 "readTruncated took " + prefix.taken + " bytes from the stream",
                 body,
                 limit);

@@ -1,5 +1,7 @@
 package eu.inqudium.veredium.restclient
 
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.equalTo
 import com.github.tomakehurst.wiremock.client.WireMock.get
@@ -7,10 +9,16 @@ import com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.okJson
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig
+import eu.inqudium.legatium.restclient.logging.ClientLoggingAutoConfiguration
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
+import eu.inqudium.veredium.testsupport.Greeting
+import eu.inqudium.veredium.testsupport.capturing
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
+import io.github.resilience4j.springboot.bulkhead.autoconfigure.BulkheadAutoConfiguration
+import io.github.resilience4j.springboot.circuitbreaker.autoconfigure.CircuitBreakerAutoConfiguration
+import io.github.resilience4j.springboot.timelimiter.autoconfigure.TimeLimiterAutoConfiguration
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler
@@ -21,11 +29,14 @@ import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.AutoConfigurations
+import org.springframework.boot.jackson.autoconfigure.JacksonAutoConfiguration
 import org.springframework.boot.restclient.RestClientCustomizer
 import org.springframework.boot.restclient.autoconfigure.RestClientAutoConfiguration
 import org.springframework.boot.restclient.autoconfigure.RestClientObservationAutoConfiguration
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.springframework.core.env.MapPropertySource
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
@@ -52,7 +63,9 @@ import java.util.function.Supplier
  * The contexts are driven with an [ApplicationContextRunner] - a real Spring context, no mocks - and the
  * backend is a local WireMock on a dynamic port, as in `ResilientRestClientIntegrationTest`. No inner
  * `@Configuration` class: every bean is registered on the runner, so nothing here can leak into another
- * test's component scan.
+ * test's component scan. The factory is registered on the runner too, except in `The module's auto-configuration`,
+ * whose contexts load [VerediumRestClientAutoConfiguration] - the bean method a host runs - and make a call through
+ * the factory it builds.
  */
 class ResilientRestClientFactoryBuilderWiringTest {
     companion object {
@@ -61,6 +74,9 @@ class ResilientRestClientFactoryBuilderWiringTest {
         private const val PROBE_HEADER = "X-Wiring-Probe"
         private const val PROBE_VALUE = "from-host-customizer"
         private const val HTTP_CLIENT_OBSERVATION = "http.client.requests"
+
+        /** legatium's exchange logger, as the reference application.yml names it. */
+        private const val EXCHANGE_LOGGER = "adapter-http-exchange"
 
         private lateinit var wireMock: WireMockServer
 
@@ -183,6 +199,82 @@ class ResilientRestClientFactoryBuilderWiringTest {
         }
     }
 
+    @Nested
+    inner class `The module's auto-configuration` {
+        @Test
+        fun `should send a call through the factory the auto-configuration builds, with the host's builder, registry and exchange log`() {
+            // What is tested: the factory as a host gets it - built by VerediumRestClientAutoConfiguration's bean
+            //   method, next to Boot's RestClient, Jackson and Resilience4j auto-configurations, legatium's
+            //   auto-configuration, a host RestClientCustomizer bean and a host MeterRegistry - driven by one call.
+            // Success criteria: the call returns the backend's value; the host customizer's marker header reached
+            //   the backend; the host registry carries the factory's `restclient.response.body.size` summary with
+            //   the one call's sample; legatium wrote one INFO / success exchange event naming the backend.
+            // Why it matters: every other context that makes a call builds the factory itself (withBean). The
+            //   bean method is what hosts run, and what it hands the factory - Boot's builder bean rather than a
+            //   builder of its own, the host's registry rather than none - is invisible at runtime: a wrong
+            //   argument there silently costs every client the host's customizers, the exchange event and the
+            //   body-size meter, while each case above stays green.
+            //
+            // Given: the module's auto-configuration as a host loads it, plus a host customizer and registry
+            wireMock.resetRequests()
+            val meterRegistry = SimpleMeterRegistry()
+            val exchangeLogger = LoggerFactory.getLogger(EXCHANGE_LOGGER) as Logger
+            autoConfiguredContext()
+                .withBean(SimpleMeterRegistry::class.java, Supplier { meterRegistry })
+                .withBean(
+                    RestClientCustomizer::class.java,
+                    Supplier { RestClientCustomizer { builder -> builder.defaultHeader(PROBE_HEADER, PROBE_VALUE) } },
+                ).run { context ->
+                    assertThat(context).hasNotFailed()
+                    capturing(exchangeLogger, level = Level.INFO) { exchanges ->
+                        // When: one call through a client of the context's factory
+                        val answer = context.getBean(ResilientRestClientFactory::class.java).create(BACKEND).get(Greeting::class.java) { it.uri(PROBE_PATH) }
+
+                        // Then: the answer, the host's header on the wire, the host's meter, and the exchange event
+                        assertThat(answer.message).isEqualTo("hi")
+                        wireMock.verify(getRequestedFor(urlEqualTo(PROBE_PATH)).withHeader(PROBE_HEADER, equalTo(PROBE_VALUE)))
+                        val bodySize = meterRegistry.find(RestClientMetrics.RESPONSE_BODY_SIZE).summary()
+                        assertThat(bodySize).`as`("the body-size summary in the host's registry").isNotNull()
+                        assertThat(bodySize!!.count()).isEqualTo(1L)
+                        val event = exchanges.awaitEvents().single()
+                        assertThat(event.level).isEqualTo(Level.INFO)
+                        assertThat(event.formattedMessage).contains("$BACKEND -> 200")
+                        assertThat(event.keyValuePairs.orEmpty()).anyMatch { it.key == "adapter_name" && it.value == BACKEND }
+                    }
+                }
+        }
+
+        @Test
+        fun `should fail the start naming RestClient Builder when the host has no builder bean`() {
+            // What is tested: the module's auto-configuration without Boot's RestClient auto-configuration, so
+            //   without a `RestClient.Builder` bean.
+            // Success criteria: the context fails to start, naming `RestClient$Builder` and the factory bean
+            //   'resilientRestClientFactory'.
+            // Why it matters: the case above shows the builder bean is used when there is one; this one, that the
+            //   bean method does not fall back to a bare builder when there is none - a host that excluded Boot's
+            //   auto-configuration would otherwise run without its customizers and the exchange log, unannounced.
+            //
+            // Given: everything the case above loads but Boot's RestClient auto-configuration
+            ApplicationContextRunner()
+                .withInitializer { context -> context.environment.propertySources.addFirst(MapPropertySource("probe-mesh", meshKeys())) }
+                .withConfiguration(
+                    AutoConfigurations.of(
+                        TimeLimiterAutoConfiguration::class.java,
+                        CircuitBreakerAutoConfiguration::class.java,
+                        BulkheadAutoConfiguration::class.java,
+                        JacksonAutoConfiguration::class.java,
+                        VerediumRestClientAutoConfiguration::class.java,
+                    ),
+                )
+                // When: the context starts
+                .run { context ->
+                    // Then
+                    assertThat(context).hasFailed()
+                    assertThat(context.startupFailure).hasMessageContainingAll("RestClient\$Builder", "'resilientRestClientFactory'")
+                }
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------
@@ -239,6 +331,40 @@ class ResilientRestClientFactoryBuilderWiringTest {
                 },
             ).withBean(ResilientRestClientFactory::class.java)
     }
+
+    /**
+     * A host's context as the module's auto-configuration meets it: Resilience4j's three Boot auto-configurations,
+     * Boot's Jackson and RestClient auto-configurations, legatium's, and [VerediumRestClientAutoConfiguration] - which
+     * binds `app.mesh` and `app.restclient`, registers the mesh customizers and the startup guard, and builds the
+     * decorator and the factory. The mesh is the one probe endpoint against WireMock, declared on all three
+     * Resilience4j layers so the guard lets the context start.
+     */
+    private fun autoConfiguredContext(): ApplicationContextRunner =
+        ApplicationContextRunner()
+            .withInitializer { context -> context.environment.propertySources.addFirst(MapPropertySource("probe-mesh", meshKeys())) }
+            .withConfiguration(
+                AutoConfigurations.of(
+                    TimeLimiterAutoConfiguration::class.java,
+                    CircuitBreakerAutoConfiguration::class.java,
+                    BulkheadAutoConfiguration::class.java,
+                    JacksonAutoConfiguration::class.java,
+                    RestClientAutoConfiguration::class.java,
+                    ClientLoggingAutoConfiguration::class.java,
+                    VerediumRestClientAutoConfiguration::class.java,
+                ),
+            )
+
+    /** `app.mesh` with the probe endpoint against WireMock, and its Resilience4j instances on all three layers. */
+    private fun meshKeys(): Map<String, Any> =
+        mapOf(
+            "app.mesh.defaults.individual-request-timeout-ms" to "1000",
+            "app.mesh.defaults.transport.sidecar-base-url" to wireMock.baseUrl(),
+            "app.mesh.endpoints[0].triplet" to "/endpoint/localhost/GET/$BACKEND",
+            "app.mesh.endpoints[0].alias" to BACKEND,
+            "resilience4j.timelimiter.instances.$BACKEND.cancel-running-future" to "true",
+            "resilience4j.circuitbreaker.instances.$BACKEND.sliding-window-size" to "100",
+            "resilience4j.bulkhead.instances.$BACKEND.max-concurrent-calls" to "25",
+        )
 
     /** Boot's RestClient auto-configuration, which provides the builder bean and the observation customizer. */
     private fun ApplicationContextRunner.withBootsRestClientAutoConfiguration(): ApplicationContextRunner =
