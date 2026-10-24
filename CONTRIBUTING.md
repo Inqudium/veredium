@@ -93,10 +93,18 @@ the UI with a written reason.
 - A comment that states an invariant, an assumption about a third party, a workaround, a
   rejected alternative, a guard's purpose or a compatibility constraint opens that sentence
   with a prefix (`Invariant:`, `Assumption:`, `Workaround:`, `Rationale:`, `Safety:`,
-  `Compatibility:`), so `grep -rn "Assumption:" */src/main` is the checklist of a dependency
-  bump and `Invariant:` the module's invariant catalog. One prefix per statement, on the
-  sentence that makes it - most comments carry none. (The convention of the sibling
+  `Compatibility:`), so `grep -rn "Assumption:\|Workaround:" */src/main` is the checklist of a
+  dependency bump and `Invariant:` the module's invariant catalog. One prefix per statement, on
+  the sentence that makes it - most comments carry none. (The convention of the sibling
   projects; legatium's ADR-0013 states it in full.)
+  - The rule holds for KDoc as for `//` comments: a sentence about a dependency's behaviour is
+    on the checklist wherever it is written.
+  - `Workaround:` is code that exists only because a dependency or the platform misbehaves - it
+    goes when that is fixed. `Assumption:` is a fact about a dependency or the platform that the
+    code relies on - it must be rechecked when that dependency changes. Name the version the
+    statement was checked against where the behaviour is version-bound.
+  - `Invariant:` is a property the code keeps true. A rejected alternative is a `Rationale:`, even
+    when a type already enforces it.
 
 ### Tests
 
