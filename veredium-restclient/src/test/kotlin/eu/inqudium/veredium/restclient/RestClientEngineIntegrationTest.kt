@@ -278,9 +278,8 @@ class RestClientEngineIntegrationTest {
             //   fails not before the response timeout and well before 2.5 s, each engine with the failure it raises
             //   there: a ResourceAccessException over Apache's SocketTimeoutException and Jetty's TimeoutException
             //   (the head's types); over an IOException of the cancelled body on the JDK, whose timeout in the body
-            //   phase is Spring's handler closing the stream - no HttpTimeoutException; and on Reactor Netty Netty's
-            //   bare ReadTimeoutException, NOT wrapped - the shape the engine has at this point, pinned so that a
-            //   change to it is a deliberate one.
+            //   phase is Spring's handler closing the stream - no HttpTimeoutException; and over an IOException
+            //   around Netty's ReadTimeoutException on Reactor Netty, as during the head wait.
             // Why it matters: every other response-timeout case delays the head. The guide promises the rung for
             //   the body as well - over head and body (JDK, Jetty), until the response is complete (Reactor Netty),
             //   per read (Apache); an upgrade that made one of them a head-only bound would leave a stalled body to
@@ -315,11 +314,11 @@ class RestClientEngineIntegrationTest {
                         assertThat(causeChain(failure)).noneMatch { it is HttpTimeoutException }
                     }
 
-                    // Netty's ReadTimeoutException is unchecked, so Spring's body stream rethrows it as it is, and the
-                    // engine's body read unwraps only the failures it finds wrapped: it passes Spring's IOException
-                    // handling, unlike the same timeout during the head wait.
+                    // Netty's ReadTimeoutException is unchecked; the engine's body read wraps it in an IOException,
+                    // so it reaches Spring's transport-fault handling like the same timeout during the head wait.
                     RestClientEngine.REACTOR_NETTY -> {
-                        assertThat(failure).isInstanceOf(ReadTimeoutException::class.java)
+                        assertThat(failure).isInstanceOf(ResourceAccessException::class.java).hasCauseInstanceOf(IOException::class.java)
+                        assertThat(causeChain(failure)).anyMatch { it is ReadTimeoutException }
                     }
                 }
             }
