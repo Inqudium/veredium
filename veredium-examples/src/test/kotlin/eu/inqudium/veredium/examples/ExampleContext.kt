@@ -11,8 +11,8 @@ import kotlin.reflect.KClass
  * ([Sidecar.Properties]), and injects its beans through the test class's constructor.
  *
  * Every example's context runs in one test JVM, so none joins Micrometer's global registry: a context would join it
- * after another one had registered meters there, and Micrometer warns about that. A single host does not need the
- * setting.
+ * after another one had registered meters there. Assumption: Micrometer (1.17.1) warns about that. A single host does
+ * not need the setting.
  */
 @Target(AnnotationTarget.CLASS)
 @Retention(AnnotationRetention.RUNTIME)
