@@ -86,7 +86,7 @@
 
     <properties>
         <!-- CI-Friendly Version -->
-        <revision>0.1.0-SNAPSHOT</revision>
+        <revision>1.0.0</revision>
 
         <!-- Encoding -->
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -111,7 +111,7 @@
             Bumped in every release commit to the release date - the value
             only has to change per release, never per build.
         -->
-        <project.build.outputTimestamp>2026-10-19T00:00:00Z</project.build.outputTimestamp>
+        <project.build.outputTimestamp>2026-10-24T00:00:00Z</project.build.outputTimestamp>
 
         <!-- Third Party Dependencies -->
         <!-- Jackson 3 above the Spring Boot 4.1.1 BOM's 3.1.5: 3.1.7 fixes the OSV findings against

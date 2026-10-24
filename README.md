@@ -85,7 +85,7 @@ bytecode target the artifacts run on - the build itself needs JDK 24+.
 
 | Veredium | Spring Boot | Kotlin | Java |
 |---|---|---|---|
-| (unreleased) | 4.1.x | 2.4.x | 21 |
+| 1.0.0 | 4.1.x | 2.4.x | 21 |
 
 ## Build
 
