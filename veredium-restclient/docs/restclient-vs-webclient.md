@@ -161,7 +161,9 @@ codec counts).
 - `exchange` applies no status handlers, so the status decision is taken the way Spring's default handler takes it:
   a 4xx becomes `HttpClientErrorException.<Status>`, a 5xx `HttpServerErrorException.<Status>`, with status,
   headers, the (truncated) body and a message that previews it (capped at 200 characters; the whole body stays on
-  the exception).
+  the exception). A 1xx or 3xx - no engine follows a redirect - becomes a plain `RestClientResponseException` with
+  its status, never a body to decode; the twin does the same through an `onStatus` handler, since `retrieve()`
+  alone raises only for a 4xx/5xx.
 
 Successful bodies contribute their UTF-8 byte size to `restclient.response.body.size{adapter="<alias>"}`.
 

@@ -243,7 +243,8 @@ Part of these entries resolve the findings of `docs/assessment/CODE_STYLE-2026-1
   auto-configuration (`VerediumRestClientAutoConfiguration`, `VerediumWebClientAutoConfiguration`) instead of
   relying on a component scan of `eu.inqudium.veredium.restclient` / `.webclient`. The dependency alone wires the
   factory, the decorator, the observation report and the mesh wiring; each bean backs off for a host's own. A host
-  with both modules on its classpath excludes one auto-configuration (ADR-0003). `RestClientConfiguration` and
+  with both modules on its classpath runs both stacks in one context, each endpoint naming its stack (ADR-0003).
+  `RestClientConfiguration` and
   `WebClientConfiguration` are gone; `ReactiveResilienceDecorator` is a bean of the auto-configuration like the
   blocking one.
 - `veredium-core`: a stack hands its `BreakerVerdicts` to the shared mesh wiring as an object instead of

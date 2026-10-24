@@ -684,5 +684,5 @@ behave differently from what one would expect:
   responses.
 - **A connect timeout needs a listening socket that does not answer.** A `ServerSocket` with a backlog of 1 whose
   accept queue has been filled makes Linux drop further SYNs, so the connect hangs until the client gives up.
-  Blocking: `BlackholeBackend`. Reactive: `UnansweredConnectBackend`, which skips the case where the platform does
+  Both stacks use `UnansweredConnectBackend` (`veredium-test-support`), which skips the case where the platform does
   not drop the SYNs.
