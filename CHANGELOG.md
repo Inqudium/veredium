@@ -428,7 +428,7 @@ Part of these entries resolve the findings of `docs/assessment/CODE_STYLE-2026-1
   carries the POM-derived implementation entries so the token names the release (reproducible: no build
   JDK or user enters the manifest).
 
-#### Documentation and code style - 2026-10-23
+#### Documentation and code style - 2026-10-23 to 2026-10-24
 
 - `ADR-0004` records the selectable HTTP engines as wanted functionality.
 - Docs: the guides of `veredium-core` and `veredium-restclient` follow the code again - an abandoned blocking call
@@ -442,6 +442,24 @@ Part of these entries resolve the findings of `docs/assessment/CODE_STYLE-2026-1
   and the reference-configuration loader of `veredium-test-support`; the example tests use constructor injection
   and one shared context annotation. **CI:** two new checks reject words of the origin project in `veredium-*/src`
   and a veredium class named in production KDoc by its full name in backticks instead of a link.
+- Code style analysis of 2026-10-24 (`docs/assessment/CODE_STYLE-2026-10-24T14-14-45.md`, 63 findings):
+  - **Startup line:** the breaker's policy line now says what it installs - benign 4xx are counted as a success,
+    not ignored; its test pins the wording.
+  - **Prose follows the code:** the per-engine pools (Reactor Netty: one sub-pool per backend) in
+    `WebClientProperties.pool`, the webclient reference YAML and the core's `mesh-timeout.md`; ADR-0003 (both stacks
+    in one host) in the startup guard's KDoc and `restclient-vs-webclient.md`; ADR-0004 in the README, the site
+    index and `BaseAdapter`; the 1xx/3xx contract in `ResilientRestClient`'s KDoc; the response-timeout exception per
+    engine and phase in the blocking timeout guide; the drain KDoc after the interrupt-safe wait.
+  - **One name per concept:** the drain window is `drainWindow`/`window` on both stacks; the internal engine-name
+    constants of the blocking transports are `ENGINE_NAME`.
+  - **Logging guide:** the webclient's `logging-guide.md` keeps only what is current; the superseded diary design
+    moved to `logging-history.md`, which the site does not publish.
+  - **Test helpers:** the shared log-field, bulkhead and verdict helpers live once in `veredium-test-support`;
+    helpers only one module uses (`SilentBackend`, `leapingClock`) moved to it.
+  - **Idioms:** typed `const val`, `require` instead of a thrown `IllegalArgumentException`, `if` instead of
+    `takeIf`/`?.let` chains, `@Nested` groups, links instead of backticks, and a bounded cause walk shared from the
+    core (`ClientSideFailurePolicy.causeChain`).
+  - `MixedCustomerAdapter` implements `BaseAdapter`; `CHANGELOG.md` has its `## [Unreleased]` heading.
 
 #### Build and CI - 2026-10-23
 
