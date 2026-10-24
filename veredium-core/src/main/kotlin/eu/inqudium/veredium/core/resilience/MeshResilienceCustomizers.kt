@@ -19,18 +19,18 @@ import org.springframework.core.env.Environment
 internal const val SLOW_CALL_RATE_PIN_PERCENT: Float = 100f
 
 /**
- * The customizer of [endpoint]'s circuit breaker: the three verdicts of [verdicts], plus the mesh-derived
- * slow-call knobs when the endpoint has the circuit-breaker derivation enabled.
+ * The customizer of [endpoint]'s circuit breaker: the two verdicts of [verdicts], which sort every error into one
+ * of three outcomes (the terms are defined on [BreakerVerdicts]), plus the mesh-derived slow-call knobs when the
+ * endpoint has the circuit-breaker derivation enabled.
  *
- * ## Three verdicts, not two
+ * ## Three outcomes, not two
  *
- * Resilience4j has three answers for an error - recorded, ignored, success - and the breaker's error hook
- * records EVERY exception unless the config says otherwise, with an empty ignore list by default. Out of the
- * box the breaker therefore charges the backend for faults it never caused and opens the circuit while the
- * backend is perfectly healthy. The two predicates sort every error the same way (`answered-means-healthy`,
- * `veredium-restclient/docs/decisions.md` D2):
+ * Assumption: Resilience4j (2.4.0) has three outcomes for an error - recorded, ignored, success - and the
+ * breaker's error hook records EVERY exception unless the config says otherwise, with an empty ignore list by
+ * default. Out of the box the breaker therefore charges the backend for faults it never caused and opens the
+ * circuit while the backend is perfectly healthy. The two verdicts sort every error into an outcome:
  *
- * | The call | Verdict |
+ * | The call | Outcome |
  * |---|---|
  * | never reached the backend, or the caller stopped waiting ([ClientSideFailurePolicy.clientSideFailures], as a cause too) | **ignored** - evidence in neither direction |
  * | reached it and got a benign 4xx ([HttpExchangeErrorPolicy.isExpectedClientError]) | **success** - the backend answered, promptly and correctly |
@@ -40,20 +40,20 @@ internal const val SLOW_CALL_RATE_PIN_PERCENT: Float = 100f
  * also keeps it out of the sliding window, so on a 4xx-dominated backend the window fills with whatever was
  * left over and a few genuine faults become its entire content, until the breaker opens at a nominal 100 %
  * failure rate on a handful of timeouts (the measured case is recorded under D2, "Answered means healthy", in
- * `veredium-restclient/docs/decisions.md`). A 4xx is positive evidence that the backend is alive and serving, and enters the window as such. What
- * stays IGNORED is the call that carries no evidence about the backend at all.
+ * `veredium-restclient/docs/decisions.md`). A 4xx is positive evidence that the backend is alive and serving,
+ * and enters the window as such. What stays IGNORED is the call that carries no evidence about the backend at all.
  *
  * ## Additive, not replacing
  *
- * `ignoreException(predicate)` and `recordException(predicate)` REPLACE the predicate the builder holds, and the
- * builder holds what the operator wrote into YAML (`ignore-exceptions`, `record-exceptions`, the predicate
- * classes). The customizer therefore reads the config the builder would produce as it stands and folds it back
- * in: the ignore predicate is OR-ed (the breaker ignores MORE), the record predicate is AND-ed (it records
+ * Assumption: `ignoreException(predicate)` and `recordException(predicate)` (Resilience4j 2.4.0) REPLACE the
+ * predicate the builder holds, and the builder holds what the operator wrote into YAML (`ignore-exceptions`,
+ * `record-exceptions`, the predicate classes). The customizer therefore reads the config the builder would
+ * produce as it stands and folds it back in: the ignore predicate is OR-ed (the breaker ignores MORE), the record predicate is AND-ed (it records
  * LESS). An operator's own list survives; a benign 4xx cannot be recorded by it, since a 4xx that the adapter
  * contract documents as a normal outcome is never a backend fault.
  *
  * That only holds because the customizer also EMPTIES the builder's two class lists once it has read them.
- * The lists are not part of the predicate a setter replaces: `build()` OR-s `record-exceptions` /
+ * Assumption: the lists are not part of the predicate a setter replaces - `build()` OR-s `record-exceptions` /
  * `ignore-exceptions` back in on top of whatever predicate is set, so an operator who listed a superclass of
  * the stack's 4xx exception (`record-exceptions: [...WebClientResponseException]`, to count 5xx explicitly)
  * would have had the benign 404 recorded again - `isInstance(list) OR (!benign AND configured)`. Their effect
@@ -74,8 +74,9 @@ fun circuitBreakerCustomizer(
     verdicts: BreakerVerdicts,
 ): CircuitBreakerConfigCustomizer =
     CircuitBreakerConfigCustomizer.of(endpoint.alias) { builder ->
-        // What YAML produced for this instance, read before anything is replaced. `build()` is side-effect
-        // free: it assembles a config from the builder's fields and leaves the builder as it was.
+        // What YAML produced for this instance, read before anything is replaced. Assumption: `build()`
+        // (Resilience4j 2.4.0) is side-effect free - it assembles a config from the builder's fields and leaves the
+        // builder as it was.
         val configured = builder.build()
         // Assumption: CircuitBreakerConfig.Builder.build() (Resilience4j 2.4.0) composes each final predicate as
         // `classes(list) OR predicate` (PredicateCreator.createExceptionsPredicate). The lists' effect is inside
@@ -111,10 +112,9 @@ fun timeLimiterCustomizer(endpoint: ResolvedTimeouts): TimeLimiterConfigCustomiz
  *
  * Abstract, because the verdicts are a fact about the client STACK - which exception carries a response status,
  * which failures the client raises itself - and the stack is known at compile time. Each stack subclasses it with
- * its verdicts object (`RestClientMeshRegistrar`, `WebClientMeshRegistrar`) and imports the subclass next to
- * [eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration]. The verdicts therefore never pass through the context: a host can neither replace
- * them with a bean of its own nor override them by accident, and the guard probes with the verdicts the customizers
- * actually installed.
+ * its verdicts object and imports the subclass next to [eu.inqudium.veredium.core.mesh.MeshResilienceConfiguration].
+ * The verdicts therefore never pass through the context: a host can neither replace them with a bean of its own nor
+ * override them by accident, and the guard probes with the verdicts the customizers actually installed.
  *
  * A [BeanRegistrar] rather than `@Bean` methods because the number of beans is only known once `app.mesh` is
  * read: the aliases come from the endpoint list. The registrar binds `app.mesh` from the [Environment] for
@@ -132,23 +132,20 @@ fun timeLimiterCustomizer(endpoint: ResolvedTimeouts): TimeLimiterConfigCustomiz
  *
  * ## How the customizers reach the instances
  *
- * Resilience4j's Spring integration builds one config per `resilience4j.<layer>.instances.<name>` entry when it
- * creates the registry bean, and consults a `*ConfigCustomizer` bean named after the instance as the LAST step
- * of that build - after the named base config and the instance's own properties have been applied, and before
- * the instance exists. A customizer therefore sees the operator's YAML on its builder and shapes the instance
+ * Assumption: Resilience4j's Spring integration (resilience4j-spring-boot4 2.4.0) builds one config per
+ * `resilience4j.<layer>.instances.<name>` entry when it creates the registry bean, and consults a
+ * `*ConfigCustomizer` bean named after the instance as the LAST step of that build - after the named base config
+ * and the instance's own properties have been applied, and before the instance exists. A customizer therefore sees the operator's YAML on its builder and shapes the instance
  * that the metric and health binders then bind to: no second lifecycle, no remove + recreate, no re-binding.
  *
  * Two things follow, and both are load-bearing:
  *
- *  - **One customizer per instance name.** Resilience4j rejects a second customizer for the same name at
- *    startup, so everything the wiring wants on an instance - the two breaker verdicts and, when enabled, the
- *    mesh-derived rungs - is ONE customizer per alias, built by [circuitBreakerCustomizer] and
+ *  - **One customizer per instance name.** Assumption: Resilience4j rejects a second customizer for the same
+ *    name at startup, so everything the wiring wants on an instance - the two breaker verdicts and, when enabled,
+ *    the mesh-derived rungs - is ONE customizer per alias, built by [circuitBreakerCustomizer] and
  *    [timeLimiterCustomizer].
- *  - **An undeclared instance is created on the default.** For a customizer name it finds no `instances.<name>`
- *    entry for, the Boot configuration creates the instance anyway - on the registry DEFAULT config, not on the
- *    named base config the operator chose (`mesh-backend`). The verdicts and the derived budget arrive, every
- *    value of the shipped policy is silently lost. [MeshResilienceStartupGuard] turns that silence into a
- *    failed start.
+ *  - **An undeclared instance is created on the default**, silently losing the operator's policy;
+ *    [MeshResilienceStartupGuard] states how, and turns that silence into a failed start.
  *
  * The verdicts themselves live in the stack's [BreakerVerdicts]; the registrar only installs them. They are
  * installed in CODE rather than written as `ignore-exceptions` / `record-exceptions` into YAML because they

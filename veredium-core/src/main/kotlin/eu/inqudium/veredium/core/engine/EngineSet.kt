@@ -35,10 +35,11 @@ interface EngineResources {
  * - **Created at construction, one per engine in [engines]**, each by [create] - so a misconfigured engine fails the
  *   context start, not the first call. An engine nobody selected is never created and needs no library on the classpath.
  *   When a creation fails, the engines created before it are released at once (nothing can be in flight on them yet) and
- *   the failure is rethrown: it fails the factory's construction, so no destroy callback would ever release them, and a
- *   started Jetty client's non-daemon threads would keep the JVM of a failed start alive.
+ *   the failure is rethrown: it fails the factory's construction, so no destroy callback would ever release them.
+ *   Assumption: a started Jetty client's non-daemon threads would keep the JVM of a failed start alive.
  * - **Used under a lock** ([use]), so a client built while the factory shuts down cannot hand out an engine after
- *   [shutdown] closed it. A lock rather than `synchronized`, because a client may be built on a virtual thread.
+ *   [shutdown] closed it. Rationale: a lock rather than `synchronized`, because a client may be built on a virtual
+ *   thread, which a `synchronized` block pins to its carrier before JDK 24.
  * - **Released together** ([shutdown]): each engine on its own against the one deadline - a release that throws is
  *   reported on [logger] and does not keep the engines after it open. Idempotent.
  *

@@ -18,7 +18,8 @@ import org.springframework.core.env.Environment
  * ## Configurable properties (all optional except the endpoint `triplet`)
  *
  * Keys are kebab-case in YAML; every value shown is the Kotlin default. The whole `defaults` block may be
- * omitted - each endpoint then falls back to these values.
+ * omitted - each endpoint then falls back to these values. The range a value must stay in is stated once, on the
+ * property of the nested class that binds it ([Defaults], [EndpointConfig], [Margins], [Transport]).
  *
  * **`app.mesh.defaults`** - shared fallbacks + policy knobs:
  * - `individual-request-timeout-ms` (Long, `4000`) -
@@ -47,23 +48,22 @@ import org.springframework.core.env.Environment
  *   a host depends on BOTH client modules; with one, the endpoint belongs to it (see [endpointsOwnedBy]).
  *
  * **`margins`** (under `defaults` only - shapes the derived ladder of every endpoint; see [Margins]):
- * - `global-margin-ms` (Long, `200`, `>= 0`) - buffer folded into `global = (1 + maxRetries)*individual + globalMargin`;
+ * - `global-margin-ms` (Long, `200`) - buffer folded into `global = (1 + maxRetries)*individual + globalMargin`;
  *   the ONE margin the sidecar also reads.
  * - `response-timeout-margin-ms` (Long, `200`) - `responseTimeout = global + responseTimeoutMargin`: the
  *   transport's response timeout of the app->sidecar hop, one rung above the sidecar's `global`. The name is
- *   stack-neutral on purpose - it is the same rung whether Apache HttpClient or Reactor Netty applies it.
+ *   stack-neutral on purpose - it is the same rung whichever engine applies it ([ResolvedTimeouts.responseTimeout]).
  * - `p99-margin-ms` (Long, `200`) - `p99 = individual - p99Margin` (recovered from the anchor).
  * - `healthy-retries` (Int, `1`) - routine retries still counting as "healthy" (policy; capped at maxRetries).
  * - `slow-call-backoff-ms` (Long, `200`) - per-attempt backoff feeding the healthy ceiling.
  * - `slow-call-cap-fraction` (Double, `0.8`) - hard cap: `slowCall` never exceeds `global * this`.
- * - The TimeLimiter margin is NOT configurable here - it is a computed property of `transport`.
  *
  * **`transport`** (under `defaults` - the app->sidecar pre-response phases; see [Transport]):
  * - `sidecar-base-url` (String, `http://localhost:8042`).
- * - `connect-timeout-ms` (Long, `100`, `1..Int.MAX_VALUE`) - small because app->sidecar is localhost + plaintext.
- * - `pending-acquire-timeout-ms` (Long, `200`, `1..Int.MAX_VALUE`) - fail fast on pool exhaustion.
+ * - `connect-timeout-ms` (Long, `100`) - small because app->sidecar is localhost + plaintext.
+ * - `pending-acquire-timeout-ms` (Long, `200`) - fail fast on pool exhaustion.
  * - `max-connections` (Int, `100`).
- * - [Transport.timeLimiterMargin] is COMPUTED = `connect + pendingAcquire + 100` headroom (not configurable).
+ * - The TimeLimiter margin is no key: it is computed ([Transport.timeLimiterMargin]).
  *
  * ## Example
  * ```yaml
@@ -119,8 +119,9 @@ data class MeshProperties(
     /**
      * The shared fallbacks under `app.mesh.defaults`; an endpoint that leaves a value unset inherits it from here.
      *
-     * @property individualRequestTimeoutMs The fallback MEASURED anchor, used by an endpoint that sets none.
-     * @property maxRetries The fallback retry count; mirrors the sidecar's `max-retries`.
+     * @property individualRequestTimeoutMs The fallback MEASURED anchor, used by an endpoint that sets none. Must be
+     *   `>= 1`.
+     * @property maxRetries The fallback retry count; mirrors the sidecar's `max-retries`. Must be `>= 0`.
      * @property margins The margins every endpoint's ladder is derived with.
      * @property transport The app->sidecar transport caps, shared by every endpoint.
      * @property timeLimiter The default TimeLimiter toggle (on); see [BackendToggle].
@@ -143,8 +144,10 @@ data class MeshProperties(
      * @property alias The Resilience4j instance name and metric label; `null` derives it from the [triplet]
      *   ([effectiveAlias]).
      * @property individualRequestTimeoutMs The endpoint's measured anchor; `null` takes
-     *   [Defaults.individualRequestTimeoutMs].
-     * @property maxRetries The endpoint's retry count; `null` takes [Defaults.maxRetries].
+     *   [Defaults.individualRequestTimeoutMs]. Must be `>= 1`, and small enough that the derived top rung stays within
+     *   [ResolvedTimeouts.MAX_LADDER_MS].
+     * @property maxRetries The endpoint's retry count; `null` takes [Defaults.maxRetries]. Must be `>= 0`, under the
+     *   same bound on the top rung.
      * @property baseUrl The endpoint's client base URL; `null` takes [Transport.sidecarBaseUrl].
      * @property headers Extra static headers beyond the Host header derived from the [triplet].
      * @property timeLimiter The tri-state TimeLimiter toggle; `null` inherits [Defaults.timeLimiter].
@@ -196,7 +199,7 @@ data class MeshProperties(
          */
         private fun aliasFromTriplet(): String {
             val parts = tripletParts()
-            // R4j names/tags are case-SENSITIVE, so normalise each part canonically: host -> lowercase (DNS
+            // Assumption: R4j names/tags are case-SENSITIVE, so normalise each part canonically: host -> lowercase (DNS
             // RFC 4343), method -> UPPERCASE, path segments case-sensitive (RFC 3986) so left as-is.
             val host = parts[1].lowercase().replace('.', '-')
             val method = parts[2].uppercase()
@@ -214,10 +217,17 @@ data class MeshProperties(
      *   margin the sidecar also reads. Must be `>= 0`.
      * @property responseTimeoutMarginMs The response-timeout margin, bound from `response-timeout-margin-ms`:
      *   `responseTimeout = global + responseTimeoutMargin`. Must be `>= 1`.
-     * @property p99MarginMs Recovers `p99 = individual - p99Margin` from the anchor.
-     * @property healthyRetries Routine retries still counting as "healthy" (policy; capped at `maxRetries`).
-     * @property slowCallBackoffMs Per-attempt backoff feeding the healthy ceiling.
-     * @property slowCallCapFraction Hard cap: `slowCall` never exceeds `global * slowCallCapFraction`; in (0,1).
+     * @property p99MarginMs Recovers `p99 = individual - p99Margin` from the anchor. Must be in
+     *   `0..<individual-request-timeout-ms` of every endpoint, so the derived p99 is `>= 1`.
+     * @property healthyRetries Routine retries still counting as "healthy" (policy; capped at `maxRetries`). Must be
+     *   `>= 0`.
+     * @property slowCallBackoffMs Per-attempt backoff feeding the healthy ceiling. Must be in
+     *   `0..`[ResolvedTimeouts.MAX_LADDER_MS].
+     * @property slowCallCapFraction Hard cap: `slowCall` never exceeds `global * slowCallCapFraction`. Must be in
+     *   `(0,1)`.
+     *
+     * Checked per endpoint, when [resolveAll] derives its ladder, because a bound can depend on the endpoint's own
+     * anchor.
      */
     data class Margins(
         val globalMarginMs: Long = DEFAULT_GLOBAL_MARGIN_MS,
@@ -274,10 +284,11 @@ data class MeshProperties(
      * the connect timeout, [pendingAcquireTimeoutMs] / [maxConnections] the connection pools of its engines.
      *
      * @property sidecarBaseUrl The base URL of every endpoint that sets no `base-url` of its own.
-     * @property connectTimeoutMs The TCP connect timeout, in milliseconds.
-     * @property pendingAcquireTimeoutMs How long a call waits for a free pooled connection, in milliseconds.
+     * @property connectTimeoutMs The TCP connect timeout, in milliseconds. Must be in `1..`[MAX_TRANSPORT_TIMEOUT_MS].
+     * @property pendingAcquireTimeoutMs How long a call waits for a free pooled connection, in milliseconds. Must be in
+     *   `1..`[MAX_TRANSPORT_TIMEOUT_MS].
      * @property maxConnections The connection bound of each pool an engine holds - what the mesh bulkheads are
-     *   sized against.
+     *   sized against. Must be `>= 1`.
      */
     data class Transport(
         val sidecarBaseUrl: String = "http://localhost:8042",
@@ -286,17 +297,18 @@ data class MeshProperties(
         val maxConnections: Int = 100,
     ) {
         init {
-            // A wrong value here does not announce itself. Apache's pool builder IGNORES a max-connections of
-            // zero or less (`if (maxConnTotal > 0)`) and silently runs on its own default of 25 total - a pool
-            // that fills long before the four bulkheads (4 x 25) ever reject anything. A zero or negative
-            // timeout means "unbounded" to the transport, which makes the computed timeLimiterMargin - the
-            // worst case of exactly these two phases - a lie. Fail at bind time, naming the key.
+            // A wrong value here does not announce itself. Assumption: Apache's pool builder (httpclient5 5.6.4)
+            // IGNORES a max-connections of zero or less (`if (maxConnTotal > 0)`) and silently runs on its own
+            // default of 25 total - a pool that fills long before bulkheads sized against the configured value
+            // ever reject anything. A zero or negative timeout means "unbounded" to the transport, which makes the
+            // computed timeLimiterMargin - the worst case of exactly these two phases - a lie. Fail at bind time,
+            // naming the key.
             //
-            // The upper bound comes from the transports: Reactor Netty takes the connect timeout as an `Int`
-            // channel option, so the reactive factory narrows it with `toInt()`, which WRAPS above Int.MAX_VALUE
+            // The upper bound comes from the Reactor Netty engine, on either stack: Netty takes the connect timeout
+            // as an `Int` channel option, so the engine narrows it with `toInt()`, which WRAPS above Int.MAX_VALUE
             // instead of failing - to a negative or a tiny timeout, nothing like the value written. The
-            // pending-acquire timeout shares the bound, so neither phase can be configured past what every
-            // transport represents.
+            // pending-acquire timeout shares the bound, so neither phase can be configured past what every engine
+            // represents.
             require(maxConnections >= 1) {
                 "app.mesh.defaults.transport.max-connections must be at least 1, but was $maxConnections"
             }
@@ -314,7 +326,8 @@ data class MeshProperties(
          * By how much the TimeLimiter must overshoot the transport responseTimeout so it also covers the
          * pre-response phases. This is a COMPUTED value, not a configurable margin: it is exactly the worst-case
          * pre-phases (connect + pendingAcquire) plus a fixed headroom, so it can never be set below the ladder
-         * invariant. Derived from THIS instance's caps, so a custom transport carries a correspondingly larger margin.
+         * invariant (timeLimiter margin > connect + pendingAcquire), and the ladder needs no guard for it. Derived
+         * from THIS instance's caps, so a custom transport carries a correspondingly larger margin.
          */
         val timeLimiterMargin: Long get() = connectTimeoutMs + pendingAcquireTimeoutMs + TIME_LIMITER_HEADROOM_MS
 
@@ -326,9 +339,9 @@ data class MeshProperties(
             const val TIME_LIMITER_HEADROOM_MS: Long = 100
 
             /**
-             * The largest connect / pending-acquire timeout either transport can represent: the reactive stack
-             * narrows the value to an `Int`, so anything above `Int.MAX_VALUE` (about 24.8 days) is rejected at
-             * bind time rather than wrapped.
+             * The largest connect / pending-acquire timeout every engine can represent: the Reactor Netty engine,
+             * on either stack, narrows the value to an `Int`, so anything above `Int.MAX_VALUE` (about 24.8 days)
+             * is rejected at bind time rather than wrapped.
              */
             const val MAX_TRANSPORT_TIMEOUT_MS: Long = Int.MAX_VALUE.toLong()
         }

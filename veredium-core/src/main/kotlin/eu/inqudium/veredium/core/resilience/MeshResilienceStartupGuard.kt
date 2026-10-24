@@ -24,10 +24,10 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  * ## Why a guard at all
  *
  * Nothing in the wiring fails on its own when `resilience4j.<layer>.instances.<alias>` is missing for an alias
- * the decorator uses. Resilience4j's Boot configuration creates an instance for every customizer name it finds
- * no declaration for - on the registry DEFAULT config, not on the named base config the operator chose
- * (`mesh-backend`) - and the bulkhead, which has no customizer, is created on the first call from the default
- * likewise. The call runs; the module's verdicts and the derived budget are even present on the breaker and the
+ * the decorator uses. Assumption: Resilience4j's Boot configuration (resilience4j-spring-boot4 2.4.0) creates an
+ * instance for every customizer name it finds no declaration for - on the registry DEFAULT config, not on the
+ * named base config the operator chose (`mesh-backend`) - and the bulkhead, which has no customizer, is created
+ * on the first call from the default likewise. The call runs; the module's verdicts and the derived budget are even present on the breaker and the
  * time limiter; what is silently lost is every value the operator wrote into the shipped policy, and the only
  * trace is a meter whose values look like nobody chose them. A registry bean a host or a test built by hand is
  * the second silent case: every alias present, no customizer ever consulted. This guard makes both loud, and
@@ -72,9 +72,9 @@ import org.springframework.beans.factory.SmartInitializingSingleton
  * modules' knowledge - each engine of a client factory has a pool of its own - so the pools come from the
  * [MeshConnectionPools] beans the factories are; a pool without a bound (the JDK client) is not checked, and
  * only the aliases of [MeshProperties.endpointsOwnedBy] are summed. Without such a bean the sum runs over those
- * aliases against the one pool the mesh transport describes. Per engine the sum is exact for Apache's blocking
- * pool (one total cap for every route) and conservative where the cap is per remote address and an endpoint has
- * a `base-url` of its own.
+ * aliases against the one pool the mesh transport describes. Assumption: per engine the sum is exact for Apache's
+ * blocking pool (one total cap for every route) and conservative where the cap is per remote address and an
+ * endpoint has a `base-url` of its own.
  * The values are read off the registry's instances, i.e. after base config and instance properties were
  * merged; the wiring check guarantees there is one per alias by then.
  *
@@ -263,14 +263,16 @@ class MeshResilienceStartupGuard(
         /** The pool's name when no client factory names its pools: the one the mesh transport describes. */
         const val SHARED_POOL: String = "shared"
 
-        // The layer spellings match Resilience4j's own property prefixes, so a message names the key verbatim.
+        // Assumption: the layer spellings match Resilience4j's own property prefixes, so a message names the key
+        // verbatim.
         const val LAYER_CIRCUIT_BREAKER: String = "circuitbreaker"
         const val LAYER_TIME_LIMITER: String = "timelimiter"
         const val LAYER_BULKHEAD: String = "bulkhead"
 
         /**
-         * A real rejection instance - the type is only constructible through a bulkhead's factory. The one
-         * client-side failure both stacks share, which is why the guard can own this probe itself.
+         * A real rejection instance. Assumption: the type is only constructible through a bulkhead's factory
+         * (Resilience4j 2.4.0). The one client-side failure both stacks share, which is why the guard can own this
+         * probe itself.
          */
         val PROBE_CLIENT_SIDE_FAILURE: BulkheadFullException =
             BulkheadFullException.createBulkheadFullException(Bulkhead.of("mesh-guard-probe", BulkheadConfig.ofDefaults()))

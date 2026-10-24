@@ -9,10 +9,9 @@ import java.time.Duration
  *
  * A contract for the HOST's adapters, not for this library: veredium implements it nowhere and reads it nowhere.
  * Each client already carries the two values (`responseTimeout`, `timeLimiterTimeout`); an adapter implements
- * this interface to publish them under one type its callers can depend on, whichever stack it runs on: an
- * adapter over `veredium-restclient`'s `ResilientRestClient` and one over `veredium-webclient`'s
- * `ResilientWebClient` publish the same two numbers, derived from the same mesh ladder, so a host that runs
- * both - or switches - composes its budgets from one type.
+ * this interface to publish them under one type its callers can depend on, whichever stack it runs on: adapters
+ * over the blocking and the reactive client publish the same two numbers, derived from the same mesh ladder, so a
+ * host that runs both - or switches - composes its budgets from one type.
  *
  * If an adapter fronts more than one mesh endpoint (one client per operation), then an implementation can
  * aggregate the per-client values - typically the `maxOf` across its clients, the pessimistic ceiling for a
@@ -24,8 +23,8 @@ import java.time.Duration
  * `TimeoutException`, a reactive chain by cancellation. The transport's response timeout is the tighter bound
  * underneath it on the response phase alone, so under normal conditions the transport is what trips, and the
  * TimeLimiter covers the phases before the response (connect, pending-acquire) that the response timeout does
- * not. See the ordering in [eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator] and in the
- * reactive stack's `ReactiveResilienceDecorator`.
+ * not. See the ordering in [eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator], which the reactive
+ * stack's decorator shares.
  */
 interface BaseAdapter {
     /**

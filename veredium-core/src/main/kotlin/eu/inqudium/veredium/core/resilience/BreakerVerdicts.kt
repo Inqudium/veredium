@@ -3,28 +3,28 @@ package eu.inqudium.veredium.core.resilience
 import org.slf4j.spi.LoggingEventBuilder
 
 /**
- * The one decision "is this exchange failure the BACKEND's fault, or a benign client-side outcome?", owned by
- * neither the logging nor the resilience layer so that all consumers can depend on it without depending on each
- * other - and owned by neither client STACK, so the two stacks cannot drift apart on it.
+ * The one decision "is this exchange failure the BACKEND's fault, or a benign client-side outcome?" - the
+ * benign-4xx verdict of [BreakerVerdicts], owned by neither client STACK, so the two stacks cannot drift apart on it.
  *
  * Two consumers per stack derive from it and therefore cannot disagree:
- *  - the synchronous error log's severity, in the stack's `Resilient*Client`;
+ *  - the synchronous error log's severity ([eu.inqudium.veredium.core.client.ClientCallLog.onError]);
  *  - the circuit breaker's record predicate, via the per-alias customizer ([circuitBreakerCustomizer]).
  *
- * The exchange event itself (legatium's `adapter-http-exchange` logger) is NOT a consumer: the library
- * classifies on its own terms - a 4xx answer is `rejected` with its status there, at INFO except for
- * 401/403/408/429 (legatium ADR-0012) - and this policy does not reach into it. The 404-means-business-case
- * reading lives in the two consumers above and in an operator's reading of `adapter_response_status_code`.
+ * The exchange event itself (legatium's `adapter-http-exchange` logger) is NOT a consumer. Assumption: legatium
+ * classifies its exchange event itself (legatium ADR-0012), and this policy does not reach into it. The
+ * 404-means-business-case reading lives in the two consumers above and in an operator's reading of
+ * `adapter_response_status_code`.
  *
  * What is stack-neutral is the RULE: which statuses are benign, how the cause chain is walked, what the policy
  * line says. What is NOT is the SHAPE of the exceptions the rule is applied to - the blocking client throws
  * Spring's `RestClientResponseException` for a 4xx answer, the reactive one a `WebClientResponseException`; the
  * blocking client's buffer limit is its own exception, the reactive one's is Spring's codec exception. The rule
  * therefore lives here as a class that is handed the stack's reading of a throwable, and each stack holds its
- * one instance (`RestClientVerdicts`, `WebClientVerdicts`).
+ * one instance in its [BreakerVerdicts].
  *
- * Rationale: a neutral policy object rather than a member of either consumer, because a resilience/transport
- * policy hidden in a logging class is the wrong owner and the wrong dependency direction. The consumers reference a policy, not each other.
+ * Rationale: a neutral policy object, owned by neither the logging nor the resilience layer, rather than a member
+ * of either consumer - a resilience/transport policy hidden in a logging class is the wrong owner and the wrong
+ * dependency direction. The consumers reference a policy, not each other.
  *
  * @property responseStatus The HTTP status [Throwable] carries when it is a response exception of this stack -
  *   the status-carrying root type and its subclasses - or `null` for every other throwable. The ONE thing the
@@ -56,8 +56,8 @@ class HttpExchangeErrorPolicy(
      * the verdict is in force, and for WHICH aliases.
      *
      * The message carries ONE placeholder and therefore exactly one argument: a second one placed before [name]
-     * would fill the slot instead, and the line would name neither the right backends nor the right policy -
-     * SLF4J neither fails nor warns on a placeholder/argument mismatch. Pinned by `MeshResilienceStartupGuardTest`.
+     * would fill the slot instead, and the line would name neither the right backends nor the right policy.
+     * Assumption: SLF4J neither fails nor warns on a placeholder/argument mismatch.
      */
     fun logPolicy(
         logBuilder: LoggingEventBuilder,
@@ -112,17 +112,16 @@ class ClientSideFailurePolicy(
     /**
      * Whether [error] is - or was CAUSED BY - a failure this client raised itself.
      *
-     * The cause chain is walked on purpose, not defensively. Spring's blocking client wraps every `IOException`
-     * of an exchange into a `ResourceAccessException`, and its reactive client wraps a codec failure on an
-     * otherwise successful response into a `WebClientResponseException` reporting **200 OK** with the real
-     * cause underneath. Matching on the thrown type alone - which is all `ignoreExceptions(Class...)` does -
-     * would never see either, and the entry would be a silent no-op.
+     * The cause chain is walked on purpose, not defensively. Assumption: Spring's blocking client (spring-web
+     * 7.0.9) wraps every `IOException` of an exchange into a `ResourceAccessException`, and its reactive client wraps
+     * a codec failure on an otherwise successful response into a `WebClientResponseException` reporting **200 OK**
+     * with the real cause underneath. Matching on the thrown type alone - which is all `ignoreExceptions(Class...)`
+     * does - would never see either, and the entry would be a silent no-op.
      *
      * Walking the chain is safe here rather than merely convenient: a genuine backend failure does NOT carry
      * one of these as a cause. A 5xx whose error body exceeds the buffer limit yields a plain status exception
-     * with no limit exception underneath - on both stacks, each pinned by "should still record a genuine backend
-     * failure that carries a large error body" in its `RestClientVerdictsTest` / `WebClientVerdictsTest` - so it
-     * is still recorded.
+     * with no limit exception underneath - on both stacks, each pinned by a test of the stack's verdicts - so it is
+     * still recorded.
      */
     fun isClientSideFailure(error: Throwable): Boolean = causeChain(error).any { candidate -> clientSideFailures.any { it.isInstance(candidate) } }
 
@@ -169,10 +168,18 @@ class ClientSideFailurePolicy(
 
 /**
  * What a client stack tells the shared resilience wiring about itself: its two breaker verdicts and a probe
- * for the startup guard. One object per stack (`RestClientVerdicts`, `WebClientVerdicts`), handed to the shared
- * wiring directly - to [MeshResilienceRegistrar] by the stack's subclass of it, and to
- * [eu.inqudium.veredium.core.client.ClientCallLog] by the stack's client - and never declared as a bean, so
- * nothing in a host's context can replace it.
+ * for the startup guard. One object per stack, handed to the shared wiring directly - to [MeshResilienceRegistrar]
+ * by the stack's subclass of it, and to [eu.inqudium.veredium.core.client.ClientCallLog] by the stack's client -
+ * and never declared as a bean, so nothing in a host's context can replace it.
+ *
+ * ## Outcomes and verdicts
+ *
+ * The two terms are kept apart throughout the module. A circuit breaker sorts every error into one of three
+ * **outcomes**: *ignored* (no evidence about the backend in either direction), *success* (the backend answered
+ * correctly) or *failure* (counted against the backend). A **verdict** is one of the two policies this object
+ * carries, which decide those outcomes: [clientSideFailure] decides *ignored*, [httpExchangeError] decides
+ * *success* for a benign 4xx, and whatever neither claims is a *failure*. [circuitBreakerCustomizer] installs
+ * both verdicts and states the resulting table.
  *
  * @property httpExchangeError The benign-4xx rule, with this stack's reading of a response exception.
  * @property clientSideFailure The client-side-failure rule, with this stack's exception types.

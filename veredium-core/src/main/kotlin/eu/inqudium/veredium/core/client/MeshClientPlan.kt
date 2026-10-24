@@ -109,8 +109,8 @@ class MeshClientPlan(
      * tag), or `null` without a registry - the client then records nothing.
      *
      * **What it is for.** The stack's `max-in-memory-size` is a ceiling that has to be chosen, and without this meter
-     * there is nothing to choose it from. legatium's body capture is bounded by its own `max-body-bytes` and says
-     * nothing about this limit; the limit's exception says only that the limit was passed.
+     * there is nothing to choose it from. Assumption: legatium's body capture is bounded by its own `max-body-bytes`
+     * and says nothing about this limit; the limit's exception says only that the limit was passed.
      *
      * **What it cannot tell you.** Only responses that FIT are sampled - the ones that motivated the question are
      * absent by construction. Read it as the headroom of the population that works, and pair it with the limit named
