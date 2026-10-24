@@ -249,6 +249,10 @@ second consumer in the same JVM shares the alias.
 
 ### 4.1 Why a semaphore bulkhead over an unbounded executor, and not a `ThreadPoolBulkhead`
 
+The decision belongs to the core component that makes the hand-off, `BlockingResilienceDecorator`
+(ADR-0002); its KDoc states it in short ("The thread hand-off the TimeLimiter needs", consequence 1). This
+section is the long form.
+
 Resilience4j offers a second bulkhead, `ThreadPoolBulkhead`, that looks made for exactly this situation: it
 runs the call on a bounded `ThreadPoolExecutor` of its own (`core-thread-pool-size`, `max-thread-pool-size`,
 `queue-capacity`, default 100) and returns a `CompletionStage`, combining the concurrency limit and the
