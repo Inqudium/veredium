@@ -329,7 +329,9 @@ internal class ReactorNettyEngineTransport(
          * mid-body arrives as Reactor's `ReactiveException` around a `PrematureCloseException`. Thrown on as that,
          * it would pass Spring's `IOException` handling of the exchange - no `ResourceAccessException`, unlike
          * every other engine - so it is unwrapped here as Spring's request unwraps the same failure while waiting
-         * for the head (`ReactorClientHttpRequest.convertException`).
+         * for the head (`ReactorClientHttpRequest.convertException`). An unchecked failure that carries no
+         * `IOException` - Netty's own `ReadTimeoutException` when the response timeout fires mid-body - is wrapped
+         * in one, as that conversion wraps it during the head wait.
          */
         private fun readUnwrapped(
             b: ByteArray,
@@ -341,8 +343,8 @@ internal class ReactorNettyEngineTransport(
             } catch (e: RuntimeException) {
                 throw when (val cause = e.cause) {
                     is IOException -> cause
-                    is UncheckedIOException -> cause.cause ?: e
-                    else -> e
+                    is UncheckedIOException -> cause.cause ?: IOException(e.message, cause)
+                    else -> IOException(e.message, cause ?: e)
                 }
             }
 
@@ -386,6 +388,9 @@ internal class ReactorNettyEngineTransport(
                 pending.get()
             } catch (e: InterruptedException) {
                 onInterrupt(pending)
+                // The task may have finished between the interrupt and the cancel, which then changes nothing: a
+                // response it produced holds its pooled connection until it is closed, and nobody else will.
+                if (pending.isDone && !pending.isCancelled) runCatching { (pending.get() as? AutoCloseable)?.close() }
                 Thread.currentThread().interrupt()
                 throw InterruptedIOException("$what interrupted").apply { initCause(e) }
             } catch (e: ExecutionException) {

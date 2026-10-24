@@ -18,9 +18,11 @@ import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.assertj.core.api.Assertions.catchThrowable
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.springframework.test.context.TestPropertySource
 import tools.jackson.databind.ObjectMapper
 import java.net.SocketTimeoutException
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -28,8 +30,14 @@ import java.util.concurrent.TimeoutException
 /**
  * The decorator example as a host runs it: the whole Boot application, HttpClient 4 calling the stand-in sidecar
  * on a worker of the decorator.
+ *
+ * With one change to its configuration: the TimeLimiter budget is 2 s instead of the shipped 1 s. The silent-directory
+ * case needs the 700 ms socket timeout to trip before the budget; with 1 s, a pause of 300 ms on a loaded runner
+ * would turn the order round and the case red without a defect. The order of the two numbers, which is what the
+ * example teaches, is the same.
  */
 @ExampleContext(DecoratorExampleApplication::class)
+@TestPropertySource(properties = ["resilience4j.timelimiter.instances.legacy-directory.timeout-duration=2s"])
 class DecoratorExampleTest(
     private val adapter: DecoratorCustomerAdapter,
     private val circuitBreakers: CircuitBreakerRegistry,
@@ -90,10 +98,10 @@ class DecoratorExampleTest(
 
     @Test
     fun `should let the client's socket timeout trip first against a silent directory`() {
-        // What is tested: a lookup against a directory that answers only after 30 s, under the 1 s budget and the
+        // What is tested: a lookup against a directory that answers only after 30 s, under the 2 s budget and the
         //   700 ms socket timeout.
         // Success criteria: the caller gets HttpClient 4's SocketTimeoutException after at least 700 ms and before
-        //   the 1 s budget; the breaker counts it as a failure.
+        //   the 2 s budget; the breaker counts it as a failure.
         // Why it matters: the bounds are layered - the transport's timeout sits under the budget, so a silent
         //   backend is reported by the transport, with its own exception, and the budget stays the outer backstop.
         //
@@ -109,15 +117,15 @@ class DecoratorExampleTest(
 
         // Then
         assertThat(failure).isInstanceOf(SocketTimeoutException::class.java)
-        assertThat(waited).isGreaterThanOrEqualTo(Duration.ofMillis(700)).isLessThan(Duration.ofSeconds(1))
+        assertThat(waited).isGreaterThanOrEqualTo(Duration.ofMillis(700)).isLessThan(BUDGET)
         assertThat(circuitBreakers.circuitBreaker(DecoratorCustomerAdapter.NAME).metrics.numberOfFailedCalls).isEqualTo(1)
     }
 
     @Test
     fun `should release the caller at the budget and end the worker's read at once`() {
         // What is tested: a lookup against a directory whose body drips in, one byte every 200 ms for 30 s - every
-        //   read well inside the 700 ms socket timeout, the whole call far past the 1 s budget.
-        // Success criteria: the caller gets a TimeoutException after at least 1 s and well before the 30 s; within
+        //   read well inside the 700 ms socket timeout, the whole call far past the 2 s budget.
+        // Success criteria: the caller gets a TimeoutException after at least 2 s and well before the 30 s; within
         //   2 s after that the client has dropped the connection and the bulkhead has all its permits back.
         // Why it matters: HttpClient 4 bounds each read, not a whole call; the decorator's TimeLimiter is that
         //   bound. The dropped connection proves that the interrupt ended the worker's blocked read - with
@@ -136,7 +144,7 @@ class DecoratorExampleTest(
 
             // Then
             assertThat(failure).isInstanceOf(TimeoutException::class.java)
-            assertThat(waited).isGreaterThanOrEqualTo(Duration.ofSeconds(1)).isLessThan(Duration.ofSeconds(5))
+            assertThat(waited).isGreaterThanOrEqualTo(BUDGET).isLessThan(Duration.ofSeconds(6))
             assertThat(backend.connectionDropped.await(2, TimeUnit.SECONDS)).`as`("the worker's read was ended").isTrue()
             assertThat(eventually(Duration.ofSeconds(2)) { bulkhead.metrics.availableConcurrentCalls == permits }).isTrue()
         }
@@ -145,22 +153,28 @@ class DecoratorExampleTest(
     @Test
     fun `should deliver the customer on a future, and end the call when the future is cancelled`() {
         // What is tested: DecoratorCustomerAdapter.customerAsync for a known customer, and against a directory
-        //   whose body drips in for 30 s, cancelled while it arrives.
+        //   whose body drips in for 30 s, cancelled once the head and the first chunk are on the wire.
         // Success criteria: the first future completes with the customer within 5 s; within 2 s after the cancel
-        //   the client has dropped the dripping connection and the bulkhead has all its permits back.
+        //   the client has dropped the dripping connection and the bulkhead has all its permits back; the breaker
+        //   recorded the cancelled call as ignored, not as a failure.
         // Why it matters: the asynchronous form shares the pipeline; cancelling its future is how an asynchronous
-        //   caller walks away, and it has to end the exchange as an interrupted blocking caller does.
+        //   caller walks away, and it has to end the exchange as an interrupted blocking caller does. The caller
+        //   going away is not a fault of the directory: the breaker customizer ignores the decorator's
+        //   `SELF_INFLICTED_FAILURES`, and without it every cancelled call would count towards opening the circuit.
         //
         // Given
         DrippingBackend().use { backend ->
             val dripping = adapterAt(backend.baseUrl)
             val bulkhead = bulkheads.bulkhead(DecoratorCustomerAdapter.NAME)
             val permits = bulkhead.bulkheadConfig.maxConcurrentCalls
+            val breaker = circuitBreakers.circuitBreaker(DecoratorCustomerAdapter.NAME)
+            val recorded = CountDownLatch(1)
+            breaker.eventPublisher.onIgnoredError { recorded.countDown() }.onError { recorded.countDown() }
 
             // When
             val known = adapter.customerAsync("c-1").get(5, TimeUnit.SECONDS)
             val slow = dripping.customerAsync("c-drip")
-            assertThat(eventually { backend.connections.get() == 1 }).`as`("the slow call is on the wire").isTrue()
+            assertThat(backend.headSent.await(5, TimeUnit.SECONDS)).`as`("the slow call is reading its body").isTrue()
             slow.cancel(true)
 
             // Then
@@ -168,6 +182,8 @@ class DecoratorExampleTest(
             assertThat(slow).isCancelled()
             assertThat(backend.connectionDropped.await(2, TimeUnit.SECONDS)).`as`("the worker's read was ended").isTrue()
             assertThat(eventually(Duration.ofSeconds(2)) { bulkhead.metrics.availableConcurrentCalls == permits }).isTrue()
+            assertThat(recorded.await(2, TimeUnit.SECONDS)).`as`("the breaker recorded the cancelled call").isTrue()
+            assertThat(breaker.metrics.numberOfFailedCalls).isZero()
         }
     }
 
@@ -188,7 +204,8 @@ class DecoratorExampleTest(
     @Test
     fun `should publish the call's budget above the client's response timeout`() {
         // What is tested: the BaseAdapter values of DecoratorCustomerAdapter.
-        // Success criteria: the TimeLimiter budget is the configured 1 s, above the 700 ms socket timeout.
+        // Success criteria: the TimeLimiter budget is the configured one - the 2 s of this class (the class KDoc) -
+        //   above the 700 ms socket timeout.
         // Why it matters: the same two numbers the client modules publish; here the host chose them itself, and
         //   the order - transport below the budget - is what makes the transport trip first.
         //
@@ -197,7 +214,7 @@ class DecoratorExampleTest(
         val response = adapter.responseTimeout
 
         // Then
-        assertThat(budget).isEqualTo(Duration.ofSeconds(1))
+        assertThat(budget).isEqualTo(BUDGET)
         assertThat(response).isEqualTo(Duration.ofMillis(700))
     }
 
@@ -210,4 +227,9 @@ class DecoratorExampleTest(
      * that is not the stand-in sidecar.
      */
     private fun adapterAt(baseUrl: String) = DecoratorCustomerAdapter(decorator, httpClient, objectMapper, properties.copy(baseUrl = baseUrl))
+
+    private companion object {
+        /** The TimeLimiter budget this class runs the example with (the class KDoc). */
+        val BUDGET: Duration = Duration.ofSeconds(2)
+    }
 }

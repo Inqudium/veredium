@@ -23,7 +23,9 @@ settings, which meters it has and what it needs: [configuration guide](webclient
 
 **The response contract.** A client's `Mono<T>` emits exactly one value or an error: a 2xx answer without a
 body (204, empty 200) fails with `EmptyResponseBodyException` rather than completing the `Mono` empty; see the
-[configuration guide](webclient-config-guide.md) §3.4.
+[configuration guide](webclient-config-guide.md) §3.4. Only a 2xx is a body: a 1xx or 3xx fails as a
+`WebClientResponseException` with its status. What every status becomes on both stacks, and how the breaker counts
+it: [Status contract](../../docs/status-contract.md).
 
 ## Prerequisites
 

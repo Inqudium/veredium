@@ -65,7 +65,8 @@ class ReactiveExampleTest(
     @Test
     fun `should publish the same budgets as the blocking adapter`() {
         // What is tested: the BaseAdapter values of ReactiveCustomerAdapter.
-        // Success criteria: the response timeout is positive and below the TimeLimiter budget.
+        // Success criteria: the values the blocking adapter publishes from the same application.yml: the response
+        //   timeout 900 ms and the TimeLimiter budget 1300 ms, the ladder of the slower endpoint, order-search.
         // Why it matters: both stacks derive the budgets from the same ladder, so a host composes them from one
         //   type whichever stack an adapter uses.
         //
@@ -74,8 +75,8 @@ class ReactiveExampleTest(
         val budget = adapter.timeLimiterTimeout
 
         // Then
-        assertThat(response).isPositive()
-        assertThat(budget).isGreaterThan(response)
+        assertThat(response).isEqualTo(Duration.ofMillis(900))
+        assertThat(budget).isEqualTo(Duration.ofMillis(1300))
     }
 
     private companion object {

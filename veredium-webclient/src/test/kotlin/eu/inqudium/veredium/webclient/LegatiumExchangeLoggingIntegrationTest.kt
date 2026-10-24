@@ -117,6 +117,10 @@ class LegatiumExchangeLoggingIntegrationTest {
         /** Name of the property source the reference keys are added under - for readable failure diagnostics. */
         private const val REFERENCE_PROPERTY_SOURCE = "reference-application-yml"
 
+        /** The fence call of [fencedEvents] - a path of every case's endpoint template, and a status no case uses. */
+        private const val FENCE_PATH = "/things/fence"
+        private const val FENCE_STATUS = 202
+
         /** Spring's WebClient client observation - the meter the wired observation must produce. */
         private const val HTTP_CLIENT_OBSERVATION = "http.client.requests"
 
@@ -150,6 +154,7 @@ class LegatiumExchangeLoggingIntegrationTest {
     @BeforeEach
     fun setUp() {
         wireMock.resetAll()
+        wireMock.stubFor(get(urlEqualTo(FENCE_PATH)).willReturn(okJson("""{"message":"fence"}""").withStatus(FENCE_STATUS)))
         // The runner does not initialise Boot's LoggingSystem, so the reference `logging.level` block does not
         // apply here; the level is set by hand to the value that block sets (INFO = every exchange).
         previousExchangeLevel = exchangeLogger.level
@@ -172,7 +177,8 @@ class LegatiumExchangeLoggingIntegrationTest {
         fun `should write exactly one event on the library's logger with the backend name and the template`() {
             // What is tested: the baseline of the whole class - one GET through a client of the factory, in a
             //   host-shaped context, produces the library's exchange event.
-            // Success criteria: the event is on `adapter-http-exchange`, INFO, `success` with status 200, its
+            // Success criteria: the call wrote one event, counted once a later call's event is in (a fence); it is
+            //   on `adapter-http-exchange`, INFO, `success` with status 200, its
             //   message names the backend in place of the URL, and it carries `adapter_name` = the backend and
             //   `adapter_url_template` = the mesh endpoint's template.
             // Why it matters: those two fields are what a log query groups by and what joins the event to this
@@ -188,7 +194,7 @@ class LegatiumExchangeLoggingIntegrationTest {
 
                     // Then: one event, on the library's logger, INFO / success, naming the backend and the
                     // template - the two fields a log query groups by
-                    val event = appender.awaitEvents().last()
+                    val event = appender.fencedEvents(context, "things").single()
                     assertThat(event.loggerName).isEqualTo(EXCHANGE_LOGGER)
                     assertThat(event.level).isEqualTo(Level.INFO)
                     assertThat(event.formattedMessage).startsWith("Adapter http exchange GET ").contains("things -> 200")
@@ -253,7 +259,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                     context.client("masked").get(Greeting::class.java) { it.uri("/things/1") }.block()
 
                     // Then
-                    val event = appender.awaitEvents().last()
+                    val event = appender.fencedEvents(context, "masked").single()
                     val requestHeaders = event.field("adapter_request_headers") as String
                     assertThat(requestHeaders).containsIgnoringCase("Host").contains("localhost")
                     assertThat(requestHeaders).containsIgnoringCase(TOKEN_HEADER)
@@ -285,7 +291,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                     runCatching { context.client("benign").get(Greeting::class.java) { it.uri("/things/404") }.block() }
 
                     // Then
-                    val event = appender.awaitEvents().last()
+                    val event = appender.fencedEvents(context, "benign").single()
                     assertThat(event.level).isEqualTo(Level.INFO)
                     assertThat(event.field("adapter_outcome")).isEqualTo("rejected")
                     assertThat(event.field("adapter_response_status_code")).isEqualTo(404)
@@ -362,7 +368,7 @@ class LegatiumExchangeLoggingIntegrationTest {
         fun `should log a caller's cancel as WARN cancelled`() {
             // What is tested: the library's half of the cancellation trade - a subscriber that walks away before
             //   the answer arrives.
-            // Success criteria: the backend's event is WARN `cancelled` and has no status code (nothing was
+            // Success criteria: the backend's one event is WARN `cancelled` and has no status code (nothing was
             //   received).
             // Why it matters: this module logs its own cancellation line at DEBUG on purpose
             //   (ResilientWebClientIntegrationTest), which is only safe because THIS event carries the fact at
@@ -380,7 +386,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                         .dispose()
 
                     // Then: the library reports the cancel at WARN, with no status (nothing was received)
-                    val event = appender.awaitEvents().last()
+                    val event = appender.fencedEvents(context, "walked-away").single()
                     assertThat(event.level).isEqualTo(Level.WARN)
                     assertThat(event.field("adapter_outcome")).isEqualTo("cancelled")
                     assertThat(event.field("adapter_response_status_code")).isNull()
@@ -393,7 +399,7 @@ class LegatiumExchangeLoggingIntegrationTest {
             // What is tested: the resilience budget expiring. The R4j TimeLimiter sits OUTSIDE the WebClient
             //   call and cancels it, so the library sees a cancel - `cancelled`, not `timeout` (which the
             //   library reserves for the connector's own timeouts).
-            // Success criteria: with a 200 ms budget against a 2 s backend, the backend's event is WARN
+            // Success criteria: with a 200 ms budget against a 2 s backend, the backend's one event is WARN
             //   `cancelled`.
             // Why it matters: an alert on `adapter_outcome == "timeout"` never fires for the budget that governs
             //   every call here. The resilience verdict itself stays
@@ -407,7 +413,7 @@ class LegatiumExchangeLoggingIntegrationTest {
                     runCatching { context.client("budget").get(Greeting::class.java) { it.uri("/things/slow") }.block() }
 
                     // Then
-                    val event = appender.awaitEvents().last()
+                    val event = appender.fencedEvents(context, "budget").single()
                     assertThat(event.level).isEqualTo(Level.WARN)
                     assertThat(event.field("adapter_outcome")).isEqualTo("cancelled")
                 }
@@ -890,6 +896,22 @@ class LegatiumExchangeLoggingIntegrationTest {
     ) = capturing(exchangeLogger, accept = { event -> event.field("adapter_name") == backend }, block = block)
 
     private fun AssertableApplicationContext.client(backend: String): ResilientWebClient = getBean(ResilientWebClientFactory::class.java).create(backend)
+
+    /**
+     * The events [backend]'s calls so far wrote, once a FENCE has passed: one more call of the backend, made after
+     * them and answered [FENCE_STATUS], whose own event is awaited and then left out. The library writes an event
+     * when its exchange ends, possibly after `block()` returned, so the event of the case's call alone could be
+     * awaited but never shown to be the ONLY one - a second, later event would still be on its way. By the time the
+     * later exchange's event is in, anything the case's call was going to write has had its turn.
+     */
+    private fun CapturingAppender.fencedEvents(
+        context: AssertableApplicationContext,
+        backend: String,
+    ): List<ILoggingEvent> {
+        context.client(backend).get(Greeting::class.java) { it.uri(FENCE_PATH) }.block()
+        return awaitEvents { it.field("adapter_response_status_code") == FENCE_STATUS }
+            .filterNot { it.field("adapter_response_status_code") == FENCE_STATUS }
+    }
 
     /**
      * Runs [block] with a recorder attached to [logger], and returns whatever it returns.

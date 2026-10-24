@@ -418,6 +418,7 @@ What each bound produces, for the caller, the breaker, the exchange event and th
 | TimeLimiter budget expired | `TimeoutException` | failure | `cancelled` (WARN), written by the cancelled worker | `resilience4j.timelimiter.calls{kind=timeout}` |
 | caller interrupted | `InterruptedException` | **ignored** | `cancelled` (WARN), by the cancelled worker | — |
 | 5xx, 408, 429 | `HttpServerErrorException.*` / `HttpClientErrorException.*` | failure | `failure` / `rejected` (WARN) | `http.client.requests{status}` |
+| 1xx / 3xx (no redirect is followed) | `RestClientResponseException` | failure | as legatium classifies the status | `http.client.requests{status}` |
 | benign 4xx | `HttpClientErrorException.*` | **success** | `rejected` (INFO) | as above |
 | 2xx, body past the limit | `ResponseBodyLimitExceededException` | **ignored** | `success` (INFO) | the WARN limit line; no size sample |
 | 2xx without a body (204, empty 200) | `EmptyResponseBodyException` (`veredium-core`), naming the backend and the expected type | not seen (outside the decoration) | `success` (INFO) | the WARN error line; size sample `0` |

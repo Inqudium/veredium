@@ -1,9 +1,9 @@
 # Test-owned configuration fixture. The mesh/resilience4j/logging CONTRACT and BINDING tests bind THIS file
-# (via ClassPathResource("application-test.yml")), NOT the reference configuration application.yml next to it
+# (via ClassPathResource("application-test.yml")) next to the reference configuration application.yml
 # (src/test/resources; a library ships no application.yml), so that edits to the reference - e.g. enabling
 # app.mesh.defaults.circuit-breaker - never break them. Keep this in sync with the reference only for the parts a
 # test actually asserts; it may otherwise diverge (that divergence is the whole point of decoupling).
-# ResilienceConfigContractTest is the exception that checks BOTH files, since its rules hold for either.
+# ResilienceConfigContractTest and LoggingLevelContractTest pin their identities and invariants in BOTH files.
 #
 # NOT a Spring profile override in disguise: no test activates the `test` profile, so Spring never auto-merges
 # this into a @SpringBootTest context; the contract/binding tests load it explicitly by name.
@@ -26,42 +26,15 @@ logging:
     # report at context start - which builders got the filter, which properties bound (since legatium 1.2.0).
     eu.inqudium.legatium.webclient.logging: WARN
 
-# Outbound exchange logging (legatium-webclient-logging). The full reference with every default and its
-# reasoning is the library's docs/adapter-logging-reference.yml; only what this module sets differently from the
-# default is explained here. The filter reaches every WebClient of ResilientWebClientFactory through Boot's
-# WebClient.Builder bean; the backend name reaches the event as adapter_name through a request attribute the
-# factory sets.
+# Outbound exchange logging (legatium-webclient-logging): only the two keys LoggingLevelContractTest relates to the
+# logging.level block. The values the exchange stream is configured with - headers, body modes, the capture cap -
+# are the reference configuration's; LegatiumExchangeLoggingIntegrationTest loads that block and pins what they do.
 adapter-logging:
   # Explicit although it is the default: this is a CONTEXT-START switch - false removes filter and customizer,
   # not just the lines. Whoever switches it off should see it here, not discover it in a missing stream.
   enabled: true
   # The library's default logger name, kept so its documentation applies verbatim.
   logger-name: adapter-http-exchange
-  request-headers:
-    # Every request header is logged; an operator reads them (the Host header, the token's fingerprint).
-    # Everything selected is MASKED by default (masked: ["*"]); plaintext is an allowlist.
-    includes: ["*"]
-    # Plaintext only for headers that carry no secret. Host is the second view of the backend next to
-    # adapter_name. Everything else - X-Access-Token, Authorization, cookies, the unknown - stays a
-    # fingerprint (<length>:<8 bytes SHA-256 hex>).
-    unmasked: ["Host", "Accept", "Content-Type", "Content-Length", "User-Agent", "traceparent", "tracestate"]
-  response-headers:
-    includes: ["*"]
-    # Same rule. Which correlation headers the sidecar returns is not documented in this repository; they show
-    # up masked first and are added here after being seen.
-    unmasked: ["Content-Type", "Content-Length", "Date", "Cache-Control"]
-  # Bodies on every outcome but success (a failure, a rejected 4xx, a cancel): every body of every call would
-  # be customer data on every line. The error body is what an operator needs.
-  log-request-body: on-failure
-  log-response-body: on-failure
-  # The default, explicit so the cap is a visible decision, independent of the codec limit:
-  # 16 KB is plenty for the backends' JSON error answers. Raise it here, never via the codec limit.
-  max-body-bytes: 16384
-  # The adapters build their paths from templates; no token ever travels in the query.
-  include-query-string: true
-  # Default. The mesh timeout ladder cancels calls long before 5 s, so adapter_slow will practically never
-  # fire; a lower value without a measurement would be a number without a reason.
-  slow-request-threshold: 5s
 
 app:
   webclient:

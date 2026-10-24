@@ -442,7 +442,9 @@ class ResilientRestClient(
      * which is taken here the way Spring's `DefaultResponseErrorHandler` takes it: a 4xx becomes an
      * [HttpClientErrorException], a 5xx an [HttpServerErrorException], each carrying status, headers and the
      * (truncated) error body, so a caller or a log sees the same exception types a plain `retrieve()` throws.
-     * Anything else - a 2xx, and a 1xx or 3xx the transport did not resolve - is a body to return.
+     * Only a 2xx is a body to return. A 1xx or 3xx the transport did not resolve - no engine follows a redirect -
+     * is never the answer the adapter asked for, so it fails as a [RestClientResponseException] carrying its status,
+     * which the breaker records like any status that is not a benign 4xx.
      *
      * The response is closed by `RestClient` when this function returns (`close = true`), which is also the
      * moment legatium emits its exchange event - on this worker thread, under the caller's MDC that the
@@ -455,7 +457,7 @@ class ResilientRestClient(
             // The declared length sizes the reader's buffer up front (BoundedBodyReader, "Memory"); it is never
             // trusted as the length of what follows.
             val contentLength = headers.contentLength
-            if (status.isError) {
+            if (!status.is2xxSuccessful) {
                 // An error body is diagnostic only: cut it at the limit rather than reject it, so a 5xx stays a
                 // 5xx for the breaker whatever size its error page has.
                 val body = BoundedBodyReader.readTruncated(response.body, maxInMemoryBytes, contentLength)
@@ -468,9 +470,9 @@ class ResilientRestClient(
         }, true)
 
     /**
-     * The exception for a 4xx/5xx answer, shaped like Spring's own: the concrete subclass for the status
-     * (`HttpClientErrorException.NotFound`, `HttpServerErrorException.InternalServerError`, ...) with the full
-     * error body attached and a message that previews it. The preview is capped because this message ends up in
+     * The exception for a non-2xx answer, shaped like Spring's own: the concrete subclass for a 4xx/5xx status
+     * (`HttpClientErrorException.NotFound`, `HttpServerErrorException.InternalServerError`, ...), the plain
+     * [RestClientResponseException] for a 1xx/3xx, each with the full body attached and a message that previews it. The preview is capped because this message ends up in
      * the WARN line's stack trace; the whole body stays on the exception for whoever asks for it.
      */
     private fun statusException(
@@ -485,7 +487,8 @@ class ResilientRestClient(
         val message = "${status.value()} $statusText: $preview"
         return when {
             status.is4xxClientError -> HttpClientErrorException.create(message, status, statusText, headers, body, charset)
-            else -> HttpServerErrorException.create(message, status, statusText, headers, body, charset)
+            status.is5xxServerError -> HttpServerErrorException.create(message, status, statusText, headers, body, charset)
+            else -> RestClientResponseException(message, status, statusText, headers, body, charset)
         }
     }
 

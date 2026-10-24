@@ -19,7 +19,8 @@ interface EngineResources {
      * Releases the resources, waiting for in-flight exchanges no later than [deadlineNanos] on [nanoTime]'s clock - a
      * deadline SHARED by every engine of the factory, so that releasing several engines one after another takes the drain
      * bound once, not once per engine. An expiry is an outcome the implementation reports itself ([EngineDrain]), never an
-     * exception: this runs from a destroy callback.
+     * exception: this runs from a destroy callback. Idempotent: [EngineSet.shutdown] hands a second call on to every
+     * engine, and released resources must take it without complaint.
      */
     fun shutdown(
         deadlineNanos: Long,

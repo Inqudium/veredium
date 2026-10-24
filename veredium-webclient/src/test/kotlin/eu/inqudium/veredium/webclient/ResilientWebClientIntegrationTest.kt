@@ -20,6 +20,7 @@ import eu.inqudium.veredium.core.Veredium
 import eu.inqudium.veredium.core.client.EmptyResponseBodyException
 import eu.inqudium.veredium.core.client.ResponseBodyMetrics
 import eu.inqudium.veredium.core.mesh.MeshProperties
+import eu.inqudium.veredium.core.validation.ResponseValidationProperties
 import eu.inqudium.veredium.testsupport.CapturingAppender
 import eu.inqudium.veredium.testsupport.CustomizedRegistries
 import eu.inqudium.veredium.testsupport.Greeting
@@ -36,10 +37,15 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry
 import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Metrics
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.micrometer.observation.Observation
 import io.micrometer.observation.ObservationHandler
 import io.micrometer.observation.ObservationRegistry
+import jakarta.validation.ConstraintViolationException
+import jakarta.validation.Validation
+import jakarta.validation.ValidatorFactory
+import jakarta.validation.constraints.Size
 import kotlinx.coroutines.reactor.awaitSingle
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.slf4j.MDCContext
@@ -61,6 +67,7 @@ import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.WebClientResponseException
 import reactor.core.publisher.Mono
 import reactor.test.scheduler.VirtualTimeScheduler
+import tools.jackson.core.JacksonException
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import java.time.Duration
@@ -87,7 +94,7 @@ import kotlin.concurrent.withLock
  * bean accessors rather than a Kotlin primary constructor.
  *
  * The tests are grouped by topic: what reaches the wire, the HTTP observation, the response-size meter, error
- * statuses and empty bodies, the Resilience4j decoration, the factory's cache, the client's own log lines, the
+ * statuses and empty bodies, the deserialisation and validation after the decoration, the Resilience4j decoration, the factory's cache, the client's own log lines, the
  * caller's MDC on those lines, the pool's shutdown, and the self-tests of the in-flight barrier that keeps one
  * test's late log lines out of the next one's capture.
  */
@@ -530,22 +537,28 @@ class ResilientWebClientIntegrationTest {
             // What is tested: that the meter is optional in the same sense the validator and the observation
             //   registry are - absent host wiring means absent meter, not a failure and not a global-registry
             //   fallback.
-            // Success criteria: a client built without a MeterRegistry serves a call normally, and a fresh
-            //   registry stays empty afterwards.
+            // Success criteria: a client built without a MeterRegistry serves a call normally, and Micrometer's
+            //   global registry - the one fallback a registry-less meter could reach for - holds no response-size
+            //   meter of the backend afterwards.
             // Why it matters: the factory is constructed directly in several tests and in minimal
             //   contexts. A meter that silently reached for Metrics.globalRegistry would cross-contaminate those
             //   and would tie this module to process-global state it does not own.
             //
             // Given
-            val registry = SimpleMeterRegistry()
             wireMock.stubFor(get(urlEqualTo("/unmetered")).willReturn(okJson("""{"message":"ok"}""")))
             val client = newClient("unmetered")
 
             // When
-            runBlocking { client.get(Greeting::class.java) { it.uri("/unmetered") }.awaitSingle() }
+            val result = runBlocking { client.get(Greeting::class.java) { it.uri("/unmetered") }.awaitSingle() }
 
             // Then
-            assertThat(registry.find(WebClientMetrics.RESPONSE_BODY_SIZE).summary()).isNull()
+            assertThat(result.message).isEqualTo("ok")
+            assertThat(
+                Metrics.globalRegistry
+                    .find(WebClientMetrics.RESPONSE_BODY_SIZE)
+                    .tag(ResponseBodyMetrics.ADAPTER_TAG, "unmetered")
+                    .summary(),
+            ).isNull()
         }
     }
 
@@ -632,6 +645,112 @@ class ResilientWebClientIntegrationTest {
                 .isInstanceOf(EmptyResponseBodyException::class.java)
                 .hasMessageContaining("'empty-ok'")
                 .hasMessageContaining("Greeting")
+        }
+    }
+
+    @Nested
+    inner class `Deserialisation and validation after the decoration` {
+        @Test
+        fun `should fail the call on a schema violation when validation is enforced for the backend`() {
+            // What is tested: the validation step after deserialisation, in its enforcing posture - a response that
+            //   breaks its DTO's constraints fails the call with every violation named.
+            // Success criteria: a body whose `message` is longer than the DTO allows fails the call with a
+            //   ConstraintViolationException naming the property; the breaker saw the backend's 200 as a success and
+            //   counted no failure (the violation sits outside the decoration).
+            // Why it matters: a violation is a contract problem, not an outage; it must reach the caller as a typed
+            //   failure and must NOT open the circuit against a backend that answered - with validation on, which
+            //   the reference configuration ships, a validation inside the decoration would do exactly that.
+            //
+            // Given: validation on and enforcing for this backend
+            val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+            wireMock.stubFor(get(urlEqualTo("/validated")).willReturn(okJson("""{"message":"far too long for the schema"}""")))
+            Validation.buildDefaultValidatorFactory().use { validatorFactory ->
+                val client =
+                    newFactory(
+                        "validated",
+                        circuitBreakers = circuitBreakers,
+                        validation = ResponseValidationProperties(enabled = true, failOnViolation = true),
+                        validatorFactory = validatorFactory,
+                    ).create("validated")
+
+                // When
+                val failure = catchThrowable { client.get(ConstrainedGreeting::class.java) { it.uri("/validated") }.block() }
+
+                // Then
+                assertThat(failure)
+                    .isInstanceOf(ConstraintViolationException::class.java)
+                    .hasMessageContaining("violates its own schema")
+                    .hasMessageContaining("message")
+                assertThat(circuitBreakers.circuitBreaker("validated").metrics.numberOfFailedCalls).isZero()
+                assertThat(circuitBreakers.circuitBreaker("validated").metrics.numberOfSuccessfulCalls).isEqualTo(1)
+            }
+        }
+
+        @Test
+        fun `should return the response unchanged and log the violation at WARN under the caller's MDC in report-only mode`() {
+            // What is tested: the rollout posture - `fail-on-violation=false` reports and returns - and the MDC its
+            //   line is written under, on the event loop that decodes the body.
+            // Success criteria: the same violating body is returned to the caller; the client logger holds one WARN
+            //   line naming the violation and the property that switches enforcement on, written on a thread other
+            //   than the caller's and carrying the caller's correlation key.
+            // Why it matters: report-only is how a backend is adopted against real traffic; it is only useful if the
+            //   violation is visible AND the caller is unaffected - and visible means findable: a line without the
+            //   correlation key cannot be joined to the request whose answer broke the schema.
+            //
+            // Given: validation on, report-only, the client logger capturing and the caller's key in its MDC
+            wireMock.stubFor(get(urlEqualTo("/reported")).willReturn(okJson("""{"message":"far too long for the schema"}""")))
+            Validation.buildDefaultValidatorFactory().use { validatorFactory ->
+                val client =
+                    newFactory(
+                        "reported",
+                        validation = ResponseValidationProperties(enabled = true, failOnViolation = false),
+                        validatorFactory = validatorFactory,
+                    ).create("reported")
+                capturing(clientLogger, accept = naming("backend 'reported'")) { lines ->
+                    MDC.put(CORRELATION_KEY, CORRELATION_VALUE)
+                    val result =
+                        try {
+                            // When: the caller subscribes on this thread
+                            client.get(ConstrainedGreeting::class.java) { it.uri("/reported") }.block()
+                        } finally {
+                            MDC.remove(CORRELATION_KEY)
+                        }
+
+                    // Then
+                    assertThat(result?.message).isEqualTo("far too long for the schema")
+                    val warning = lines.awaitCall().single { it.level == Level.WARN }
+                    assertThat(warning.formattedMessage)
+                        .contains("violates its own schema")
+                        .contains("reported only, not enforced")
+                        .contains("app.webclient.validation.fail-on-violation=false")
+                    assertThat(warning.threadName).`as`("the premise: written on the event loop").isNotEqualTo(Thread.currentThread().name)
+                    assertThat(warning.mdcPropertyMap).containsEntry(CORRELATION_KEY, CORRELATION_VALUE)
+                }
+            }
+        }
+
+        @Test
+        fun `should fail a 200 whose body does not parse without charging the breaker`() {
+            // What is tested: deserialisation runs after the decoration - a 200 whose body is not JSON fails the call
+            //   but is not a backend failure for the breaker.
+            // Success criteria: the call fails with a Jackson exception; the breaker counted the exchange as a
+            //   success (the backend answered 200), not as a failure.
+            // Why it matters: a parse failure is a client-side problem - a DTO out of step with the backend, a wrong
+            //   media type - and deserialising inside the decoration would open the circuit against a healthy
+            //   backend for it. The 204 case cannot show where the parse runs: an empty body never reaches it.
+            //
+            // Given: a 200 whose body is not JSON, and a breaker the test can read
+            wireMock.stubFor(get(urlEqualTo("/garbage")).willReturn(aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody("not json at all")))
+            val circuitBreakers = CircuitBreakerRegistry.ofDefaults()
+            val client = newClient("garbage", circuitBreakers = circuitBreakers)
+
+            // When
+            val failure = catchThrowable { client.get(Greeting::class.java) { it.uri("/garbage") }.block() }
+
+            // Then
+            assertThat(failure).isInstanceOf(JacksonException::class.java)
+            assertThat(circuitBreakers.circuitBreaker("garbage").metrics.numberOfFailedCalls).isZero()
+            assertThat(circuitBreakers.circuitBreaker("garbage").metrics.numberOfSuccessfulCalls).isEqualTo(1)
         }
     }
 
@@ -1180,6 +1299,46 @@ class ResilientWebClientIntegrationTest {
                 clock.dispose()
             }
         }
+
+        @Test
+        fun `should end the wait at what is left of the deadline and still name the drain window in the WARN`() {
+            // What is tested: the same expiry branch when the engines released before Reactor Netty have spent part
+            //   of the shared deadline - the wait bounded by the 300 ms left of it, on a virtual clock.
+            // Success criteria: one millisecond before the 300 ms nothing has happened; at them the wait completes
+            //   normally with one WARN naming the drain window (the derived timeout) and NOT the 300 ms.
+            // Why it matters: every engine's drain line names the configured window an operator can look up; a line
+            //   naming the remainder would report a different, smaller number for the same configuration depending
+            //   on which engines happened to be released first.
+            //
+            // Given: a factory, a disposal that never ends, a virtual clock, and the factory logger capturing
+            val factory = newFactory("late-pool")
+            val window = factory.poolDisposeTimeout
+            val left = Duration.ofMillis(300)
+            val clock = VirtualTimeScheduler.create()
+            try {
+                capturing(factoryLogger, accept = naming("did not drain")) { factoryLines ->
+                    // When: the wait starts with 300 ms left and the clock runs to just before them
+                    val drained = factory.drain(Mono.never(), clock, left).toFuture()
+                    clock.advanceTimeBy(left.minusMillis(1))
+
+                    // Then: still waiting, nothing said
+                    assertThat(drained.isDone).isFalse()
+                    assertThat(factoryLines.events).isEmpty()
+
+                    // When: what was left has passed
+                    clock.advanceTimeBy(Duration.ofMillis(1))
+
+                    // Then: completed normally, with the WARN naming the window
+                    assertThat(drained.isDone).isTrue()
+                    assertThat(drained.isCompletedExceptionally).isFalse()
+                    assertThat(factoryLines.events.single().formattedMessage)
+                        .contains("HTTP engine 'reactor-netty' did not drain within $window")
+                        .doesNotContain("$left")
+                }
+            } finally {
+                clock.dispose()
+            }
+        }
     }
 
     @Nested
@@ -1318,6 +1477,8 @@ class ResilientWebClientIntegrationTest {
         webClientBuilder: WebClient.Builder = WebClient.builder(),
         circuitBreakers: CircuitBreakerRegistry? = null,
         observationEnabled: Boolean = false,
+        validation: ResponseValidationProperties = ResponseValidationProperties(),
+        validatorFactory: ValidatorFactory? = null,
     ): ResilientWebClientFactory {
         val resilience =
             ReactiveResilienceDecorator(
@@ -1342,10 +1503,12 @@ class ResilientWebClientIntegrationTest {
                 maxInMemorySize = maxInMemorySize,
                 userAgent = userAgent,
                 observability = WebClientProperties.Observability(httpObservationEnabled = observationEnabled),
+                validation = validation,
             ),
             meshProperties,
             resilience,
             objectMapper,
+            validatorFactory = validatorFactory,
             meterRegistry = meterRegistry,
             webClientBuilder = webClientBuilder,
         ).also { factories += it }
@@ -1494,4 +1657,10 @@ class ResilientWebClientIntegrationTest {
             started.add(context)
         }
     }
+}
+
+/** [Greeting] with a constraint the validation cases can violate; the mapper reads it the same way. */
+class ConstrainedGreeting {
+    @field:Size(max = 5)
+    var message: String? = null
 }

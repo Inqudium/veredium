@@ -24,6 +24,7 @@ import reactor.core.scheduler.Schedulers
 import tools.jackson.databind.ObjectMapper
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeoutException
 
 /**
@@ -273,17 +274,32 @@ class ResilientWebClientFactory(
     /**
      * The Reactor Netty engine's wait for its pool's [disposal] during [shutdown], bounded by [left] - what is left of
      * the shared deadline when that engine's turn comes, never the full [poolDisposeTimeout] again ([drain]).
+     *
+     * The wait ends when the calling thread is INTERRUPTED, as every engine's drain does ([EngineDrain]): the disposal
+     * keeps running, the interrupt is reported on the one drain line and the flag is left for the caller. Not
+     * `block()`, which answers an interrupt with an exception - out of the engine's release, before its event loops
+     * were scheduled for disposal. A disposal that already completed (an idle pool) is no drain cut short and is not
+     * reported.
      */
     internal fun awaitPoolDisposal(
         disposal: Mono<Void>,
         left: Duration,
     ) {
-        drain(disposal, Schedulers.parallel(), left).block()
+        val pending = drain(disposal, Schedulers.parallel(), left).toFuture()
+        try {
+            pending.get()
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            EngineDrain.reportUndrained(logger, WebClientEngine.REACTOR_NETTY.key, poolDisposeTimeout, left = null)
+        } catch (e: ExecutionException) {
+            throw e.cause ?: e
+        }
     }
 
     /**
      * [shutdown]'s bounded wait for [disposal], with the WARN for a disposal that outlives [timeout] - what is
-     * left of the shutdown deadline when the Reactor Netty engine's turn comes.
+     * left of the shutdown deadline when the Reactor Netty engine's turn comes. The WARN names the drain window
+     * [poolDisposeTimeout], as every engine's does, not the part of it that was left for this engine.
      *
      * For Reactor Netty the disposal IS the drain: the pool is built with Reactor Netty's `disposeTimeout`
      * ([poolDisposeTimeout]), so `disposeLater()` refuses new acquires, still serves the calls waiting for a
@@ -311,7 +327,7 @@ class ResilientWebClientFactory(
         disposal
             .timeout(timeout, timer)
             .onErrorResume(TimeoutException::class.java) {
-                EngineDrain.reportUndrained(logger, WebClientEngine.REACTOR_NETTY.key, timeout, left = null)
+                EngineDrain.reportUndrained(logger, WebClientEngine.REACTOR_NETTY.key, poolDisposeTimeout, left = null)
                 Mono.empty()
             }
 

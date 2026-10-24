@@ -659,7 +659,10 @@ of an interrupt**.
 - Blocking: waits for the acquired count to reach zero, then disposes pool and loops. An expiry is a WARN line,
   not an exception; the hand-off executor is shut down whatever happens. Its `shutdownNow` interrupts every
   head wait and body read still running on it, so a call the loops no longer end fails at once with an
-  `IOException` instead of waiting for its budget (pinned by `ReactorNettyHandOffTest`).
+  `IOException` instead of waiting for its budget (pinned by "should fail a Reactor Netty call waiting for its head
+  when the shutdown finds the event loops silent", and the hand-off itself by `ReactorNettyHandOffTest`).
+- Reactive: an interrupted shutdown thread ends the wait for the pool's disposal with the shared drain line and
+  keeps its flag; the disposal runs on, and the loops are scheduled for disposal all the same.
 - Reactive: the pool is built with `disposeTimeout` = the drain bound, so its disposal waits for the calls in
   flight, those waiting for a connection included; the factory waits for it up to the shared deadline, with a WARN
   past it. The loops go after the pool, once no call can still need them.
@@ -667,9 +670,12 @@ of an interrupt**.
 Pinned per engine by "should let an in-flight exchange finish before closing the engine", "should let a call still
 waiting for a connection finish before closing the engine", "should report an engine that does not drain by the
 deadline and close it anyway", "should stop waiting when the shutdown thread is interrupted and leave the flag set"
-and "should refuse a client requested after shutdown" (blocking), and by the reactive "Draining shutdown" (the same
-two cases on every engine), "Release against the shutdown deadline" and "Interrupted shutdown" cases. `EngineSetTest`
-(`veredium-core`, the lifecycle both stacks share) pins the isolation of a failing release.
+(both also check how the call still in flight ends) and "should refuse a client requested after shutdown"
+(blocking), and by the reactive "Draining shutdown" (the same two cases on every engine), "Release against the
+shutdown deadline" and "Interrupted shutdown" (every engine, Reactor Netty's loops included) cases. `EngineSetTest`
+(`veredium-core`, the lifecycle both stacks share) pins the isolation of a failing release, the lock against a client
+built during the shutdown and the idempotent release; `EngineDrainTest` the drain's deadline, interrupt exit and WARN
+line.
 
 ## Test infrastructure
 
@@ -684,5 +690,5 @@ behave differently from what one would expect:
   responses.
 - **A connect timeout needs a listening socket that does not answer.** A `ServerSocket` with a backlog of 1 whose
   accept queue has been filled makes Linux drop further SYNs, so the connect hangs until the client gives up.
-  Blocking: `BlackholeBackend`. Reactive: `UnansweredConnectBackend`, which skips the case where the platform does
+  Both stacks use `UnansweredConnectBackend` (`veredium-test-support`), which skips the case where the platform does
   not drop the SYNs.

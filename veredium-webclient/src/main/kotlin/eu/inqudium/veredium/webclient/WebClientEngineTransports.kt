@@ -171,12 +171,16 @@ internal class ReactorNettyEngineTransport(
         deadlineNanos: Long,
         nanoTime: () -> Long,
     ) {
-        dispose(connectionProvider.disposeLater(), EngineDrain.remaining(deadlineNanos, nanoTime))
-        if (loopsScheduled.compareAndSet(false, true)) {
-            Mono
-                .delay(drainBound)
-                .then(loops.disposeLater())
-                .subscribe()
+        try {
+            dispose(connectionProvider.disposeLater(), EngineDrain.remaining(deadlineNanos, nanoTime))
+        } finally {
+            // Whatever the wait for the pool did - a disposal error included - the loops must still go.
+            if (loopsScheduled.compareAndSet(false, true)) {
+                Mono
+                    .delay(drainBound)
+                    .then(loops.disposeLater())
+                    .subscribe()
+            }
         }
     }
 

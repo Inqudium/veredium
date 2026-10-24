@@ -78,6 +78,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -952,26 +953,39 @@ class ResilientRestClientIntegrationTest {
 
         @Test
         fun `should report the elapsed time in the failure log from the call's own clock`() {
-            // What is tested: that the duration in the error line is measured by the call itself.
-            // Success criteria: the WARN line renders `duration so far: <n>ms` with digits. The assertion is
-            //   on the SHAPE, not on a value: a literal "null" in a field that announces a number is the defect this
-            //   guards against, and no timing knowledge is needed to catch it.
+            // What is tested: that the duration in the error line is measured by the call itself, on the clock
+            //   the client was built with.
+            // Success criteria: with a clock that advances 1234 ms on every read, the WARN line renders exactly
+            //   `duration so far: 1234ms` - the call's start and its failure, one read apart.
             // Why it matters: the duration is what tells a timeout from a fast failure when reading the line; it is
-            //   measured by the call itself so it is there whatever the logging configuration.
+            //   measured by the call itself so it is there whatever the logging configuration. A line that rendered
+            //   "null", or a duration taken from another clock or another start than the call's, would read the
+            //   same in shape - only the exact value tells.
             //
-            // Given: a failing backend and the client logger capturing
+            // Given: a failing backend, a client on a stepping clock, and the client logger capturing
             wireMock.stubFor(get(urlEqualTo("/boom")).willReturn(aResponse().withStatus(500)))
+            val clock = AtomicLong()
+            val endpoint = meshFor("own-clock-duration").resolveAll().values.single()
+            val client =
+                ResilientRestClient(
+                    RestClient.builder().baseUrl(endpoint.baseUrl).build(),
+                    "own-clock-duration",
+                    endpoint,
+                    BlockingResilienceDecorator(CircuitBreakerRegistry.ofDefaults(), TimeLimiterRegistry.of(GENEROUS_BUDGET), BulkheadRegistry.ofDefaults())
+                        .also { decorators += it },
+                    objectMapper,
+                    maxInMemoryBytes = RestClientProperties().maxInMemorySize.toBytes().toInt(),
+                    nanoTime = { clock.addAndGet(TimeUnit.MILLISECONDS.toNanos(1_234)) },
+                )
             // The client logger keeps its configured level here, so the DEBUG closing line is never emitted and
             // cannot serve as the terminal marker - the WARN failure line itself is the last one.
             capturingLinesNaming(clientLogger, "backend 'own-clock-duration'") { appender ->
-                val client = newClient("own-clock-duration")
-
                 // When: the call fails
                 runCatching { client.get(Greeting::class.java) { it.uri("/boom") } }
 
-                // Then: the failure line carries a measured duration, not a null
+                // Then: the failure line carries the call's own measurement
                 val message = appender.awaitThrough(ERROR_PREFIX).single { it.formattedMessage.startsWith(ERROR_PREFIX) }.formattedMessage
-                assertThat(message).containsPattern("duration so far: \\d+ms")
+                assertThat(message).contains("duration so far: 1234ms")
             }
         }
     }
@@ -1553,10 +1567,10 @@ class ResilientRestClientIntegrationTest {
             // What is tested: the pool's lifecycle settings with non-zero values - `max-life-time` as the
             //   connections' time-to-live and `evict-in-background` as the factory's own eviction schedule - and
             //   that shutdown stops that schedule.
-            // Success criteria: a keep-alive connection left idle in the pool after a call is closed by the evictor
-            //   once its 200 ms lifetime has passed (the `available` gauge drops back to zero) although its idle
-            //   timeout is an hour - so it is the lifetime, applied by the background schedule, that closed it; and
-            //   after shutdown() the evictor is shut down.
+            // Success criteria: a keep-alive connection left idle in the pool after a call (the `available` gauge
+            //   reads 1 right after it) is closed by the evictor once its 1 s lifetime has passed (the gauge drops
+            //   back to zero) although its idle timeout is an hour - so it is the lifetime, applied by the
+            //   background schedule, that closed it; and after shutdown() the evictor is shut down.
             // Why it matters: both settings default to minutes, so no other test sees the scheduled task run.
             //   A lifetime that never reached the pool, or an evictor that never ran, would let connections outlive
             //   the sidecar's own limits - and an evictor left running after shutdown would keep a thread working on
@@ -1572,12 +1586,15 @@ class ResilientRestClientIntegrationTest {
                     pool =
                         RestClientProperties.Pool(
                             maxIdleTime = Duration.ofHours(1),
-                            maxLifeTime = Duration.ofMillis(200),
+                            maxLifeTime = Duration.ofSeconds(1),
                             evictInBackground = Duration.ofMillis(50),
                         ),
                 )
             factory.create("evicted").get(Greeting::class.java) { it.uri("/kept-alive") }
             assertThat(factory.evictor).`as`("a non-zero interval must schedule the evictor").isNotNull()
+            // The connection must have been IN the pool for its closing to say anything: an engine that closed it
+            // after the call (no keep-alive, a pool that never kept it) would read "available 0" just the same.
+            assertThat(available(meters)).`as`("the call's connection must be back in the pool, idle").isEqualTo(1.0)
 
             // When: the lifetime passes, and later the context shuts down
             assertThat(eventually(AWAIT) { available(meters) == 0.0 && leased(meters) == 0.0 })

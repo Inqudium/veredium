@@ -42,7 +42,9 @@ import java.util.function.Consumer
  *
  * The returned `Mono<T>` emits exactly one value or an error - never completes empty. A 2xx answer without a
  * body (a 204, or a 200 with an empty entity) fails with [EmptyResponseBodyException] naming the backend and the
- * expected type; a non-2xx answer fails with the [WebClientResponseException] `retrieve()` raises. An empty
+ * expected type; a non-2xx answer fails with the [WebClientResponseException] `retrieve()` raises - a 1xx or 3xx
+ * too, which `retrieve()` alone would hand to the decoder: no engine follows a redirect, so it is never the
+ * answer the adapter asked for, and the breaker records it like any status that is not a benign 4xx. An empty
  * `Mono` would give no error line and leave the caller's `awaitSingle()` a `NoSuchElementException` that names
  * nothing, and the blocking twin fails the same answer with the same exception. The failure is raised AFTER the
  * Resilience4j decoration, like a deserialisation failure: the backend answered promptly with a success status,
@@ -244,7 +246,12 @@ class ResilientWebClient(
 
                 // The source produces only the raw JSON string - all the CircuitBreaker, TimeLimiter and
                 // Bulkhead observe. Deserialisation is deliberately kept off this inner mono (see below).
-                val rawMono = spec.retrieve().bodyToMono(String::class.java).doOnCancel { exchangeCancelled.set(true) }
+                val rawMono =
+                    spec
+                        .retrieve()
+                        .onStatus({ !it.is2xxSuccessful && !it.isError }) { it.createException() }
+                        .bodyToMono(String::class.java)
+                        .doOnCancel { exchangeCancelled.set(true) }
 
                 // Deserialisation runs AFTER the decoration: a parse failure is a client-side error, so the
                 // CircuitBreaker must not see it as a failure and open the circuit while the backend is healthy.
