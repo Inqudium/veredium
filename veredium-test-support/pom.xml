@@ -9,10 +9,10 @@
         <version>${revision}</version>
     </parent>
     <!--
-        Build-only module: the TEST helpers both client modules share - the socket backends, the log capture, the
-        bounded waits, the WireMock arrival listener, the configuration-file binding, the test payloads and the
-        customized Resilience4j registries. Its classes are main code here so the client modules can take them at
-        TEST scope; they are no artefact of the library and are kept out of every published one, like
+        Build-only module: the TEST helpers both client modules share, and veredium-examples with them - the socket
+        backends, the log capture, the bounded waits, the WireMock arrival listener, the configuration-file binding,
+        the test payloads and the customized Resilience4j registries. Its classes are main code here so those modules
+        can take them at TEST scope; they are no artefact of the library and are kept out of every published one, like
         veredium-coverage: no deploy (GitHub Packages, and cyclonedx's skipNotDeployed drops it from the aggregate
         SBOM), excluded from the Central bundle in the release profile of the parent, and no Dokka run.
 

@@ -30,7 +30,6 @@ import eu.inqudium.veredium.testsupport.Unserialisable
 import eu.inqudium.veredium.testsupport.WireMockArrivals
 import eu.inqudium.veredium.testsupport.capturing
 import eu.inqudium.veredium.testsupport.eventually
-import eu.inqudium.veredium.testsupport.leapingClock
 import io.github.resilience4j.bulkhead.BulkheadConfig
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException

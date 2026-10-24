@@ -3,7 +3,8 @@ package eu.inqudium.veredium.restclient
 import eu.inqudium.veredium.core.mesh.MeshProperties
 import eu.inqudium.veredium.core.resilience.BlockingResilienceDecorator
 import eu.inqudium.veredium.testsupport.CustomizedRegistries
-import io.github.resilience4j.bulkhead.BulkheadConfig
+import eu.inqudium.veredium.testsupport.ignores
+import eu.inqudium.veredium.testsupport.singlePermitBulkheads
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
@@ -224,8 +225,8 @@ class RestClientVerdictsTest {
             val wrapped = ResourceAccessException("I/O error on GET request", IOException("body too large", bare))
 
             // Then
-            assertThat(ignores(circuitBreakerRegistry, bare)).isTrue()
-            assertThat(ignores(circuitBreakerRegistry, wrapped)).isTrue()
+            assertThat(ignores(circuitBreakerRegistry, bare, alias)).isTrue()
+            assertThat(ignores(circuitBreakerRegistry, wrapped, alias)).isTrue()
             assertThat(RestClientVerdicts.clientSideFailure.isBufferLimitFailure(wrapped)).isTrue()
         }
 
@@ -253,8 +254,8 @@ class RestClientVerdictsTest {
                     ByteArray(64 * 1024),
                     null,
                 )
-            assertThat(ignores(circuitBreakerRegistry, serverError)).isFalse()
-            assertThat(ignores(circuitBreakerRegistry, TimeoutException("budget blown"))).isFalse()
+            assertThat(ignores(circuitBreakerRegistry, serverError, alias)).isFalse()
+            assertThat(ignores(circuitBreakerRegistry, TimeoutException("budget blown"), alias)).isFalse()
         }
     }
 
@@ -331,16 +332,6 @@ class RestClientVerdictsTest {
     // Helpers
     // ---------------------------------------------------------------------------
 
-    /** Whether the registered instance's config classifies [error] as ignorable (not a backend failure). */
-    private fun ignores(
-        registry: CircuitBreakerRegistry,
-        error: Throwable,
-    ): Boolean =
-        registry
-            .circuitBreaker(alias)
-            .circuitBreakerConfig.ignoreExceptionPredicate
-            .test(error)
-
     /**
      * A response exception in the shape the pipeline sees it - Spring's status-specific subclass, the way
      * `ResilientRestClient` builds it from a non-2xx answer; status only, no body is needed here.
@@ -353,16 +344,6 @@ class RestClientVerdictsTest {
             else -> HttpServerErrorException.create(code, text, HttpHeaders(), ByteArray(0), null)
         }
     }
-
-    /** A registry whose bulkheads hold exactly one permit and reject the next caller without waiting. */
-    private fun singlePermitBulkheads(): BulkheadRegistry =
-        BulkheadRegistry.of(
-            BulkheadConfig
-                .custom()
-                .maxConcurrentCalls(1)
-                .maxWaitDuration(Duration.ZERO)
-                .build(),
-        )
 
     /**
      * A decorator over the supplied registries. The time limiter is deliberately generous: these tests hold a

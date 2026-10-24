@@ -110,7 +110,7 @@ the UI with a written reason.
 - Test helpers both client modules need (the raw-socket backends, the thread-safe log capture and its `capturing` scope, the
   bounded `eventually`, the WireMock arrival listener, the configuration-file binding, the test payloads,
   the customized Resilience4j registries) live in `veredium-test-support`, a build-only module the client
-  modules take at test scope and nothing publishes. A helper that only one module needs stays in that
+  modules and `veredium-examples` take at test scope and nothing publishes. A helper that only one module needs stays in that
   module. `veredium-core`'s own tests cannot use it (the module depends on the core).
 - CI also checks, on test code as on production code, that no `//` comment carries a `[Symbol]` link,
   cites a guide section by number or cites an assessment report, that no Kotlin source has an unused
@@ -125,7 +125,8 @@ the UI with a written reason.
 - Test rationale comments follow the existing three-line pattern at the top of the
   test body (`What is tested:` / `Success criteria:` / `Why it matters:`), followed
   by the `Given/When/Then` stage comments - for a truth-table test with no
-  separate arrange/act/assert phases a single `// Given/When/Then` line is enough.
+  separate arrange/act/assert phases a single `// Given / When / Then` line is enough,
+  and `// When / Then` for a test with nothing to arrange.
   The Java fuzz targets carry the same block. The
   [test-evidence page](https://inqudium.github.io/veredium/tests/test-evidence/) and
   the [coverage reports](https://inqudium.github.io/veredium/coverage/) on the docs

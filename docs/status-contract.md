@@ -155,7 +155,7 @@ Open question: how does legatium classify the exchange event of a 3xx (`success`
 | The status decision, reactive | `ResilientWebClient`, `retrieve().onStatus(...)` (`veredium-webclient`) |
 | The breaker verdicts | `BreakerVerdicts`, `MeshResilienceCustomizers.kt` (`veredium-core`) |
 | The empty body | `EmptyResponseBodyException` (`veredium-core`) |
-| Tests, 3xx | "should fail a redirect as a response exception with its status and count it as a failure" (both stacks, every engine) |
+| Tests, 3xx | "should fail a redirect as a response exception with its status and count it as a failure" (blocking, every engine); "should fail a 302 with a WebClientResponseException the breaker records as a failure" (reactive, every engine) |
 | Tests, empty body | "should fail a 2xx without a body with the named empty-body exception, not charging the breaker" (blocking); "should fail a 204 answer with EmptyResponseBodyException after the breaker recorded a success" (reactive) |
 | Tests, 4xx/5xx | "should surface a non-2xx response as ..." (both stacks); `*VerdictsTest` |
 | Guides | `restclient-vs-webclient.md`, `timeouts-bulkheads-threads.md` (the classification table), `webclient-config-guide.md` |

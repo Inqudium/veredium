@@ -2,7 +2,6 @@ package eu.inqudium.veredium.restclient
 
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
-import ch.qos.logback.classic.spi.ILoggingEvent
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock
 import com.github.tomakehurst.wiremock.client.WireMock.aResponse
@@ -26,6 +25,7 @@ import eu.inqudium.veredium.testsupport.Unserialisable
 import eu.inqudium.veredium.testsupport.WireMockArrivals
 import eu.inqudium.veredium.testsupport.capturing
 import eu.inqudium.veredium.testsupport.causeChain
+import eu.inqudium.veredium.testsupport.field
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
@@ -939,13 +939,11 @@ class LegatiumExchangeLoggingIntegrationTest {
         backend: String,
         block: (CapturingAppender) -> Unit,
     ) {
-        capturing(exchangeLogger, accept = { event -> event.keyValuePairs.orEmpty().any { it.key == "adapter_name" && it.value == backend } }, block = block)
+        capturing(exchangeLogger, accept = { event -> event.field("adapter_name") == backend }, block = block)
     }
 
     private fun AssertableApplicationContext.client(backend: String): ResilientRestClient = getBean(ResilientRestClientFactory::class.java).create(backend)
 
     /** The one recorded line containing [needle], as its rendered message. */
     private fun CapturingAppender.lineContaining(needle: String): String = events.map { it.formattedMessage }.single { it.contains(needle) }
-
-    private fun ILoggingEvent.field(name: String): Any? = keyValuePairs?.singleOrNull { it.key == name }?.value
 }

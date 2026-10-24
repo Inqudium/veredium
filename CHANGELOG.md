@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
 ### Added
 
 #### Modules - 2026-10-19
@@ -13,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`app.mesh`, `eu.inqudium.veredium.core.mesh`), the breaker verdicts (benign 4xx is a success, a
   client-side failure is ignored) and the Resilience4j wiring that installs them (one
   `*ConfigCustomizer` per mesh alias, the fail-fast startup guard, the ladder logger). Each client
-  contributes only its exception vocabulary (`RestClientVerdicts`, `WebClientVerdicts`) and imports
-  the core's `MeshTimeoutConfig` through its `*VerdictsConfig`. ADR-0001; resolves finding 1 of the
+  contributes only its exception vocabulary (`RestClientVerdicts`, `WebClientVerdicts`), which its
+  auto-configuration hands to the core's wiring through its own `MeshResilienceRegistrar` subclass. ADR-0001; resolves finding 1 of the
   origin module's architecture review (tool-box, 2026-10-19).
 - `veredium-restclient`: the blocking client - Spring `RestClient` over Apache HttpClient 5, one
   resilience-wrapped client per mesh endpoint, the timeout ladder derived from one measured anchor,
@@ -81,6 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   application against a WireMock stand-in for the sidecar, so an example that stops working fails the build. Like
   `veredium-coverage` and `veredium-test-support` it is never published; all three have a README that says why
   each is a module of its own.
+- A new build-only module, `veredium-test-support`, holds the test helpers both client modules
+  share - the raw-socket backends, the thread-safe log capture, `eventually`, the WireMock arrival listener, the
+  configuration-file binding, the test payloads and the customized registries - in place of the copies that had
+  drifted apart in each module. Like `veredium-coverage` it is never published.
 - The `veredium-core` module, the build (Maven, Kotlin, Spring Boot parent,
   JaCoCo, ktlint, Dokka, CycloneDX, reproducible jars), the CI, CodeQL, Scorecard, Docs, Fuzz
   and Release workflows, and the documentation site - set up from the sibling project
@@ -439,10 +445,6 @@ Part of these entries resolve the findings of `docs/assessment/CODE_STYLE-2026-1
 
 #### Build and CI - 2026-10-23
 
-- A new build-only module, `veredium-test-support`, holds the test helpers both client modules
-  share - the raw-socket backends, the thread-safe log capture, `eventually`, the WireMock arrival listener, the
-  configuration-file binding, the test payloads and the customized registries - in place of the copies that had
-  drifted apart in each module. Like `veredium-coverage` it is never published.
 - The comment checks (no `[Symbol]` in `//`, no guide section numbers, no report citations) cover test code
   too; two new steps fail a pull request on an unused import and on a test rationale block that breaks its
   documented shape (`generate-test-catalog.py --check`).

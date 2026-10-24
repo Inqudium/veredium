@@ -24,6 +24,7 @@ import eu.inqudium.veredium.testsupport.Greeting
 import eu.inqudium.veredium.testsupport.LookupRequest
 import eu.inqudium.veredium.testsupport.Unserialisable
 import eu.inqudium.veredium.testsupport.capturing
+import eu.inqudium.veredium.testsupport.field
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.timelimiter.TimeLimiterConfig
@@ -933,8 +934,6 @@ class LegatiumExchangeLoggingIntegrationTest {
 
     /** The one recorded line containing [needle], as its rendered message. */
     private fun CapturingAppender.lineContaining(needle: String): String = events.map { it.formattedMessage }.single { it.contains(needle) }
-
-    private fun ILoggingEvent.field(name: String): Any? = keyValuePairs?.singleOrNull { it.key == name }?.value
 
     /** A ThreadLocalAccessor over one SLF4J MDC key - the shape of accessor a host registers per key. */
     private class MdcKeyAccessor(

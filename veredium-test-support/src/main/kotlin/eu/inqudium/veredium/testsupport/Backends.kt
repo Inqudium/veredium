@@ -35,8 +35,12 @@ abstract class SocketBackend(
     /** The connections accepted so far. */
     val connections = AtomicInteger()
 
-    /** The connections whose [serve] has returned - the backend is done with them, whoever ended them. */
-    val connectionsEnded = AtomicInteger()
+    /**
+     * The connections whose [serve] has returned - the backend is done with them, whoever ended them. For this
+     * module's own tests: a latch a test asserts is still closed proves nothing until the connection's thread, the one
+     * that would open it, has finished.
+     */
+    internal val connectionsEnded = AtomicInteger()
 
     /**
      * Whether [close] was called. Set before any connection is closed, so a subclass that sees its connection fail can
@@ -48,7 +52,7 @@ abstract class SocketBackend(
 
     private val accepted = CopyOnWriteArrayList<Socket>()
 
-    /** Guards [closing] against [accepted]: a socket is either registered before [close] runs or closed by the acceptor. */
+    /** Invariant: under this lock, a socket is either registered in [accepted] before [close] runs or closed by the acceptor. */
     private val lifecycle = Any()
 
     /** Starts accepting; called by a subclass once its own state is initialised. */
@@ -58,8 +62,8 @@ abstract class SocketBackend(
                 while (true) {
                     val socket = server.accept()
                     connections.incrementAndGet()
-                    // A socket accepted while close() runs would be missed by its sweep and served on - for 30 s on a
-                    // dripping backend - so registering and the closed check are one step.
+                    // Safety: a socket accepted while close() runs would be missed by its sweep and served on - for 30 s
+                    // on a dripping backend - so registering and the closed check are one step.
                     val registered =
                         synchronized(lifecycle) {
                             if (!closing) accepted += socket
@@ -194,39 +198,6 @@ class DrippingBackend(
     /** The client ended the exchange - unless the failure is this backend closing its own connections. */
     private fun dropped() {
         if (!closing) connectionDropped.countDown()
-    }
-}
-
-/**
- * Accepts a connection, reads the request and never answers - so the only thing that can end the exchange is the
- * client. Records when the client closed the connection ([connectionClosed], [closedAtNanos]), which is what an abort
- * looks like on the wire for HTTP/1.1.
- */
-class SilentBackend : SocketBackend() {
-    /** Counted down when the first request's bytes arrived. */
-    val requestArrived = CountDownLatch(1)
-
-    /** Counted down when the client closed a connection. */
-    val connectionClosed = CountDownLatch(1)
-
-    /** The `System.nanoTime()` at which the client last closed a connection; 0 until it did. */
-    @Volatile
-    var closedAtNanos: Long = 0L
-        private set
-
-    init {
-        start("silent-backend")
-    }
-
-    override fun serve(connection: Socket) {
-        val buffer = ByteArray(8192)
-        try {
-            while (connection.getInputStream().read(buffer) >= 0) requestArrived.countDown()
-        } catch (_: IOException) {
-            // A reset is a close as well.
-        }
-        closedAtNanos = System.nanoTime()
-        connectionClosed.countDown()
     }
 }
 

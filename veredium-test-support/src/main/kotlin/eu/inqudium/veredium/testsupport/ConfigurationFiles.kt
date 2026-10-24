@@ -5,6 +5,7 @@ import org.springframework.boot.context.properties.bind.Bindable
 import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.boot.context.properties.source.ConfigurationPropertySources
 import org.springframework.boot.env.YamlPropertySourceLoader
+import org.springframework.core.env.EnumerablePropertySource
 import org.springframework.core.io.ClassPathResource
 
 /**
@@ -63,7 +64,7 @@ object ConfigurationFiles {
         YamlPropertySourceLoader()
             .load(file, ClassPathResource(file))
             .flatMap { source ->
-                val enumerable = source as org.springframework.core.env.EnumerablePropertySource<*>
+                val enumerable = source as EnumerablePropertySource<*>
                 enumerable.propertyNames.filter { it.startsWith(prefix) }.map { it to enumerable.getProperty(it).toString() }
             }.toMap()
 

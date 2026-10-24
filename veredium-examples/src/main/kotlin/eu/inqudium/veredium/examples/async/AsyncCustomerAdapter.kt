@@ -16,9 +16,11 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Future
 
 /**
- * The blocking example's adapter without the wait: the same clients, called through `getAsync` and `postAsync`.
- * Every method returns at once with a [CompletableFuture]; the exchange runs on a worker of the client, and every
- * outcome - the value or the exception the blocking form would have thrown - arrives on the future.
+ * The blocking example's adapter without the wait: the same clients, called through
+ * [getAsync][eu.inqudium.veredium.restclient.ResilientRestClient.getAsync] and
+ * [postAsync][eu.inqudium.veredium.restclient.ResilientRestClient.postAsync]. Every method returns at once with a
+ * [CompletableFuture]; the exchange runs on a worker of the client, and every outcome - the value or the exception
+ * the blocking form would have thrown - arrives on the future.
  *
  * `cancel` is the only thing that reaches a running call: it abandons the exchange and frees its bulkhead permit.
  * A future derived with `thenApply`, `handle` or `thenCombine` does not pass a cancel on to the one it came from,

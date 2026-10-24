@@ -17,12 +17,12 @@ import java.util.concurrent.Executors
  *   `MDC.putCloseable`; in a real host a servlet filter or a coroutine's `MDCContext` has usually done that. The
  *   decorator copies the MDC when the call is decorated and installs the copy on its worker, so the adapter's
  *   "Looking up customer" line carries [REQUEST_ID] ([customer]).
- * - **The copy is taken at the call.** [customerAsync] removes the key as soon as `customerAsync` has returned, while
- *   the lookup may still be running - the worker keeps the copy it got. Keys put after the call do not reach it, and
- *   keys the call puts on the worker do not come back.
+ * - **The copy is taken at the call.** [customerAsync] removes the key as soon as
+ *   [DecoratorCustomerAdapter.customerAsync] has returned, while the lookup may still be running - the worker keeps
+ *   the copy it got. Keys put after the call do not reach it, and keys the call puts on the worker do not come back.
  * - **A second hop: carry it yourself.** The decorator copies the MDC of the thread that calls it. When that thread is
  *   one of the host's own - a fan-out executor, as in [customers] - its MDC is empty unless the host hands the
- *   caller's copy on. `CallerMdc.with` (`veredium-core`) does that, and restores the thread's own MDC afterwards.
+ *   caller's copy on. [CallerMdc.with] (`veredium-core`) does that, and restores the thread's own MDC afterwards.
  */
 @Component
 class CorrelatedCustomerLookup(
@@ -43,7 +43,7 @@ class CorrelatedCustomerLookup(
     /**
      * The customers with [ids], looked up in parallel, `null` for an unknown one, in the order of [ids]. Each lookup
      * calls the adapter from a fan-out thread, so the caller's MDC is copied by hand onto that thread first - without
-     * `CallerMdc.with` the decorator would copy the fan-out thread's empty MDC, and the lines would lose [requestId].
+     * [CallerMdc.with] the decorator would copy the fan-out thread's empty MDC, and the lines would lose [requestId].
      */
     fun customers(
         requestId: String,
