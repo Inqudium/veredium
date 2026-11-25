@@ -476,10 +476,20 @@ class LegatiumExchangeLoggingIntegrationTest {
             //   InterruptedIOException and clears the interrupt flag; without the Jetty transport setting it again,
             //   legatium would have no signal left and log the cancellation as an ERROR `failure`.
             //
-            // Given: a 400 ms budget against a body that takes 3 s to arrive
+            // Given: a 400 ms budget against a body that takes 3 s to arrive, on a warmed-up engine
             val body = """{"message":"${"x".repeat(2_000)}"}"""
             wireMock.stubFor(get(urlEqualTo("/things/drip")).willReturn(okJson(body).withChunkedDribbleDelay(20, 3_000)))
+            wireMock.stubFor(get(urlEqualTo("/things/warm")).willReturn(okJson("""{"message":"warm"}""")))
             hostContext("drip", timeLimiter = Duration.ofMillis(400), engine = engine).run { context ->
+                // A first exchange on the fresh engine, so its start, the connect and the class loading are behind
+                // the call the budget is measured on: on a loaded runner they alone ate the 400 ms before Reactor
+                // Netty's head arrived, and the event carried no status. Its outcome does not matter - it may
+                // itself exceed the budget; the engine is initialised either way. Its own event is awaited, so a
+                // late one of an abandoned warm-up cannot land in the capture below.
+                capturing(backend = "drip") { warmUp ->
+                    catchThrowable { context.client("drip").get(Greeting::class.java) { it.uri("/things/warm") } }
+                    warmUp.awaitEvents()
+                }
                 capturing(backend = "drip") { appender ->
                     // When
                     val failure = catchThrowable { context.client("drip").get(Greeting::class.java) { it.uri("/things/drip") } }
