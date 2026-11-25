@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # The core override on cyclonedx-maven-plugin 2.9.3 (pom.xml) stops
+    # loading from 13.4.0 on; lift this once a newer plugin accepts it.
+    ignore:
+      - dependency-name: org.cyclonedx:cyclonedx-core-java
+        versions: [">= 13.4.0"]
     groups:
       minor-and-patch:
         update-types:

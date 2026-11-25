@@ -516,12 +516,15 @@
                      validator (NonValidationKeyword), silencing the two
                      "Unknown keyword" warnings the plugin's bundled 9.x emitted
                      on every BOM validation. Remove the override once the plugin
-                     itself ships a >= 13 core. -->
+                     itself ships a >= 13 core. Pinned below 13.4: 13.4.0 and 13.5.0
+                     break the 2.9.3 mojo's injection (Guice NullInjectedIntoNonNullable
+                     for BaseCycloneDxMojo.modelConverter); dependabot.yml ignores
+                     them until a newer plugin works with them. -->
                 <dependencies>
                     <dependency>
                         <groupId>org.cyclonedx</groupId>
                         <artifactId>cyclonedx-core-java</artifactId>
-                        <version>13.5.0</version>
+                        <version>13.3.0</version>
                     </dependency>
                     <!-- The plugin used commons-io transitively via the 9.x core;
                          the 13.x core no longer carries it. -->
