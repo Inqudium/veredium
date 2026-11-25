@@ -51,7 +51,7 @@ class EngineSet<E : HttpEngine, T : EngineResources>(
     private val logger: Logger,
     create: (E) -> T,
 ) {
-    /** Every engine in use, in the order [engines] named them. */
+    /** Every engine in use, in the order `engines` named them. */
     val all: Map<E, T> = createAll(engines, create)
 
     private val lifecycle = ReentrantLock()

@@ -8,7 +8,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.1.1</version>
+        <version>4.1.2</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
 
@@ -133,15 +133,15 @@
         <wiremock.version>3.13.2</wiremock.version>
 
         <!-- Plugin Versions -->
-        <flatten-maven-plugin.version>1.8.0</flatten-maven-plugin.version>
+        <flatten-maven-plugin.version>1.9.0</flatten-maven-plugin.version>
         <ktlint-maven-plugin.version>3.7.1</ktlint-maven-plugin.version>
-        <dokka-maven-plugin.version>2.2.0</dokka-maven-plugin.version>
-        <jacoco-maven-plugin.version>0.8.15</jacoco-maven-plugin.version>
+        <dokka-maven-plugin.version>2.3.0</dokka-maven-plugin.version>
+        <jacoco-maven-plugin.version>0.8.16</jacoco-maven-plugin.version>
         <cyclonedx-maven-plugin.version>2.9.3</cyclonedx-maven-plugin.version>
         <maven-gpg-plugin.version>3.2.8</maven-gpg-plugin.version>
         <central-publishing-maven-plugin.version>0.12.0</central-publishing-maven-plugin.version>
         <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
-        <versions-maven-plugin.version>2.23.0</versions-maven-plugin.version>
+        <versions-maven-plugin.version>2.25.1</versions-maven-plugin.version>
 
         <!--
             Default for the late-bound @{argLine} reference in the Surefire
@@ -362,7 +362,7 @@
                 <plugin>
                     <groupId>org.codehaus.mojo</groupId>
                     <artifactId>build-helper-maven-plugin</artifactId>
-                    <version>3.6.2</version>
+                    <version>3.8.0</version>
                     <executions>
                         <execution>
                             <id>add-java-fuzz-test-sources</id>
@@ -516,12 +516,15 @@
                      validator (NonValidationKeyword), silencing the two
                      "Unknown keyword" warnings the plugin's bundled 9.x emitted
                      on every BOM validation. Remove the override once the plugin
-                     itself ships a >= 13 core. -->
+                     itself ships a >= 13 core. Pinned below 13.4: 13.4.0 and 13.5.0
+                     break the 2.9.3 mojo's injection (Guice NullInjectedIntoNonNullable
+                     for BaseCycloneDxMojo.modelConverter); dependabot.yml ignores
+                     them until a newer plugin works with them. -->
                 <dependencies>
                     <dependency>
                         <groupId>org.cyclonedx</groupId>
                         <artifactId>cyclonedx-core-java</artifactId>
-                        <version>13.2.0</version>
+                        <version>13.3.0</version>
                     </dependency>
                     <!-- The plugin used commons-io transitively via the 9.x core;
                          the 13.x core no longer carries it. -->
